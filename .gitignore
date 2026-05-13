@@ -1,0 +1,15 @@
+node_modules
+
+# Сборка Vite (восстанавливается `npm run build`; дубликат public + бандла)
+dist/
+
+# Логи IDE / отладки
+.cursor/*.log
+
+# Кэш TypeScript
+*.tsbuildinfo
+
+# Unity внутри web-репо: Tailwind по умолчанию сканирует всё кроме node_modules/.gitignore —
+# PackageCache и .tmp-* ломают Vite (ENOENT). Держи Unity снаружи или игнорируй целиком.
+Setup Guide In-Editor Tutorial/
+My project/

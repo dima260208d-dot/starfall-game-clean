@@ -1,0 +1,155 @@
+/* Tailwind: не сканировать чужие движки внутри репо (Unity Library → ENOENT на .tmp-*). */
+@import "tailwindcss";
+@source not "../Setup Guide In-Editor Tutorial";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --font-sans: var(--app-font-sans);
+  --radius-lg: var(--radius);
+}
+
+:root {
+  --background: 260 60% 3%;
+  --foreground: 0 0% 95%;
+  --border: 260 30% 15%;
+  --input: 260 30% 15%;
+  --ring: 280 70% 60%;
+  --primary: 280 70% 50%;
+  --primary-foreground: 0 0% 100%;
+  --radius: 0.5rem;
+  --app-font-sans: 'Segoe UI', Arial, sans-serif;
+
+  /* Global UI tokens for a cleaner modern style */
+  --ui-surface-1: rgba(9, 18, 43, 0.76);
+  --ui-surface-2: rgba(16, 30, 64, 0.82);
+  --ui-surface-3: rgba(255, 255, 255, 0.08);
+  --ui-text-main: rgba(255, 255, 255, 0.96);
+  --ui-text-muted: rgba(255, 255, 255, 0.66);
+  --ui-border-soft: rgba(255, 255, 255, 0.16);
+  --ui-border-strong: rgba(255, 255, 255, 0.28);
+  --ui-shadow-sm: 0 6px 18px rgba(0, 0, 0, 0.26);
+  --ui-shadow-md: 0 12px 30px rgba(0, 0, 0, 0.34);
+  --ui-shadow-lg: 0 18px 45px rgba(0, 0, 0, 0.42);
+  --ui-radius-sm: 10px;
+  --ui-radius-md: 14px;
+  --ui-radius-lg: 18px;
+  --ui-trans: 160ms ease;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #050020;
+  color: white;
+  font-family: 'Segoe UI', Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#root {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+}
+
+canvas {
+  image-rendering: auto;
+}
+
+button {
+  font-family: inherit;
+  transition: transform var(--ui-trans), box-shadow var(--ui-trans), filter var(--ui-trans), background-color var(--ui-trans), border-color var(--ui-trans);
+}
+
+button:hover:not(:disabled) {
+  filter: brightness(1.03);
+}
+
+button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+button:disabled {
+  opacity: 0.62;
+  cursor: not-allowed;
+}
+
+input,
+textarea,
+select {
+  color: var(--ui-text-main);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--ui-text-muted);
+}
+
+/* Shared utility styles for hand-crafted pages */
+.ui-panel {
+  background: linear-gradient(180deg, var(--ui-surface-2), var(--ui-surface-1));
+  border: 1px solid var(--ui-border-soft);
+  border-radius: var(--ui-radius-md);
+  box-shadow: var(--ui-shadow-sm);
+  backdrop-filter: blur(10px);
+}
+
+.ui-card {
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.1), rgba(9, 18, 43, 0.75));
+  border: 1px solid var(--ui-border-soft);
+  border-radius: var(--ui-radius-md);
+  box-shadow: var(--ui-shadow-sm);
+}
+
+.ui-title {
+  color: var(--ui-text-main);
+  font-weight: 800;
+  letter-spacing: 0.03em;
+}
+
+.ui-subtitle {
+  color: var(--ui-text-muted);
+}
+
+.hover-elevate:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: var(--ui-shadow-md);
+}
+
+.active-elevate-2:active:not(:disabled) {
+  transform: translateY(1px) scale(0.995);
+  box-shadow: var(--ui-shadow-sm);
+}
+
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(255,255,255,0.03);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.15);
+  border-radius: 2px;
+}
+
+@keyframes pulse {
+  0%, 100% { transform: scale(1); }
+  50%       { transform: scale(1.06); }
+}
