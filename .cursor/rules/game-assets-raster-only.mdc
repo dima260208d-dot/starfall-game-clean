@@ -1,0 +1,15 @@
+---
+description: Game UI assets must be raster images (PNG/WebP/JPG), never SVG
+alwaysApply: true
+---
+
+# Game UI assets — raster only
+
+When creating or replacing **game UI icons, HUD sprites, kill-feed art, shop icons, or any in-game visual asset**:
+
+- Use **real raster images**: PNG (preferred with transparency), WebP, or JPG.
+- **Never** use SVG for in-game UI art (no `.svg` in `public/` for HUD/icons).
+- Use `GenerateImage` or existing PNG assets; save under `public/` (e.g. `public/ui/`).
+- Reference in React with `<img src="...png">`, not inline SVG or `.svg` URLs.
+
+SVG is only acceptable for favicons or external docs — not battle HUD, kill feed, rewards, or shop visuals.

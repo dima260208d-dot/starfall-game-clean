@@ -1,0 +1,12 @@
+﻿node_modules/
+dist/
+.git/
+.cursor/*.log
+*.tsbuildinfo
+public/pins/
+public/models/
+**/*.glb
+attached_assets/
+Setup Guide In-Editor Tutorial/
+My project/
+zipFile.zip
