@@ -1,30 +1,42 @@
+import { translate as tr } from "../i18n";
 import { Brawler } from "../entities/Brawler";
 import { Bot } from "../entities/Bot";
-import { BRAWLERS, getBrawlerById, pickBotStats } from "../entities/BrawlerData";
+import { BRAWLERS, getBrawlerById, isMeleeBrawler, pickBotStats } from "../entities/BrawlerData";
 import { Camera } from "../game/Camera";
 import { InputHandler } from "../game/InputHandler";
-import { GameMap, collidesWithWalls, createTileGridMap, renderMap, renderTileGrid } from "../game/MapRenderer";
-import { TileGrid, TileType, setTile, TILE_CELL_SIZE } from "../game/TileMap";
-import { Projectile, renderProjectiles, updateProjectiles } from "../entities/Projectile";
+import { GameMap, collidesWithWalls, createTileGridMap } from "../game/MapRenderer";
+import { TileGrid, TileType, setTile, TILE_CELL_SIZE, getTile } from "../game/TileMap";
+import { Projectile, renderProjectiles, updateProjectiles, projectileSuperChargeOpts } from "../entities/Projectile";
 import { updateDamageNumbers, renderDamageNumbers, clearDamageNumbers } from "../utils/damageNumbers";
 import { updateEffects, renderEffects, clearEffects } from "../utils/effects";
 import { angleTo, autoAimAngle, autoAimTarget, distance, randomInt } from "../utils/helpers";
-import { getCurrentProfile, getCurrentUsername, recordGameResult } from "../utils/localStorageAPI";
+import { resolvePlayerAttackAngle, tickHeldPlayerAttack, wrapCallistaAttackAim, wrapCallistaSuperAim } from "../utils/battleAttackAim";
+import { getCurrentProfile, getCurrentUsername, applyProfilePetToBrawler } from "../utils/localStorageAPI";
+import { applyPartySharedBattleResult, createPartyAllyBot, getPartyAllyEntries } from "../utils/social/partyBattle";
 import { getBrawlerStars } from "../utils/constellations";
-import { getPetById } from "../entities/PetData";
-import { getMatchStats, resetMatchStats } from "../utils/matchStats";
+import { getMatchStats, resetMatchStats, participantFromBrawler } from "../utils/matchStats";
 import { getStarBallCanvas } from "../utils/powerModelCache";
+import { TALL_TILE_TYPES } from "../utils/tileModelCache";
 import * as THREE from "three";
 import {
   integrateBallRolling,
   isRollingBallFrameBlank,
   isRollingStarBallReady,
+  loadRollingStarBallModel,
   renderRollingStarBall,
 } from "../game/soccerBallRenderer";
 import { applyZafkielStarEffectsOnHit } from "../utils/zafkielStars";
+import { applyVerdelettaOnHit } from "../utils/verdelettaStars";
+import { applyLuminaOnHit } from "../utils/luminaStars";
+import { applyMirabelOnHit } from "../utils/mirabelMechanics";
+import { clearVerdelettaShadows } from "../utils/verdelettaShadows";
+import { handleVerdelettaShadowProjectileHit } from "../utils/verdelettaShadows";
+import { botAIContext } from "../ai/aiBotObjectives";
+import { applyStarStrikeBotTactics } from "../ai/aiModeTactics";
+import { isEnemyVisibleToBot, pickNearestVisibleEnemy } from "../ai/aiVisibility";
 import { fillBattleCanvasBg, renderBattleScreenFX } from "../game/battleScreenFX";
+import { drawTallTilesYsortedWithBrawlers } from "../game/tileGridBrawlerDepthPass";
 import { isDevBattleWorldFrozen } from "../game/battleDevPause";
-import { StarStrikeVisualLayer } from "./starstrikeVisual/StarStrikeVisualLayer";
 
 const GAME_ZOOM = 1.4;
 const CAM_W = Math.round(1200 / GAME_ZOOM);
@@ -75,13 +87,13 @@ export class ClashStarStrike {
   private ballCarrierTrackId: string | null = null;
   private ballCarrierPrevX = 0;
   private ballCarrierPrevY = 0;
+  /** Blocks a normal shot on the same frame as a ball kick (LMB fires twice). */
+  private attackBlockedFrame = -1;
   private readonly ballDropTeleportDistance = 170;
   /** 3D rolling orientation for star_ball.glb render */
   private ballOrientation = new THREE.Quaternion();
   /** Fallback 2D spin when WebGL rolling mesh is not ready */
   private ballSpin2d = 0;
-  /** Процедурный ландшафт + декор (Three.js), не влияет на физику. */
-  private visualLayer: StarStrikeVisualLayer | null = null;
   private readonly goalHalf = 170;
   private readonly goalDepth = 45;
   private readonly center = { x: 1800, y: 1100 };
@@ -102,16 +114,23 @@ export class ClashStarStrike {
     const playerStats = getBrawlerById(playerBrawlerId) || BRAWLERS[0];
     this.player = new Brawler(playerStats, playerLevel, this.blueSpawns[0].x, this.blueSpawns[0].y, "blue", true);
     this.player.constellationStars = getBrawlerStars(getCurrentProfile(), this.player.stats.id);
-    this.player.setIdentity(getCurrentUsername() ?? "Игрок", false);
-    this.player.setEquippedPet(getPetById(getCurrentProfile()?.equippedPetId) ?? null);
+    this.player.setIdentity(getCurrentUsername() ?? tr("battle.player"), false);
+    applyProfilePetToBrawler(this.player);
     resetMatchStats();
 
     const teamSize = this.format === "5v5" ? 5 : 3;
     const totalBots = teamSize * 2 - 1;
     const botPool = pickBotStats(playerBrawlerId, totalBots);
     let idx = 0;
+    const partyAllies = getPartyAllyEntries();
     for (let i = 1; i < teamSize; i++) {
-      this.allies.push(new Bot(botPool[idx], randomInt(1, 5), this.blueSpawns[i].x, this.blueSpawns[i].y, "blue"));
+      const entry = partyAllies[i - 1];
+      const spawn = this.blueSpawns[i];
+      if (entry) {
+        this.allies.push(createPartyAllyBot(entry, spawn.x, spawn.y, "blue"));
+      } else {
+        this.allies.push(new Bot(botPool[idx], randomInt(1, 5), spawn.x, spawn.y, "blue"));
+      }
       idx++;
     }
     for (let i = 0; i < teamSize; i++) {
@@ -133,12 +152,8 @@ export class ClashStarStrike {
     this.camera = new Camera(CAM_W, CAM_H, this.map.width, this.map.height);
     this.input = new InputHandler(canvas, onAttack, onSuper);
 
-    try {
-      this.visualLayer = new StarStrikeVisualLayer(canvas, this.map.width, this.map.height);
-    } catch (e) {
-      console.warn("[ClashStarStrike] visual layer disabled", e);
-      this.visualLayer = null;
-    }
+    const base = String((import.meta as any).env?.BASE_URL ?? "/").replace(/\/$/, "");
+    void loadRollingStarBallModel(base);
   }
 
   /** For React HUD overlay when canvas is clipped by CSS (`object-fit: cover`). */
@@ -239,18 +254,41 @@ export class ClashStarStrike {
 
   handleAttack(): void {
     if (!this.player.alive) return;
+    if (this.frame <= this.attackBlockedFrame) return;
+
     if (this.ball.ownerId === this.player.id) {
+      if (!this.player.canAttack()) return;
+      const angle = angleTo(
+        this.player.x,
+        this.player.y,
+        this.input.state.mouseWorldX,
+        this.input.state.mouseWorldY,
+      );
+      this.player.angle = angle;
+      this.player.useAttackCharge();
       this.kickBall(this.player, false);
+      this.attackBlockedFrame = this.frame;
       return;
     }
+
     if (!this.player.canAttack()) return;
-    const mouseAngle = angleTo(this.player.x, this.player.y, this.input.state.mouseWorldX, this.input.state.mouseWorldY);
-    const angle = this.input.attackJoystick.active ? mouseAngle : autoAimAngle(this.player, this.enemies, mouseAngle);
-    this.player.angle = angle;
-    const isMelee = ["goro", "ronin", "taro"].includes(this.player.stats.id);
+    const cam = { x: this.camera.x, y: this.camera.y, w: CAM_W, h: CAM_H, zoom: GAME_ZOOM };
+    const angle = resolvePlayerAttackAngle(
+      this.player,
+      this.enemies,
+      [this.player, ...this.allies, ...this.enemies],
+      this.input,
+      cam,
+      this.map.crates,
+    );
     const all = [this.player, ...this.allies, ...this.enemies];
-    if (isMelee) this.player.meleeAttack(all);
-    else this.projectiles.push(...this.player.shoot(angle));
+    const callistaAim = wrapCallistaAttackAim(
+      this.player, angle, this.enemies, all, this.input, cam, this.map.crates,
+    );
+    this.player.angle = callistaAim.angle;
+    const isMelee = isMeleeBrawler(this.player.stats.id);
+    if (isMelee) this.player.meleeAttack(all, { crates: this.map.crates });
+    else this.projectiles.push(...this.player.shoot(callistaAim.angle, all, callistaAim.aimX, callistaAim.aimY, { crates: this.map.crates }));
   }
 
   handleSuper(): void {
@@ -262,15 +300,19 @@ export class ClashStarStrike {
     }
     if (!this.player.canUseSuper()) return;
     const all = [this.player, ...this.allies, ...this.enemies];
-    const autoTarget = this.input.superJoystick.active
-      ? null
-      : autoAimTarget(this.player, this.enemies, 1.0);
-    const aimX = autoTarget ? autoTarget.x : this.input.state.mouseWorldX;
-    const aimY = autoTarget ? autoTarget.y : this.input.state.mouseWorldY;
+    const cam = { x: this.camera.x, y: this.camera.y, w: CAM_W, h: CAM_H, zoom: GAME_ZOOM };
+    const callistaSuper = wrapCallistaSuperAim(
+      this.player, this.enemies, all, this.input, cam, this.map.crates,
+    );
+    const autoTarget = callistaSuper ? null : (
+      this.input.superJoystick.active ? null : autoAimTarget(this.player, this.enemies, 1.0)
+    );
+    const aimX = callistaSuper ? callistaSuper.x : (autoTarget ? autoTarget.x : this.input.state.mouseWorldX);
+    const aimY = callistaSuper ? callistaSuper.y : (autoTarget ? autoTarget.y : this.input.state.mouseWorldY);
     const mouseAngle = angleTo(this.player.x, this.player.y, aimX, aimY);
-    this.player.angle = this.input.superJoystick.active
-      ? mouseAngle
-      : autoAimAngle(this.player, this.enemies, mouseAngle, 1.0);
+    this.player.angle = callistaSuper
+      ? callistaSuper.angle
+      : (this.input.superJoystick.active ? mouseAngle : autoAimAngle(this.player, this.enemies, mouseAngle, 1.0));
     this.player.activateSuper(all, this.map, this.projectiles, aimX, aimY);
   }
 
@@ -330,7 +372,18 @@ export class ClashStarStrike {
       for (const bot of [...this.allies, ...this.enemies]) {
         if (bot.alive) {
           this.updateBotBehavior(bot, sim, all);
-          bot.updateAI(sim, all, this.map, this.projectiles);
+          const ballLoose = !this.ball.ownerId;
+          const distToBall = distance(bot.x, bot.y, this.ball.x, this.ball.y);
+          const ballOwner = this.ball.ownerId
+            ? all.find(b => b.id === this.ball.ownerId) ?? null
+            : null;
+          bot.updateAI(sim, all, this.map, this.projectiles, this.map.tileGrid ?? undefined, botAIContext(this.map, "starstrike", {
+            ballLoose,
+            distToBall,
+            ballOwnerId: this.ball.ownerId,
+            ballOwnerIsEnemy: ballOwner != null && ballOwner.team !== bot.team,
+            mapCenter: this.center,
+          }));
           bot.update(sim, this.map);
         }
       }
@@ -338,12 +391,14 @@ export class ClashStarStrike {
 
     this.camera.follow(this.player.x, this.player.y);
     this.input.updateWorldMouse(this.camera.x, this.camera.y, this.player.x, this.player.y, GAME_ZOOM);
+    tickHeldPlayerAttack(this.input, this.player, () => this.handleAttack());
     this.player.angle = angleTo(this.player.x, this.player.y, this.input.state.mouseWorldX, this.input.state.mouseWorldY);
 
     this.updateBotShootTimers(sim);
     this.updateBall(dt, sim, all);
 
-    updateProjectiles(this.projectiles, sim, this.map);
+    updateEffects(sim, all, this.projectiles, this.map.tileGrid ?? undefined, { crates: this.map.crates });
+    updateProjectiles(this.projectiles, sim, this.map, undefined, { crates: this.map.crates });
     this.handleProjectileHits(all, fr);
     this.projectiles = this.projectiles.filter(p => p.active);
 
@@ -363,54 +418,79 @@ export class ClashStarStrike {
     }
 
     updateDamageNumbers(sim);
-    updateEffects(sim, all);
   }
 
-  private updateBotBehavior(bot: Bot, dt: number, all: Brawler[]): void {
-    const enemyGoal = bot.team === "blue" ? { x: this.map.width - 90, y: this.center.y } : { x: 90, y: this.center.y };
-    const enemyCarrier = this.ball.ownerId
-      ? all.find(b => b.id === this.ball.ownerId && b.team !== bot.team && b.alive) || null
-      : null;
-    if (this.ball.ownerId === bot.id) {
-      bot.forcedTarget = enemyGoal;
-      const d = distance(bot.x, bot.y, enemyGoal.x, enemyGoal.y);
-      if (d < 620 || Math.random() < 0.004) {
-        const angle = angleTo(bot.x, bot.y, enemyGoal.x, enemyGoal.y);
-        this.ball.ownerId = null;
-        this.ball.x = bot.x + Math.cos(angle) * (bot.radius + this.ball.radius + 2);
-        this.ball.y = bot.y + Math.sin(angle) * (bot.radius + this.ball.radius + 2);
-        this.ball.vx = Math.cos(angle) * (460 + Math.random() * 150);
-        this.ball.vy = Math.sin(angle) * (460 + Math.random() * 150);
-      }
-      return;
+  private kickBallFromBot(kicker: Brawler, angle: number, speed: number): void {
+    if (this.ball.ownerId !== kicker.id) return;
+    this.ball.ownerId = null;
+    this.ball.x = kicker.x + Math.cos(angle) * (kicker.radius + this.ball.radius + 2);
+    this.ball.y = kicker.y + Math.sin(angle) * (kicker.radius + this.ball.radius + 2);
+    this.ball.vx = Math.cos(angle) * speed;
+    this.ball.vy = Math.sin(angle) * speed;
+    this.ball.boostTrailTimer = speed > 600 ? 0.6 : 0;
+    this.ball.superKickActive = speed > 600;
+    this.ballLastTouchTeam = kicker.team as Team;
+  }
+
+  private updateBotBehavior(bot: Bot, sim: number, all: Brawler[]): void {
+    const foes = all.filter(b => b.alive && b.team !== bot.team);
+    const { enemy: visibleFoe, nearestDist } = pickNearestVisibleEnemy(bot, foes, all);
+
+    applyStarStrikeBotTactics(bot, {
+      ball: this.ball,
+      map: this.map,
+      center: this.center,
+      playerId: this.player.id,
+      all: all.map(b => ({
+        id: b.id,
+        x: b.x,
+        y: b.y,
+        team: b.team,
+        alive: b.alive,
+        stats: b.stats,
+      })),
+      nearestEnemyDist: nearestDist,
+      kickBall: (angle, speed) => this.kickBallFromBot(bot, angle, speed),
+    });
+
+    if (visibleFoe && nearestDist < bot.stats.attackRange * 0.98
+      && !(!this.ball.ownerId && distance(bot.x, bot.y, this.ball.x, this.ball.y) < 90)) {
+      this.tryBotAttack(bot, visibleFoe, all);
     }
-    if (enemyCarrier) {
-      bot.forcedTarget = { x: enemyCarrier.x, y: enemyCarrier.y };
-      this.tryBotAttack(bot, enemyCarrier, all);
-      return;
+    this.nudgeBotTowardLooseBall(bot, sim);
+  }
+
+  /** Pull bots onto the ball when they are close but steering failed. */
+  private nudgeBotTowardLooseBall(bot: Bot, sim: number): void {
+    if (this.ball.ownerId || !bot.alive) return;
+    const pickR = bot.radius + this.ball.radius;
+    const d = distance(bot.x, bot.y, this.ball.x, this.ball.y);
+    if (d > pickR + 55) return;
+    const ang = angleTo(bot.x, bot.y, this.ball.x, this.ball.y);
+    const step = Math.min(d - pickR + 3, 85 * sim);
+    if (step > 0) {
+      bot.x += Math.cos(ang) * step;
+      bot.y += Math.sin(ang) * step;
     }
-    if (!this.ball.ownerId) {
-      bot.forcedTarget = { x: this.ball.x, y: this.ball.y };
-      const enemy = all
-        .filter(b => b.alive && b.team !== bot.team)
-        .sort((a, b) => distance(bot.x, bot.y, a.x, a.y) - distance(bot.x, bot.y, b.x, b.y))[0];
-      if (enemy) this.tryBotAttack(bot, enemy, all);
-    } else {
-      const laneY = this.center.y + randomInt(-170, 170);
-      const holdX = bot.team === "blue" ? this.map.width * 0.55 : this.map.width * 0.45;
-      bot.forcedTarget = { x: holdX, y: laneY };
+    if (distance(bot.x, bot.y, this.ball.x, this.ball.y) < pickR + 2) {
+      this.ball.ownerId = bot.id;
+      this.ballLastTouchTeam = bot.team as Team;
+      this.ball.vx = 0;
+      this.ball.vy = 0;
+      this.ball.superKickActive = false;
     }
   }
 
   private tryBotAttack(bot: Bot, target: Brawler, all: Brawler[]): void {
     if (!target.alive) return;
+    if (!isEnemyVisibleToBot(bot, target, all)) return;
     const d = distance(bot.x, bot.y, target.x, target.y);
     if ((this.botShootTimers.get(bot.id) || 0) > 0) return;
     if (d > bot.stats.attackRange * 0.95 || !bot.canAttack()) return;
-    const isMelee = ["goro", "ronin", "taro"].includes(bot.stats.id);
+    const isMelee = isMeleeBrawler(bot.stats.id);
     bot.angle = angleTo(bot.x, bot.y, target.x, target.y);
-    if (isMelee) bot.meleeAttack(all);
-    else this.projectiles.push(...bot.shoot(bot.angle));
+    if (isMelee) bot.meleeAttack(all, { crates: this.map.crates });
+    else this.projectiles.push(...bot.shoot(bot.angle, all, undefined, undefined, { crates: this.map.crates }));
     this.botShootTimers.set(bot.id, 0.55 + Math.random() * 0.45);
   }
 
@@ -614,6 +694,7 @@ export class ClashStarStrike {
   }
 
   private resetAfterGoal(): void {
+    clearVerdelettaShadows();
     this.ball.ownerId = null;
     this.ballLastTouchTeam = null;
     this.ball.superKickActive = false;
@@ -624,7 +705,7 @@ export class ClashStarStrike {
     this.ball.boostTrailTimer = 0;
     this.respawnTimers.clear();
     const allBlue = [this.player, ...this.allies];
-    const afterGoalOpts = { resetSuper: true, fullAmmo: true } as const;
+    const afterGoalOpts = { resetSuper: false, fullAmmo: true } as const;
     allBlue.forEach((b, i) => b.respawn(this.blueSpawns[Math.min(i, this.blueSpawns.length - 1)].x, this.blueSpawns[Math.min(i, this.blueSpawns.length - 1)].y, afterGoalOpts));
     this.enemies.forEach((b, i) => b.respawn(this.redSpawns[Math.min(i, this.redSpawns.length - 1)].x, this.redSpawns[Math.min(i, this.redSpawns.length - 1)].y, afterGoalOpts));
   }
@@ -635,7 +716,7 @@ export class ClashStarStrike {
     this.won = playerWon;
     if (this.resultRecorded) return;
     const ms = getMatchStats();
-    recordGameResult({ won: playerWon, mode: "starstrike", brawlerId: this.player.stats.id, place: playerWon ? 1 : 2, ...ms });
+    applyPartySharedBattleResult({ won: playerWon, mode: "starstrike", brawlerId: this.player.stats.id, place: playerWon ? 1 : 2, starStrikeFormat: this.format, ...ms });
     this.resultRecorded = true;
   }
 
@@ -647,7 +728,7 @@ export class ClashStarStrike {
         if (!b.alive || b.id === p.ownerId || p.ownerTeam === b.team || p.hitIds.has(b.id)) continue;
         if (distance(p.x, p.y, b.x, b.y) < p.radius + b.radius) {
           const attacker = all.find(x => x.id === p.ownerId) || null;
-          b.takeDamage(p.damage, attacker);
+          b.takeDamage(p.damage, attacker, projectileSuperChargeOpts(p, attacker));
           if (p.slow) b.addStatus("slow", 1.5, 0.4);
           if (p.poison) b.addStatus("poison", 3, 100);
           if (p.stunDuration) b.addStatus("stun", p.stunDuration, 0);
@@ -658,6 +739,10 @@ export class ClashStarStrike {
             b.y = Math.max(b.radius, Math.min(this.map.height - b.radius, pastPos.y));
           }
           applyZafkielStarEffectsOnHit(attacker as any, b as any, p, { width: this.map.width, height: this.map.height });
+          applyVerdelettaOnHit(attacker as any, b as any, p, { width: this.map.width, height: this.map.height });
+          applyLuminaOnHit(attacker as any, b as any, p, all);
+          applyMirabelOnHit(attacker as any, b as any, p, all);
+          handleVerdelettaShadowProjectileHit(p, b, all, this.map.width, this.map.height);
           p.hitIds.add(b.id);
           if (!p.piercing) { p.active = false; break; }
         }
@@ -670,49 +755,27 @@ export class ClashStarStrike {
     ctx.save();
     try {
       ctx.scale(GAME_ZOOM, GAME_ZOOM);
-      renderMap(ctx, this.map, this.camera.x, this.camera.y, CAM_W, CAM_H, this.frame);
-      if (this.map.tileGrid) {
-        renderTileGrid(ctx, this.map.tileGrid, this.camera.x, this.camera.y, CAM_W, CAM_H, this.player.x, this.player.y, false);
-      }
-      this.renderGoalFrames(ctx);
-
       const all = [this.player, ...this.allies, ...this.enemies];
       const friends = [this.player, ...this.allies].filter(b => b.alive).map(b => ({ x: b.x, y: b.y }));
-
-      // Depth sort by foot Y. Carried ball: iso rule — if ball is lower on screen (larger y, toward camera), draw it after the carrier; else draw ball first so it sits behind the torso (e.g. walking up).
-      type DepthItem = { kind: "freeBall" } | { kind: "brawler"; b: Brawler };
-      const depthItems: DepthItem[] = [];
-      if (!this.ball.ownerId) depthItems.push({ kind: "freeBall" });
-      for (const b of all) depthItems.push({ kind: "brawler", b });
-      depthItems.sort((a, b) => {
-        const ya = a.kind === "freeBall" ? this.ball.y : a.b.y;
-        const yb = b.kind === "freeBall" ? this.ball.y : b.b.y;
-        return ya - yb;
-      });
-      for (const item of depthItems) {
-        if (item.kind === "freeBall") {
-          this.renderBall(ctx);
-          continue;
-        }
-        const carry = this.ball.ownerId === item.b.id && item.b.alive;
-        if (carry) {
-          if (this.ball.y > item.b.y) {
-            item.b.render(ctx, this.camera.x, this.camera.y, this.spriteLoaded, this.player.team, friends);
-            this.renderBall(ctx);
-          } else {
-            this.renderBall(ctx);
-            item.b.render(ctx, this.camera.x, this.camera.y, this.spriteLoaded, this.player.team, friends);
-          }
-        } else {
-          item.b.render(ctx, this.camera.x, this.camera.y, this.spriteLoaded, this.player.team, friends);
-        }
+      const grid = this.map.tileGrid;
+      this.renderGoalFrames(ctx);
+      this.renderBall(ctx);
+      if (grid) {
+        drawTallTilesYsortedWithBrawlers(
+          ctx,
+          grid,
+          this.camera.x,
+          this.camera.y,
+          CAM_W,
+          CAM_H,
+          this.player.x,
+          this.player.y,
+          all,
+          { spriteLoaded: this.spriteLoaded, viewerTeam: this.player.team, friendlies: friends },
+        );
       }
-
       this.renderStarAndBuffOverlays(ctx, all);
       renderProjectiles(ctx, this.projectiles, this.camera.x, this.camera.y, this.frame);
-      if (this.map.tileGrid) {
-        renderTileGrid(ctx, this.map.tileGrid, this.camera.x, this.camera.y, CAM_W, CAM_H, this.player.x, this.player.y, true);
-      }
       renderEffects(ctx, this.camera.x, this.camera.y, this.frame);
       renderDamageNumbers(ctx, this.camera.x, this.camera.y);
     } finally {
@@ -724,7 +787,138 @@ export class ClashStarStrike {
     this.renderOffscreenBallIndicator(ctx);
     renderBattleScreenFX(ctx, 1200, 800, this.frame, this.player);
     this.renderHUD(ctx);
-    this.visualLayer?.render(this.camera.x, this.camera.y);
+  }
+
+  /** 2D без тайлов: Y-sort мяча и бойцов (перенос — мяч перед/за ногами). */
+  private renderBallWithBrawlers2D(
+    ctx: CanvasRenderingContext2D,
+    all: Brawler[],
+    friends: { x: number; y: number }[],
+  ): void {
+    type DepthItem = { kind: "freeBall" } | { kind: "brawler"; b: Brawler };
+    const depthItems: DepthItem[] = [];
+    if (!this.ball.ownerId) depthItems.push({ kind: "freeBall" });
+    for (const b of all) depthItems.push({ kind: "brawler", b });
+    depthItems.sort((a, b) => {
+      const ya = a.kind === "freeBall" ? this.ball.y : a.b.y;
+      const yb = b.kind === "freeBall" ? this.ball.y : b.b.y;
+      return ya - yb;
+    });
+    for (const item of depthItems) {
+      if (item.kind === "freeBall") {
+        this.renderBall(ctx);
+        continue;
+      }
+      const carry = this.ball.ownerId === item.b.id && item.b.alive;
+      if (carry) {
+        if (this.ball.y > item.b.y) {
+          item.b.render(ctx, this.camera.x, this.camera.y, this.spriteLoaded, this.player.team, friends);
+          this.renderBall(ctx);
+        } else {
+          this.renderBall(ctx);
+          item.b.render(ctx, this.camera.x, this.camera.y, this.spriteLoaded, this.player.team, friends);
+        }
+      } else {
+        item.b.render(ctx, this.camera.x, this.camera.y, this.spriteLoaded, this.player.team, friends);
+      }
+    }
+  }
+
+  /** 2D с тайлами: Y-sort мяча, высоких стен и бойцов. */
+  private renderBallWithTiles2D(
+    ctx: CanvasRenderingContext2D,
+    grid: TileGrid,
+    all: Brawler[],
+    friends: { x: number; y: number }[],
+  ): void {
+    const C = grid.cellSize;
+    type OpKind = "tile" | "freeBall" | "draw";
+    type Op = { sortY: number; kind: OpKind; tx?: number; ty?: number; draw?: () => void };
+    const ops: Op[] = [];
+    const EDGE_PAD = 0;
+    const startTX = Math.max(-EDGE_PAD, Math.floor(this.camera.x / C) - EDGE_PAD);
+    const endTX = Math.min(grid.width - 1 + EDGE_PAD, Math.ceil((this.camera.x + CAM_W) / C) + EDGE_PAD);
+    const startTY = Math.max(-EDGE_PAD, Math.floor(this.camera.y / C) - 4 - EDGE_PAD);
+    const endTY = Math.min(grid.height - 1 + EDGE_PAD, Math.ceil((this.camera.y + CAM_H) / C) + EDGE_PAD);
+    for (let tx = startTX; tx <= endTX; tx++) {
+      for (let ty = startTY; ty <= endTY; ty++) {
+        const t = getTile(grid, tx, ty);
+        if (TALL_TILE_TYPES.has(t)) {
+          ops.push({ kind: "tile", sortY: tallTileDepthSortY(ty, C), tx, ty });
+        }
+      }
+    }
+    if (!this.ball.ownerId) {
+      ops.push({ kind: "freeBall", sortY: this.ball.y });
+    }
+    for (const b of all) {
+      if (!b.alive) continue;
+      const carry = this.ball.ownerId === b.id;
+      if (carry) {
+        if (this.ball.y > b.y) {
+          ops.push({
+            kind: "draw",
+            sortY: b.y,
+            draw: () => b.render(ctx, this.camera.x, this.camera.y, this.spriteLoaded, this.player.team, friends, undefined, "world"),
+          });
+          ops.push({ kind: "draw", sortY: this.ball.y, draw: () => this.renderBall(ctx) });
+        } else {
+          ops.push({ kind: "draw", sortY: this.ball.y, draw: () => this.renderBall(ctx) });
+          ops.push({
+            kind: "draw",
+            sortY: b.y,
+            draw: () => b.render(ctx, this.camera.x, this.camera.y, this.spriteLoaded, this.player.team, friends, undefined, "world"),
+          });
+        }
+      } else {
+        ops.push({
+          kind: "draw",
+          sortY: b.y,
+          draw: () => b.render(ctx, this.camera.x, this.camera.y, this.spriteLoaded, this.player.team, friends, undefined, "world"),
+        });
+      }
+    }
+
+    const kindRank = (k: OpKind) => (k === "tile" ? 0 : k === "freeBall" ? 1 : 2);
+    ops.sort((a, b) => {
+      if (a.sortY !== b.sortY) return a.sortY - b.sortY;
+      return kindRank(a.kind) - kindRank(b.kind);
+    });
+
+    for (const op of ops) {
+      if (op.kind === "tile" && op.tx !== undefined && op.ty !== undefined) {
+        paintTileGridPass2Cell(
+          ctx,
+          grid,
+          op.tx,
+          op.ty,
+          this.camera.x,
+          this.camera.y,
+          this.player.x,
+          this.player.y,
+          false,
+          "tallNonBushOnly",
+        );
+      } else if (op.kind === "freeBall") {
+        this.renderBall(ctx);
+      } else if (op.kind === "draw" && op.draw) {
+        op.draw();
+      }
+    }
+
+    const hudOrder = all.filter(b => b.alive).sort((a, b) => a.y - b.y);
+    for (const b of hudOrder) {
+      b.render(
+        ctx,
+        this.camera.x,
+        this.camera.y,
+        this.spriteLoaded,
+        this.player.team,
+        friends,
+        b.y - this.camera.y,
+        "hud",
+      );
+    }
   }
 
   private renderGoalFrames(ctx: CanvasRenderingContext2D): void {
@@ -766,11 +960,11 @@ export class ClashStarStrike {
     ctx.shadowBlur = 26;
     ctx.fillStyle = "#FFD740";
     ctx.font = "bold 96px Segoe UI";
-    ctx.fillText("ГОООЛ!", 600, 350);
+    ctx.fillText(tr("battle.goal"), 600, 350);
     ctx.shadowBlur = 10;
     ctx.fillStyle = team === "blue" ? "#80D8FF" : "#FF8A80";
     ctx.font = "bold 30px Segoe UI";
-    ctx.fillText(team === "blue" ? "СИНЯЯ КОМАНДА ЗАБИЛА" : "КРАСНАЯ КОМАНДА ЗАБИЛА", 600, 415);
+    ctx.fillText(team === "blue" ? tr("battle.teamScoredBlue") : tr("battle.teamScoredRed"), 600, 415);
     ctx.restore();
   }
 
@@ -897,7 +1091,7 @@ export class ClashStarStrike {
     const t = this.overtime ? this.suddenDeathTimer : Math.max(0, this.matchTimer);
     const mm = Math.floor(t / 60);
     const ss = Math.floor(t % 60).toString().padStart(2, "0");
-    ctx.fillText(this.overtime ? `ЗОЛОТОЙ ГОЛ • ${mm}:${ss}` : `${mm}:${ss}`, x + 180, 19);
+    ctx.fillText(this.overtime ? tr("battle.goldenGoal", { time: `${mm}:${ss}` }) : `${mm}:${ss}`, x + 180, 19);
     ctx.restore();
   }
 
@@ -934,15 +1128,13 @@ export class ClashStarStrike {
     const fakeTrophies = (name: string) => 300 + ((name.charCodeAt(0) * 37 + (name.charCodeAt(1) || 5) * 13) % 1700);
     const profile = getCurrentProfile();
     return [
-      { brawlerId: this.player.stats.id, displayName: this.player.displayName || "Игрок", team: "blue", isPlayer: true, level: this.player.level, trophies: profile?.trophies ?? 0 },
-      ...this.allies.map(b => ({ brawlerId: b.stats.id, displayName: b.displayName || "Бот", team: "blue", isPlayer: false, level: b.level, trophies: fakeTrophies(b.displayName || "B") })),
-      ...this.enemies.map(b => ({ brawlerId: b.stats.id, displayName: b.displayName || "Бот", team: "red", isPlayer: false, level: b.level, trophies: fakeTrophies(b.displayName || "B") })),
+      participantFromBrawler(this.player, { team: "blue", isPlayer: true, trophies: profile?.trophies ?? 0, defaultName: tr("battle.player") }),
+      ...this.allies.map(b => participantFromBrawler(b, { team: "blue", isPlayer: false, trophies: fakeTrophies(b.displayName || "B"), defaultName: tr("battle.bot") })),
+      ...this.enemies.map(b => participantFromBrawler(b, { team: "red", isPlayer: false, trophies: fakeTrophies(b.displayName || "B"), defaultName: tr("battle.bot") })),
     ];
   }
 
   destroy(): void {
-    this.visualLayer?.dispose();
-    this.visualLayer = null;
     this.input.destroy();
     clearDamageNumbers();
     clearEffects();

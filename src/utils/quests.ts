@@ -2,6 +2,7 @@
 // QUEST SYSTEM — 5 daily quests + 10 weekly quests, accumulate up to 50
 // =========================================================================
 import type { ChestRarity } from "./chests";
+import { getGameDayKeyInt, getMsUntilGameDayReset } from "./gameDay";
 
 // ── Kinds ────────────────────────────────────────────────────────────────────
 export type QuestKind =
@@ -21,7 +22,7 @@ export type QuestKind =
   | "win_mode_gemgrab"
   | "win_mode_heist"
   | "win_mode_bounty"
-  | "win_mode_brawlball"
+  | "win_mode_starstrike"
   | "win_mode_showdown"
   // Brawler-specific
   | "win_brawler"
@@ -34,12 +35,14 @@ export type QuestKind =
   | "use_super"
   | "survive_showdown";   // place top-5 in showdown N times
 
-export type QuestRewardType = "coins" | "gems" | "powerPoints" | "xp" | "chest";
+export type QuestRewardType = "coins" | "gems" | "powerPoints" | "xp" | "chest" | "pin" | "profileIcon";
 
 export interface QuestReward {
   type: QuestRewardType;
   amount: number;
   chestRarity?: ChestRarity;
+  pinId?: string;
+  iconId?: string;
   label: string;
 }
 
@@ -72,6 +75,8 @@ export interface QuestState {
   meta?: QuestMeta;
   addedAt: number;       // unix ms — when this quest was added to the pool
   isWeekly?: boolean;    // true = weekly quest
+  /** Star Pass premium track — progress counts, reward needs clashPassPaid. */
+  isPaid?: boolean;
 }
 
 // ── Legacy shape (still stored in profile for backward compat) ────────────────
@@ -85,6 +90,8 @@ export interface QuestPool {
   activeQuests: QuestState[];   // all active + claimed quests (max 50)
   lastDailyRoll: number;        // unix ms of last daily roll
   lastWeeklyRoll: number;       // unix ms of last weekly roll
+  /** unix ms of last paid-quest roll (10 quests every 2 days). */
+  lastPaidRoll?: number;
 }
 
 // ── Pool of all possible quests ───────────────────────────────────────────────
@@ -96,7 +103,7 @@ const BRAWLERS_META: { id: string; name: string }[] = [
   { id: "rin",     name: "Рин"     },
   { id: "hana",    name: "Хана"    },
   { id: "goro",    name: "Горо"    },
-  { id: "kenji",   name: "Кэндзи"  },
+  { id: "kenji",   name: "Кендзи"  },
   { id: "taro",    name: "Таро"    },
   { id: "zafkiel", name: "Зафкиэль"},
 ];
@@ -104,8 +111,8 @@ const BRAWLERS_META: { id: string; name: string }[] = [
 const MODES_META: { id: string; name: string }[] = [
   { id: "gemgrab",   name: "Ограбление кристаллов" },
   { id: "heist",     name: "Ограбление"            },
-  { id: "bounty",    name: "Охота за головами"     },
-  { id: "brawlball", name: "Футбол"                },
+  { id: "bounty",    name: "Охота за звёздами"     },
+  { id: "starstrike",name: "Звёздный мяч"          },
   { id: "showdown",  name: "Столкновение"          },
 ];
 
@@ -153,7 +160,9 @@ const STATIC_POOL: Omit<QuestDef, "id">[] = [
   { kind: "earn_trophies", target: 50, description: "Заработайте 50 трофеев",
     reward: { type: "chest", amount: 1, chestRarity: "rare", label: "Редкий сундук" }, difficulty: 2 },
   { kind: "open_chests",   target: 1,  description: "Откройте 1 сундук",
-    reward: { type: "coins", amount: 250, label: "250 монет"   }, difficulty: 2 },
+    reward: { type: "profileIcon", amount: 1, label: "Иконка игрока" }, difficulty: 2 },
+  { kind: "win_games",     target: 5,  description: "Одержите 5 побед",
+    reward: { type: "profileIcon", amount: 1, label: "Иконка игрока" }, difficulty: 3 },
   { kind: "upgrade_brawler", target: 1, description: "Прокачайте любого бойца",
     reward: { type: "powerPoints", amount: 10, label: "10 очков прокачки" }, difficulty: 2 },
   { kind: "play_team",     target: 4,  description: "Сыграйте 4 командных матча",
@@ -184,12 +193,12 @@ const STATIC_POOL: Omit<QuestDef, "id">[] = [
   { kind: "win_mode_heist", target: 2, description: "Победите 2 раза в «Ограблении»",
     reward: { type: "gems", amount: 12, label: "12 кристаллов" },
     difficulty: 2, meta: { mode: "heist", modeName: "Ограбление" } },
-  { kind: "win_mode_bounty", target: 2, description: "Победите 2 раза в «Охоте за головами»",
+  { kind: "win_mode_bounty", target: 2, description: "Победите 2 раза в «Охоте за звёздами»",
     reward: { type: "xp", amount: 180, label: "180 очков Star Pass" },
-    difficulty: 2, meta: { mode: "bounty", modeName: "Охота за головами" } },
-  { kind: "win_mode_brawlball", target: 2, description: "Победите 2 раза в «Футболе»",
+    difficulty: 2, meta: { mode: "bounty", modeName: "Охота за звёздами" } },
+  { kind: "win_mode_starstrike", target: 2, description: "Победите 2 раза в «Звёздном мяче»",
     reward: { type: "gems", amount: 12, label: "12 кристаллов" },
-    difficulty: 2, meta: { mode: "brawlball", modeName: "Футбол" } },
+    difficulty: 2, meta: { mode: "starstrike", modeName: "Звёздный мяч" } },
   { kind: "win_mode_showdown", target: 2, description: "Войдите в топ-3 «Столкновения» 2 раза",
     reward: { type: "chest", amount: 1, chestRarity: "rare", label: "Редкий сундук" },
     difficulty: 2, meta: { mode: "showdown", modeName: "Столкновение" } },
@@ -204,7 +213,9 @@ const STATIC_POOL: Omit<QuestDef, "id">[] = [
   { kind: "win_games",     target: 5,  description: "Победите в 5 матчах",
     reward: { type: "chest", amount: 1, chestRarity: "mega", label: "Мега-сундук" }, difficulty: 3 },
   { kind: "win_games",     target: 7,  description: "Победите в 7 матчах",
-    reward: { type: "gems", amount: 30, label: "30 кристаллов" }, difficulty: 3 },
+    reward: { type: "pin", amount: 1, label: "Пин" }, difficulty: 3 },
+  { kind: "place_top1_showdown", target: 3, description: "Займите 1-е место в «Столкновении» 3 раза",
+    reward: { type: "pin", amount: 1, label: "Пин" }, difficulty: 3 },
   { kind: "earn_trophies", target: 80, description: "Заработайте 80 трофеев",
     reward: { type: "chest", amount: 1, chestRarity: "epic", label: "Эпический сундук" }, difficulty: 3 },
   { kind: "earn_trophies", target: 120, description: "Заработайте 120 трофеев",
@@ -231,9 +242,9 @@ const STATIC_POOL: Omit<QuestDef, "id">[] = [
   { kind: "win_mode_heist", target: 4, description: "Победите 4 раза в «Ограблении»",
     reward: { type: "chest", amount: 1, chestRarity: "epic", label: "Эпический сундук" },
     difficulty: 3, meta: { mode: "heist", modeName: "Ограбление" } },
-  { kind: "win_mode_brawlball", target: 4, description: "Победите 4 раза в «Футболе»",
+  { kind: "win_mode_starstrike", target: 4, description: "Победите 4 раза в «Звёздном мяче»",
     reward: { type: "chest", amount: 1, chestRarity: "epic", label: "Эпический сундук" },
-    difficulty: 3, meta: { mode: "brawlball", modeName: "Футбол" } },
+    difficulty: 3, meta: { mode: "starstrike", modeName: "Звёздный мяч" } },
 ];
 
 // Brawler-specific quests, generated for each brawler
@@ -287,6 +298,20 @@ function fullPoolForUnlocked(unlockedBrawlers?: string[]): Omit<QuestDef, "id">[
   return FULL_POOL.filter(q => !q.meta?.brawlerId || allowed.has(q.meta.brawlerId));
 }
 
+/** ~70% of rolled quests should grant Star Pass XP; XP amounts are ×3 at roll time. */
+const QUEST_XP_POOL_SHARE = 0.7;
+const QUEST_XP_AMOUNT_MULTIPLIER = 3;
+
+function scaleQuestReward(reward: QuestReward): QuestReward {
+  if (reward.type !== "xp") return reward;
+  const amount = reward.amount * QUEST_XP_AMOUNT_MULTIPLIER;
+  return { ...reward, amount, label: `${amount} очков Star Pass` };
+}
+
+function prepareQuestDef(q: Omit<QuestDef, "id">): Omit<QuestDef, "id"> {
+  return { ...q, reward: scaleQuestReward(q.reward) };
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function shuffle<T>(arr: T[]): T[] {
   const a = [...arr];
@@ -297,7 +322,11 @@ function shuffle<T>(arr: T[]): T[] {
   return a;
 }
 
-function makeState(q: Omit<QuestDef, "id">, idx: number, isWeekly: boolean): QuestState {
+function makeState(
+  q: Omit<QuestDef, "id">,
+  idx: number,
+  opts: { isWeekly?: boolean; isPaid?: boolean },
+): QuestState {
   return {
     id: `q${idx}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     kind: q.kind,
@@ -308,53 +337,76 @@ function makeState(q: Omit<QuestDef, "id">, idx: number, isWeekly: boolean): Que
     claimed: false,
     meta: q.meta,
     addedAt: Date.now(),
-    isWeekly,
+    isWeekly: !!opts.isWeekly,
+    isPaid: !!opts.isPaid,
   };
 }
 
-// Pick N quests from the pool (avoid kinds already active), split by difficulty
+// Pick N quests from the pool (avoid kinds already active), ~70% Star Pass XP rewards.
 function pickQuests(
   count: number,
   activeKinds: Set<string>,  // "kind:brawlerId" or "kind"
   isWeekly: boolean,
   unlockedBrawlers?: string[],
+  isPaid = false,
 ): QuestState[] {
-  const pool = fullPoolForUnlocked(unlockedBrawlers);
-  const e = shuffle(pool.filter(q => q.difficulty === 1));
-  const m = shuffle(pool.filter(q => q.difficulty === 2));
-  const h = shuffle(pool.filter(q => q.difficulty === 3));
-
   const key = (q: Omit<QuestDef, "id">) =>
     `${q.kind}:${q.meta?.brawlerId ?? ""}:${q.meta?.mode ?? ""}`;
 
-  const candidates = [...e, ...m, ...h].filter(q => !activeKinds.has(key(q)));
+  const pool = fullPoolForUnlocked(unlockedBrawlers)
+    .map(prepareQuestDef)
+    .filter(q => !activeKinds.has(key(q)));
 
-  const result: QuestState[] = [];
-  let eIdx = 0, mIdx = 0, hIdx = 0;
-  // interleave easy/medium/hard picks
-  for (let i = 0; i < count; i++) {
-    const tier = i % 3;   // 0=easy 1=medium 2=hard
-    let picked: Omit<QuestDef, "id"> | undefined;
-    if (tier === 0 && eIdx < e.length) picked = e[eIdx++];
-    else if (tier === 1 && mIdx < m.length) picked = m[mIdx++];
-    else if (tier === 2 && hIdx < h.length) picked = h[hIdx++];
-    else {
-      // fallback to any remaining candidate
-      picked = candidates.find(q => !result.some(r => r.kind === q.kind &&
-        r.meta?.brawlerId === q.meta?.brawlerId &&
-        r.meta?.mode === q.meta?.mode));
+  const xpPool = shuffle(pool.filter(q => q.reward.type === "xp"));
+  const otherPool = shuffle(pool.filter(q => q.reward.type !== "xp"));
+
+  const xpWant = Math.min(xpPool.length, Math.max(0, Math.round(count * QUEST_XP_POOL_SHARE)));
+  const otherWant = count - xpWant;
+
+  const takeFrom = (
+    source: Omit<QuestDef, "id">[],
+    n: number,
+    used: Omit<QuestDef, "id">[],
+  ): Omit<QuestDef, "id">[] => {
+    const out: Omit<QuestDef, "id">[] = [];
+    for (const q of source) {
+      if (out.length >= n) break;
+      if (used.some(u => key(u) === key(q))) continue;
+      if (out.some(p => key(p) === key(q))) continue;
+      out.push(q);
     }
-    if (picked) result.push(makeState(picked, i, isWeekly));
+    return out;
+  };
+
+  const used: Omit<QuestDef, "id">[] = [];
+  const xpPicked = takeFrom(xpPool, xpWant, used);
+  used.push(...xpPicked);
+
+  let otherPicked = takeFrom(otherPool, otherWant, used);
+  used.push(...otherPicked);
+
+  const short = count - xpPicked.length - otherPicked.length;
+  if (short > 0) {
+    const fallback = takeFrom(
+      shuffle([...xpPool, ...otherPool]),
+      short,
+      used,
+    );
+    otherPicked = [...otherPicked, ...fallback];
   }
-  return result;
+
+  const merged = shuffle([...xpPicked, ...otherPicked]).slice(0, count);
+  return merged.map((q, i) => makeState(q, i, { isWeekly, isPaid }));
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 export const DAILY_QUEST_COUNT  = 5;
 export const WEEKLY_QUEST_COUNT = 10;
+export const PAID_QUEST_COUNT   = 10;
 export const MAX_ACTIVE_QUESTS  = 50;
 
 export const ONE_DAY  = 24 * 60 * 60 * 1000;
+export const TWO_DAYS = 2 * ONE_DAY;
 export const ONE_WEEK =  7 * ONE_DAY;
 
 export function buildFreshQuestPool(): QuestPool {
@@ -364,16 +416,18 @@ export function buildFreshQuestPool(): QuestPool {
 export function buildFreshQuestPoolForUnlocked(unlockedBrawlers?: string[]): QuestPool {
   const now = Date.now();
   const daily  = pickQuests(DAILY_QUEST_COUNT,  new Set(), false, unlockedBrawlers);
-  const weekly = pickQuests(
-    WEEKLY_QUEST_COUNT,
-    new Set(daily.map(q => `${q.kind}:${q.meta?.brawlerId ?? ""}:${q.meta?.mode ?? ""}`)),
-    true,
-    unlockedBrawlers,
-  );
+  const weeklyKeys = new Set(daily.map(q => `${q.kind}:${q.meta?.brawlerId ?? ""}:${q.meta?.mode ?? ""}`));
+  const weekly = pickQuests(WEEKLY_QUEST_COUNT, weeklyKeys, true, unlockedBrawlers);
+  const paidKeys = new Set([
+    ...weeklyKeys,
+    ...weekly.map(q => `${q.kind}:${q.meta?.brawlerId ?? ""}:${q.meta?.mode ?? ""}`),
+  ]);
+  const paid = pickQuests(PAID_QUEST_COUNT, paidKeys, false, unlockedBrawlers, true);
   return {
-    activeQuests: [...daily, ...weekly],
+    activeQuests: [...daily, ...weekly, ...paid],
     lastDailyRoll: now,
     lastWeeklyRoll: now,
+    lastPaidRoll: now,
   };
 }
 
@@ -415,20 +469,51 @@ export function addWeeklyQuestsForUnlocked(pool: QuestPool, unlockedBrawlers?: s
   return { ...pool, activeQuests: all, lastWeeklyRoll: now };
 }
 
+export function addPaidQuests(pool: QuestPool): QuestPool {
+  return addPaidQuestsForUnlocked(pool);
+}
+
+export function addPaidQuestsForUnlocked(pool: QuestPool, unlockedBrawlers?: string[]): QuestPool {
+  const now = Date.now();
+  const freeSlots = Math.max(0, MAX_ACTIVE_QUESTS - pool.activeQuests.length);
+  const toAdd = Math.min(PAID_QUEST_COUNT, freeSlots);
+  if (toAdd <= 0) return { ...pool, lastPaidRoll: now };
+  const activeKeys = new Set(
+    pool.activeQuests
+      .filter(q => !q.claimed)
+      .map(q => `${q.kind}:${q.meta?.brawlerId ?? ""}:${q.meta?.mode ?? ""}`),
+  );
+  const fresh = pickQuests(toAdd, activeKeys, false, unlockedBrawlers, true);
+  const all = [...pool.activeQuests, ...fresh];
+  return { ...pool, activeQuests: all, lastPaidRoll: now };
+}
+
 export function isDailyExpired(pool: QuestPool): boolean {
-  return Date.now() - pool.lastDailyRoll >= ONE_DAY;
+  if (!pool.lastDailyRoll) return true;
+  return getGameDayKeyInt(pool.lastDailyRoll) !== getGameDayKeyInt();
 }
 
 export function isWeeklyExpired(pool: QuestPool): boolean {
   return Date.now() - pool.lastWeeklyRoll >= ONE_WEEK;
 }
 
-export function timeUntilDaily(pool: QuestPool): number {
-  return Math.max(0, ONE_DAY - (Date.now() - pool.lastDailyRoll));
+export function timeUntilDaily(_pool: QuestPool): number {
+  return getMsUntilGameDayReset();
 }
 
 export function timeUntilWeekly(pool: QuestPool): number {
   return Math.max(0, ONE_WEEK - (Date.now() - pool.lastWeeklyRoll));
+}
+
+export function isPaidExpired(pool: QuestPool): boolean {
+  const roll = pool.lastPaidRoll;
+  if (typeof roll !== "number" || Number.isNaN(roll)) return true;
+  return Date.now() - roll >= TWO_DAYS;
+}
+
+export function timeUntilPaid(pool: QuestPool): number {
+  const roll = pool.lastPaidRoll ?? 0;
+  return Math.max(0, TWO_DAYS - (Date.now() - roll));
 }
 
 // ── Kept for backward compat ──────────────────────────────────────────────────

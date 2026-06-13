@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
-  isAdminUnlocked, tryAdminLogin, lockAdmin,
+  isAdminUnlocked, tryAdminLogin,
   getSavedMaps, upsertMap, deleteMapById,
   getPublishedMap, publishMap,
   validateMap, generateRandomMap,
@@ -8,11 +8,58 @@ import {
   type MapSave, type EditorMode, type OVType,
 } from "../utils/mapEditorAPI";
 import { getTileCanvas, loadAllTileModels } from "../utils/tileModelCache";
-import { getPlatformTileCanvas, loadPlatformTile } from "../utils/platformTile";
-import { getPowerBoxCanvas, getSafeCanvas, loadPowerModels } from "../utils/powerModelCache";
+import { loadBinbunGrassAssets } from "../game/binbunGrass3D";
+import { loadPowerModels } from "../utils/powerModelCache";
+import { BATTLE_MAP_RIM_CELLS } from "../game/TileMap";
+import {
+  initEditor3D,
+  disposeEditor3D,
+  setEditorCanvasSize,
+  setEditorCamera,
+  rebuildEditorGrid,
+  renderEditor3D,
+  setEditorCellHighlights,
+} from "../game/mapEditor3D";
+import { markMapSeen } from "../utils/mapSchedule";
+import { textOnTintedAccent } from "../utils/contrastText";
 
 const GS = 60;
+const PALETTE_THUMB_CSS = 48;
+const PALETTE_THUMB_PX = 96;
 const IDX = (x: number, y: number) => y * GS + x;
+
+// ── Защитная рамка («Mountain ring») вокруг арены ────────────────────────────
+// В бою paintMountainBorderRing заливает внешние BATTLE_MAP_RIM_CELLS клеток
+// с каждой стороны горами — в редакторе та же ширина, чтобы текстуры не
+// заходили на играбельное поле.
+const EDITOR_RIM = BATTLE_MAP_RIM_CELLS;
+const isInPlayArea = (x: number, y: number) =>
+  x >= EDITOR_RIM && y >= EDITOR_RIM && x < GS - EDITOR_RIM && y < GS - EDITOR_RIM;
+const PLAY_MIN = EDITOR_RIM;
+const PLAY_MAX = GS - 1 - EDITOR_RIM; // включительно
+/** Подгоняет клетку (x,y) к ближайшему месту в playable-зоне. */
+const clampToPlay = (x: number, y: number): [number, number] => [
+  Math.max(PLAY_MIN, Math.min(PLAY_MAX, x)),
+  Math.max(PLAY_MIN, Math.min(PLAY_MAX, y)),
+];
+/** Tile type 2 — MOUNTAIN (см. TILE_DEFS / TileType.MOUNTAIN). */
+const MOUNTAIN_TILE = 2;
+/**
+ * Принудительно «заливает» внешнюю рамку RIM горой и стирает любые overlays
+ * за пределами playable-зоны. Вызывается при любой загрузке/смене данных,
+ * чтобы редактор был синхронизирован с реальной игровой ареной.
+ */
+const enforceRim = (cellsArr: number[], ovsArr: number[], rotsArr?: number[]): void => {
+  for (let y = 0; y < GS; y++) {
+    for (let x = 0; x < GS; x++) {
+      if (isInPlayArea(x, y)) continue;
+      const i = y * GS + x;
+      cellsArr[i] = MOUNTAIN_TILE;
+      ovsArr[i]   = 0;
+      if (rotsArr) rotsArr[i] = 0;
+    }
+  }
+};
 
 // ── Tile palette definition ───────────────────────────────────────────────────
 // Note: type 0 (grass/ground) is NOT in the palette — it's the default background.
@@ -25,10 +72,12 @@ const TILE_DEFS = [
   { type: 5,  label: "Кости",      color: "#BDBDBD", icon: "💀", desc: "Разрушаемый" },
   { type: 6,  label: "Забор",      color: "#C8A45A", icon: "🔩", desc: "Просматривается" },
   { type: 7,  label: "Бочка",      color: "#C2185B", icon: "❤️", desc: "Лечение" },
+  { type: 8,  label: "Дерево",     color: "#33691E", icon: "🌲", desc: "Непроходимое" },
   { type: 9,  label: "Кактус",     color: "#558B2F", icon: "🌵", desc: "Непроходимый" },
-  { type: 10, label: "Дерево",     color: "#8D6E63", icon: "🪵", desc: "Непроходимый" },
+  { type: 10, label: "Бревно",     color: "#8D6E63", icon: "🪵", desc: "Непроходимое" },
   { type: 11, label: "Камень",     color: "#78909C", icon: "🪨", desc: "Непроходимый" },
   { type: 12, label: "Пирамида",   color: "#FDD835", icon: "🔺", desc: "Непроходимая" },
+  { type: 13, label: "Полисадник", color: "#689F38", icon: "🌸", desc: "Непроходим, сквозь стрелять" },
 ] as const;
 
 // All possible overlay markers
@@ -44,6 +93,8 @@ const ALL_OVERLAY_DEFS: { ov: OVType; label: string; color: string; icon: string
   { ov: OV.GOAL_BLUE,  label: "Ворота синих",   color: "#0288D1", icon: "⚽" },
   { ov: OV.GOAL_RED,   label: "Ворота красных", color: "#C62828", icon: "⚽" },
   { ov: OV.POWER_BOX,  label: "Бокс усиления",  color: "#7B2FBE", icon: "📦" },
+  // Точка появления босса для режима «Рейд на босса». Один маркер на карту.
+  { ov: OV.BOSS_SPAWN, label: "Спавн босса",     color: "#FF1744", icon: "👹" },
 ];
 
 // Which overlays are valid for each mode
@@ -52,9 +103,10 @@ const MODE_OVERLAYS: Record<EditorMode, OVType[]> = {
   gemgrab:    [OV.SPAWN_BLUE, OV.SPAWN_RED, OV.GEM_CENTER],
   heist:      [OV.SPAWN_BLUE, OV.SPAWN_RED, OV.SAFE_BLUE, OV.SAFE_RED],
   bounty:     [OV.SPAWN_BLUE, OV.SPAWN_RED],
-  brawlball:  [OV.SPAWN_BLUE, OV.SPAWN_RED, OV.GOAL_BLUE, OV.GOAL_RED],
   starstrike: [OV.SPAWN_BLUE, OV.SPAWN_RED, OV.GOAL_BLUE, OV.GOAL_RED],
-  siege:      [OV.SPAWN_BLUE, OV.SPAWN_RED, OV.BASE_BLUE, OV.BASE_RED],
+  siege:      [OV.SPAWN_BLUE, OV.BASE_BLUE],
+  bossraid:   [OV.SPAWN_BLUE, OV.BOSS_SPAWN],
+  monsterinvasion: [OV.SPAWN_SD, OV.POWER_BOX],
 };
 
 type Tool = "pan" | "place" | "erase" | "brush" | "fill_rect";
@@ -66,42 +118,56 @@ type Mirror = "none" | "h" | "v" | "both";
 const DEFAULT_SPAWNS: Record<EditorMode, { type: OVType; x: number; y: number }[]> = {
   showdown: Array.from({ length: 10 }, (_, i) => ({
     type: OV.SPAWN_SD as OVType,
-    x: Math.round(30 + Math.cos((i / 10) * Math.PI * 2 - Math.PI / 2) * 22),
-    y: Math.round(30 + Math.sin((i / 10) * Math.PI * 2 - Math.PI / 2) * 22),
+    // Радиус 18 — точно вписывается в playable-зону [10..49] (центр (30,30)).
+    x: Math.round(30 + Math.cos((i / 10) * Math.PI * 2 - Math.PI / 2) * 18),
+    y: Math.round(30 + Math.sin((i / 10) * Math.PI * 2 - Math.PI / 2) * 18),
   })),
   gemgrab:   [
-    { type: OV.SPAWN_BLUE as OVType, x: 8,  y: 24 }, { type: OV.SPAWN_BLUE as OVType, x: 8,  y: 30 }, { type: OV.SPAWN_BLUE as OVType, x: 8,  y: 36 },
-    { type: OV.SPAWN_RED  as OVType, x: 52, y: 24 }, { type: OV.SPAWN_RED  as OVType, x: 52, y: 30 }, { type: OV.SPAWN_RED  as OVType, x: 52, y: 36 },
+    { type: OV.SPAWN_BLUE as OVType, x: 13, y: 24 }, { type: OV.SPAWN_BLUE as OVType, x: 13, y: 30 }, { type: OV.SPAWN_BLUE as OVType, x: 13, y: 36 },
+    { type: OV.SPAWN_RED  as OVType, x: 46, y: 24 }, { type: OV.SPAWN_RED  as OVType, x: 46, y: 30 }, { type: OV.SPAWN_RED  as OVType, x: 46, y: 36 },
     { type: OV.GEM_CENTER as OVType, x: 30, y: 30 },
   ],
   heist:     [
-    { type: OV.SPAWN_BLUE as OVType, x: 10, y: 24 }, { type: OV.SPAWN_BLUE as OVType, x: 10, y: 30 }, { type: OV.SPAWN_BLUE as OVType, x: 10, y: 36 },
-    { type: OV.SPAWN_RED  as OVType, x: 50, y: 24 }, { type: OV.SPAWN_RED  as OVType, x: 50, y: 30 }, { type: OV.SPAWN_RED  as OVType, x: 50, y: 36 },
-    { type: OV.SAFE_BLUE  as OVType, x: 5,  y: 30 },
-    { type: OV.SAFE_RED   as OVType, x: 55, y: 30 },
+    { type: OV.SPAWN_BLUE as OVType, x: 15, y: 24 }, { type: OV.SPAWN_BLUE as OVType, x: 15, y: 30 }, { type: OV.SPAWN_BLUE as OVType, x: 15, y: 36 },
+    { type: OV.SPAWN_RED  as OVType, x: 44, y: 24 }, { type: OV.SPAWN_RED  as OVType, x: 44, y: 30 }, { type: OV.SPAWN_RED  as OVType, x: 44, y: 36 },
+    { type: OV.SAFE_BLUE  as OVType, x: 11, y: 30 },
+    { type: OV.SAFE_RED   as OVType, x: 48, y: 30 },
   ],
+  // Bounty / «Охота за звёздами»: 5v5 — по 5 спавнов на команду.
+  // ВНИМАНИЕ: все координаты в playable-зоне [10..49].
   bounty:    [
-    { type: OV.SPAWN_BLUE as OVType, x: 8,  y: 24 }, { type: OV.SPAWN_BLUE as OVType, x: 8,  y: 30 }, { type: OV.SPAWN_BLUE as OVType, x: 8,  y: 36 },
-    { type: OV.SPAWN_RED  as OVType, x: 52, y: 24 }, { type: OV.SPAWN_RED  as OVType, x: 52, y: 30 }, { type: OV.SPAWN_RED  as OVType, x: 52, y: 36 },
+    { type: OV.SPAWN_BLUE as OVType, x: 12, y: 22 }, { type: OV.SPAWN_BLUE as OVType, x: 12, y: 26 },
+    { type: OV.SPAWN_BLUE as OVType, x: 12, y: 30 }, { type: OV.SPAWN_BLUE as OVType, x: 12, y: 34 },
+    { type: OV.SPAWN_BLUE as OVType, x: 12, y: 38 },
+    { type: OV.SPAWN_RED  as OVType, x: 47, y: 22 }, { type: OV.SPAWN_RED  as OVType, x: 47, y: 26 },
+    { type: OV.SPAWN_RED  as OVType, x: 47, y: 30 }, { type: OV.SPAWN_RED  as OVType, x: 47, y: 34 },
+    { type: OV.SPAWN_RED  as OVType, x: 47, y: 38 },
   ],
-  brawlball: [
-    { type: OV.SPAWN_BLUE as OVType, x: 10, y: 24 }, { type: OV.SPAWN_BLUE as OVType, x: 10, y: 30 }, { type: OV.SPAWN_BLUE as OVType, x: 10, y: 36 },
-    { type: OV.SPAWN_RED  as OVType, x: 50, y: 24 }, { type: OV.SPAWN_RED  as OVType, x: 50, y: 30 }, { type: OV.SPAWN_RED  as OVType, x: 50, y: 36 },
-    { type: OV.GOAL_BLUE  as OVType, x: 2,  y: 30 },
-    { type: OV.GOAL_RED   as OVType, x: 57, y: 30 },
-  ],
+  // «Звёздный мяч»: спавны и две зафиксированные пары ворот по краям playable-зоны.
   starstrike: [
-    { type: OV.SPAWN_BLUE as OVType, x: 10, y: 24 }, { type: OV.SPAWN_BLUE as OVType, x: 10, y: 30 }, { type: OV.SPAWN_BLUE as OVType, x: 10, y: 36 },
-    { type: OV.SPAWN_RED  as OVType, x: 50, y: 24 }, { type: OV.SPAWN_RED  as OVType, x: 50, y: 30 }, { type: OV.SPAWN_RED  as OVType, x: 50, y: 36 },
-    { type: OV.GOAL_BLUE  as OVType, x: 2,  y: 30 },
-    { type: OV.GOAL_RED   as OVType, x: 57, y: 30 },
+    { type: OV.SPAWN_BLUE as OVType, x: 15, y: 24 }, { type: OV.SPAWN_BLUE as OVType, x: 15, y: 30 }, { type: OV.SPAWN_BLUE as OVType, x: 15, y: 36 },
+    { type: OV.SPAWN_RED  as OVType, x: 44, y: 24 }, { type: OV.SPAWN_RED  as OVType, x: 44, y: 30 }, { type: OV.SPAWN_RED  as OVType, x: 44, y: 36 },
+    { type: OV.GOAL_BLUE  as OVType, x: 11, y: 30 },
+    { type: OV.GOAL_RED   as OVType, x: 48, y: 30 },
   ],
+  // Осада: только синие спавны/база (в playable-зоне).
   siege:     [
-    { type: OV.SPAWN_BLUE as OVType, x: 8,  y: 24 }, { type: OV.SPAWN_BLUE as OVType, x: 8,  y: 30 }, { type: OV.SPAWN_BLUE as OVType, x: 8,  y: 36 },
-    { type: OV.SPAWN_RED  as OVType, x: 52, y: 24 }, { type: OV.SPAWN_RED  as OVType, x: 52, y: 30 }, { type: OV.SPAWN_RED  as OVType, x: 52, y: 36 },
-    { type: OV.BASE_BLUE  as OVType, x: 4,  y: 30 },
-    { type: OV.BASE_RED   as OVType, x: 56, y: 30 },
+    { type: OV.SPAWN_BLUE as OVType, x: 13, y: 24 }, { type: OV.SPAWN_BLUE as OVType, x: 13, y: 30 }, { type: OV.SPAWN_BLUE as OVType, x: 13, y: 36 },
+    { type: OV.BASE_BLUE  as OVType, x: 11, y: 30 },
   ],
+  bossraid: [
+    { type: OV.SPAWN_BLUE as OVType, x: 13, y: 22 },
+    { type: OV.SPAWN_BLUE as OVType, x: 13, y: 26 },
+    { type: OV.SPAWN_BLUE as OVType, x: 13, y: 30 },
+    { type: OV.SPAWN_BLUE as OVType, x: 13, y: 34 },
+    { type: OV.SPAWN_BLUE as OVType, x: 13, y: 38 },
+    { type: OV.BOSS_SPAWN as OVType, x: 44, y: 30 },
+  ],
+  monsterinvasion: Array.from({ length: 10 }, (_, i) => ({
+    type: OV.SPAWN_SD as OVType,
+    x: Math.round(30 + Math.cos((i / 10) * Math.PI * 2 - Math.PI / 2) * 18),
+    y: Math.round(30 + Math.sin((i / 10) * Math.PI * 2 - Math.PI / 2) * 18),
+  })),
 };
 
 function applyAutoSpawns(mode: EditorMode, ovArr: number[]): void {
@@ -111,16 +177,32 @@ function applyAutoSpawns(mode: EditorMode, ovArr: number[]): void {
 }
 
 function hasAnySpawns(mode: EditorMode, ovArr: number[]): boolean {
-  if (mode === "showdown") return ovArr.some(v => v === OV.SPAWN_SD);
+  if (mode === "showdown" || mode === "monsterinvasion") return ovArr.some(v => v === OV.SPAWN_SD);
+  if (mode === "bossraid") return ovArr.some(v => v === OV.SPAWN_BLUE) && ovArr.some(v => v === OV.BOSS_SPAWN);
   return ovArr.some(v => v === OV.SPAWN_BLUE) || ovArr.some(v => v === OV.SPAWN_RED);
 }
 
-// Max number of each spawn type allowed per mode
+// Max number of each spawn type allowed per mode (default mapping).
 const SPAWN_MAX: Partial<Record<number, number>> = {
   [OV.SPAWN_SD]:   10,
   [OV.SPAWN_BLUE]: 3,
   [OV.SPAWN_RED]:  3,
+  // Босс уникален: единственная точка появления на карту.
+  [OV.BOSS_SPAWN]: 1,
+  // Ровно по одной паре ворот на команду в «Звёздном мяче».
+  [OV.GOAL_BLUE]:  1,
+  [OV.GOAL_RED]:   1,
 };
+
+// Per-mode override (нужно для 5v5 в bossraid/bounty).
+function getSpawnMaxFor(mode: EditorMode, ov: number): number | undefined {
+  if (mode === "bossraid" && ov === OV.SPAWN_BLUE) return 5;
+  if (mode === "bounty"   && (ov === OV.SPAWN_BLUE || ov === OV.SPAWN_RED)) return 5;
+  return SPAWN_MAX[ov];
+}
+
+// Ворота нельзя удалять/перемещать поверх них кистью — это «фиксированные» оверлеи.
+const FIXED_OVERLAYS = new Set<number>([OV.GOAL_BLUE, OV.GOAL_RED]);
 
 interface Selection { x0: number; y0: number; x1: number; y1: number }
 
@@ -150,31 +232,6 @@ function AdminLoginModal({ onSuccess, onCancel }: { onSuccess: () => void; onCan
         <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
           <Btn color="#FF5252" onClick={onCancel}>Отмена</Btn>
           <Btn color="#69F0AE" onClick={submit}>Войти</Btn>
-        </div>
-      </ModalBox>
-    </Overlay>
-  );
-}
-
-// ── Mode Select modal ─────────────────────────────────────────────────────────
-function ModeSelectModal({ onSelect }: { onSelect: (m: EditorMode) => void }) {
-  return (
-    <Overlay>
-      <ModalBox title="Выберите режим карты">
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          {EDITOR_MODES.map(m => (
-            <button key={m.id} onClick={() => onSelect(m.id)} style={{
-              background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)",
-              borderRadius: 12, padding: "16px 12px", color: "white", cursor: "pointer",
-              textAlign: "center", fontFamily: "inherit", transition: "background 0.15s",
-            }}
-              onMouseOver={e => (e.currentTarget.style.background = "rgba(255,255,255,0.12)")}
-              onMouseOut={e => (e.currentTarget.style.background = "rgba(255,255,255,0.06)")}
-            >
-              <div style={{ fontSize: 28 }}>{m.icon}</div>
-              <div style={{ marginTop: 6, fontWeight: 800, fontSize: 13 }}>{m.label}</div>
-            </button>
-          ))}
         </div>
       </ModalBox>
     </Overlay>
@@ -273,9 +330,9 @@ function ValidationModal({ errors, onClose, onForce }: { errors: string[]; onClo
 }
 
 // ── Main MapEditorPage ────────────────────────────────────────────────────────
-interface Props { onBack: () => void }
+interface Props { onBack: () => void; initialMode: EditorMode }
 
-export default function MapEditorPage({ onBack }: Props) {
+export default function MapEditorPage({ onBack, initialMode }: Props) {
   const [authed, setAuthed] = useState(isAdminUnlocked());
   const [showLogin, setShowLogin] = useState(!isAdminUnlocked());
 
@@ -288,27 +345,64 @@ export default function MapEditorPage({ onBack }: Props) {
     />;
   }
 
-  return <EditorCore onBack={onBack} />;
+  return <EditorCore onBack={onBack} initialMode={initialMode} />;
 }
 
 // ── Editor core (only rendered when authed) ───────────────────────────────────
-function EditorCore({ onBack }: { onBack: () => void }) {
+function EditorCore({ onBack, initialMode }: { onBack: () => void; initialMode: EditorMode }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  // Rotation arrow button hit-areas (canvas pixel space) for LINE_TILE hover UI
+  // Hit-areas двух стрелочных кнопок поверх hover-клетки (canvas pixel space).
+  //
+  //   mode = "line" — для bones/fence: H = ↔ (rot=0), V = ↕ (rot=1)
+  //   mode = "rot"  — для wall/sand_wall: H = ↺ (rot - 1 mod 4), V = ↻ (rot + 1 mod 4)
+  //
+  // Сама пара кнопок по умолчанию рисуется одинаково; обработчик клика и
+  // подпись зависят от mode.
   const rotBtnsRef = useRef<{
     H: { x: number; y: number; w: number; h: number };
     V: { x: number; y: number; w: number; h: number };
     gx: number; gy: number;
+    mode: "line" | "rot";
   } | null>(null);
 
   // Grid state
-  const [mode, setMode] = useState<EditorMode | null>(null);
-  const cells     = useRef<number[]>(new Array(GS * GS).fill(0));
+  const [mode, setMode] = useState<EditorMode>(initialMode);
+  const spawnsInitialized = useRef(false);
+  const cells     = useRef<number[]>((() => {
+    const arr = new Array(GS * GS).fill(0);
+    const ovs = new Array(GS * GS).fill(0);
+    enforceRim(arr, ovs);
+    return arr;
+  })());
   const overlays  = useRef<number[]>(new Array(GS * GS).fill(0));
   // Per-cell LINE_TILE (bones=5, fence=6) rotation: 0 = horizontal, 1 = vertical
   const rotations = useRef<number[]>(new Array(GS * GS).fill(0));
-  const [, forceRedraw] = useState(0);
-  const redraw = useCallback(() => forceRedraw(n => n + 1), []);
+  // ВАЖНО: захватываем И state-ЗНАЧЕНИЕ, а не только setter.
+  // useEffect сравнивает deps через Object.is — setter стабилен, и если в
+  // зависимостях ТОЛЬКО setter, эффект никогда не пересчитывается. Поэтому в
+  // deps используем сами state-значения.
+  //
+  // РАЗДЕЛЯЕМ два сигнала:
+  //   • tileTick   — содержимое карты изменилось (place/erase/clear/fill).
+  //                  Перестраиваем все InstancedMesh — это ~20 мс на 60×60.
+  //   • cameraTick — изменилась только камера/zoom/pan/resize. Тайлы НЕ
+  //                  пересобираем — обновляем только ortho-frustum и рендерим.
+  //                  Без этого пан/zoom тормозили из-за rebuild на каждый кадр.
+  const [tileTick, bumpTileTick] = useState(0);
+  const [cameraTick, bumpCameraTick] = useState(0);
+  const redraw = useCallback(() => bumpTileTick(n => n + 1), []);
+  const redrawCamera = useCallback(() => bumpCameraTick(n => n + 1), []);
+
+  useEffect(() => {
+    setMode(initialMode);
+    spawnsInitialized.current = false;
+  }, [initialMode]);
+  useEffect(() => {
+    if (spawnsInitialized.current) return;
+    applyAutoSpawns(initialMode, overlays.current);
+    spawnsInitialized.current = true;
+    redraw();
+  }, [initialMode, redraw]);
 
   // Camera
   const camX = useRef(0);   // world px (CSS units)
@@ -328,7 +422,7 @@ function EditorCore({ onBack }: { onBack: () => void }) {
   // 3D model assets
   const [modelsReady, setModelsReady] = useState(false);
   useEffect(() => {
-    Promise.all([loadAllTileModels(), loadPlatformTile(), loadPowerModels()]).then(() => {
+    Promise.all([loadAllTileModels(), loadBinbunGrassAssets(), loadPowerModels()]).then(() => {
       setModelsReady(true);
     });
   }, []);
@@ -344,6 +438,13 @@ function EditorCore({ onBack }: { onBack: () => void }) {
   const fillStart = useRef<{ x: number; y: number } | null>(null);
   const [fillSel, setFillSel] = useState<Selection | null>(null);
   const brushLastCell = useRef<{ x: number; y: number } | null>(null);
+
+  /** Закреплённая клетка в режиме панорамы: стрелки поворота и drag не «убегают» за курсором. */
+  const [fixedCell, setFixedCell] = useState<{ x: number; y: number } | null>(null);
+  /** Позиция-призрак при перетаскивании закреплённого тайла. */
+  const [dragGhost, setDragGhost] = useState<{ x: number; y: number } | null>(null);
+  const isDraggingTile = useRef(false);
+  const dragFrom = useRef<{ x: number; y: number } | null>(null);
 
   // Modals
   const [showMaps, setShowMaps]       = useState(false);
@@ -413,7 +514,53 @@ function EditorCore({ onBack }: { onBack: () => void }) {
     gy: Math.floor((sy + camY.current) / zoom.current),
   });
 
+  const inBounds = (gx: number, gy: number) => gx >= 0 && gy >= 0 && gx < GS && gy < GS;
+
+  /** Панорама / выбор объектов без активной кисти в палитре. */
+  const isPanInspectMode = () =>
+    !spacePan.current &&
+    (tool === "pan" || (tool === "place" && selectedTile === 0 && selectedOv === 0));
+
+  const cellHasContent = (gx: number, gy: number) =>
+    inBounds(gx, gy) && (cells.current[IDX(gx, gy)] !== 0 || overlays.current[IDX(gx, gy)] !== 0);
+
+  /** Контент, который можно выделять и перетаскивать (не rim-горы). */
+  const cellIsInteractive = (gx: number, gy: number) =>
+    isInPlayArea(gx, gy) && cellHasContent(gx, gy);
+
+  /** Перенос тайла+оверлея+поворота в пустую клетку (трава без оверлея). */
+  const moveCellContents = (fromX: number, fromY: number, toX: number, toY: number): boolean => {
+    if (!isInPlayArea(fromX, fromY) || !isInPlayArea(toX, toY)) return false;
+    if (fromX === toX && fromY === toY) return false;
+    const fi = IDX(fromX, fromY);
+    const ti = IDX(toX, toY);
+    const tile = cells.current[fi];
+    const ov = overlays.current[fi];
+    const rot = rotations.current[fi];
+    if (tile === 0 && ov === 0) return false;
+    if (cells.current[ti] !== 0 || overlays.current[ti] !== 0) return false;
+    cells.current[ti] = tile;
+    overlays.current[ti] = ov;
+    rotations.current[ti] = rot;
+    cells.current[fi] = 0;
+    overlays.current[fi] = 0;
+    rotations.current[fi] = 0;
+    return true;
+  };
+
+  /** Минимальный зум: карта всегда заполняет canvas, пустой фон за ареной не виден. */
+  function getMinZoom(): number {
+    const { w, h } = cssCanvas.current;
+    if (w <= 0 || h <= 0) return 10;
+    const tiltMargin = 1.12;
+    return Math.ceil(Math.max(w / GS, h / GS) * tiltMargin * 10) / 10;
+  }
+
+  const ZOOM_MAX = 40;
+
   const clampCam = () => {
+    const minZ = getMinZoom();
+    if (zoom.current < minZ) zoom.current = minZ;
     const cs = zoom.current;
     const maxX = GS * cs - cssCanvas.current.w;
     const maxY = GS * cs - cssCanvas.current.h;
@@ -434,9 +581,26 @@ function EditorCore({ onBack }: { onBack: () => void }) {
   const applyToCell = useCallback((gx: number, gy: number, t: Tool) => {
     if (gx < 0 || gy < 0 || gx >= GS || gy >= GS) return;
 
+    // Зона RIM — paintMountainBorderRing в бою; редактировать нельзя.
+    if (!isInPlayArea(gx, gy)) {
+      setNotif("Это зона границы арены — здесь только горы (нельзя редактировать)");
+      setTimeout(() => setNotif(""), 2200);
+      return;
+    }
+
+    // Запрет перезаписи/удаления фиксированных оверлеев (ворота).
+    {
+      const here = overlays.current[IDX(gx, gy)];
+      if (FIXED_OVERLAYS.has(here) && (t === "erase" || (selectedOv !== 0 && selectedOv !== here) || selectedOv === 0)) {
+        setNotif("Эти ворота нельзя удалить или переместить");
+        setTimeout(() => setNotif(""), 2200);
+        return;
+      }
+    }
+
     // Enforce max spawn-point count before placing
-    if (t !== "erase" && selectedOv !== 0) {
-      const max = SPAWN_MAX[selectedOv];
+    if (t !== "erase" && selectedOv !== 0 && mode) {
+      const max = getSpawnMaxFor(mode, selectedOv);
       if (max !== undefined) {
         const alreadyHere = overlays.current[IDX(gx, gy)] === selectedOv;
         const existing = overlays.current.filter(v => v === selectedOv).length;
@@ -450,6 +614,9 @@ function EditorCore({ onBack }: { onBack: () => void }) {
 
     const pts = mirrorCells(gx, gy);
     pts.forEach(([x, y]) => {
+      if (!isInPlayArea(x, y)) return;
+      // Не трогаем тайлы под фиксированными воротами при зеркальной симметрии.
+      if (FIXED_OVERLAYS.has(overlays.current[IDX(x, y)])) return;
       if (t === "erase") {
         cells.current[IDX(x, y)]    = 0;
         overlays.current[IDX(x, y)] = 0;
@@ -477,6 +644,7 @@ function EditorCore({ onBack }: { onBack: () => void }) {
     const y0 = Math.min(sel.y0, sel.y1), y1 = Math.max(sel.y0, sel.y1);
     for (let y = y0; y <= y1; y++) {
       for (let x = x0; x <= x1; x++) {
+        if (!isInPlayArea(x, y)) continue;
         if (selectedOv !== 0) {
           overlays.current[IDX(x, y)] = selectedOv;
           cells.current[IDX(x, y)] = 0;
@@ -490,6 +658,7 @@ function EditorCore({ onBack }: { onBack: () => void }) {
         if (mirror !== "none") {
           mirrorCells(x, y).forEach(([mx, my]) => {
             if (mx === x && my === y) return;
+            if (!isInPlayArea(mx, my)) return;
             if (selectedOv !== 0) { overlays.current[IDX(mx,my)] = selectedOv; cells.current[IDX(mx,my)] = 0; }
             else {
               cells.current[IDX(mx,my)] = selectedTile;
@@ -502,304 +671,150 @@ function EditorCore({ onBack }: { onBack: () => void }) {
         }
       }
     }
+    enforceRim(cells.current, overlays.current, rotations.current);
     setFillSel(null);
     redraw();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTile, selectedOv, mirror]);
 
-  // ── Canvas rendering ────────────────────────────────────────────────────────
+  // ── 3D rendering ────────────────────────────────────────────────────────────
+  // 2D-канвас полностью заменён на Three.js-сцену из `mapEditor3D`. Она:
+  //   • строит тайлы из тех же GLB-моделей и с теми же `tileFitParams`,
+  //     что и боевая сцена `battle3DWorld` — карта в редакторе выглядит
+  //     ровно как в бою;
+  //   • переиспользует platform-текстуру для пола (`platformTile`);
+  //   • рендерит overlay-маркеры как 3D-метки (диск + emoji-sprite);
+  //   • держит ту же камеру: 1 cell = `zoom` CSS-пикселей, точка земли
+  //     проецируется в `(gx * zoom - camX + zoom/2, gy * zoom - camY + zoom/2)`,
+  //     поэтому screen↔grid формулы редактора остаются без изменений.
+  // Стрелки H/V для bones/fence теперь — HTML-оверлей (`LineTileRotationArrows`)
+  // поверх 3D-канваса, не нужно ничего рисовать в WebGL для UI.
   const [hovCell, setHovCell] = useState<{ x: number; y: number } | null>(null);
 
+  // (1) Инициализация WebGL-рендера — ПОСЛЕ загрузки моделей И ПОСЛЕ того,
+  // как пользователь выбрал режим (раньше canvas не существует в DOM, потому
+  // что EditorCore short-circuit'ит на ModeSelectModal). Добавляем `mode` в
+  // зависимости — это и есть момент, когда canvasRef.current становится не-null.
+  // Бейкер тайлов (`disposeTileBakerRenderer` внутри `initEditor3D`) уже успел
+  // запечь палитровые превью в 2D-canvas'ы, и при освобождении оффскрин-WebGL
+  // контекста (нужного нам под лимит браузера) ничего не теряется.
+  const [editor3DReady, setEditor3DReady] = useState(false);
   useEffect(() => {
+    if (!modelsReady) return;
+    if (!mode) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    const dpr = window.devicePixelRatio || 1;
-    // Scale all drawing to CSS pixels so DPR canvas renders crisp on high-DPI screens
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "high";
+
+    // Синхронизируем РЕАЛЬНЫЙ размер canvas-родителя ПЕРЕД созданием WebGL-рендера.
+    // Иначе renderer стартует с дефолтных 800×600 и картинка получается размытой
+    // (canvas через CSS растягивается на актуальные размеры).
+    const pw = canvas.parentElement?.clientWidth ?? window.innerWidth;
+    const ph = canvas.parentElement?.clientHeight ?? window.innerHeight;
+    if (pw > 0 && ph > 0) {
+      canvas.style.width = pw + "px";
+      canvas.style.height = ph + "px";
+      cssCanvas.current = { w: pw, h: ph };
+      if (!initialCamSet.current) {
+        initialCamSet.current = true;
+        zoom.current = Math.max(getMinZoom(), Math.min(28, Math.floor(pw / GS)));
+        const mapPx = GS * zoom.current;
+        camX.current = 0;
+        camY.current = Math.max(0, (mapPx - ph) / 2);
+      }
+      clampCam();
+    }
+
+    const ok = initEditor3D(canvas);
+    if (ok) {
+      // После создания рендера дополнительно синкаем его size (внутри init он
+      // использует значение currentCanvasCssW=800 по умолчанию, перебиваем).
+      setEditorCanvasSize(cssCanvas.current.w, cssCanvas.current.h);
+      setEditorCamera(camX.current, camY.current, zoom.current);
+      setEditor3DReady(true);
+    }
+    return () => {
+      disposeEditor3D();
+      setEditor3DReady(false);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelsReady, mode]);
+
+  // (2) Полная пересборка тайлов/оверлеев — только когда содержимое карты
+  // меняется (place/erase/clear/load/random).
+  useEffect(() => {
+    if (!editor3DReady) return;
+    rebuildEditorGrid(cells.current, overlays.current, rotations.current, GS);
+    setEditorCanvasSize(cssCanvas.current.w, cssCanvas.current.h);
+    setEditorCamera(camX.current, camY.current, zoom.current);
+    renderEditor3D();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editor3DReady, tileTick]);
+
+  // (3) Камера/пан/зум/resize — обновляем только ortho-frustum и рендерим.
+  useEffect(() => {
+    if (!editor3DReady) return;
+    setEditorCamera(camX.current, camY.current, zoom.current);
+    renderEditor3D();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editor3DReady, cameraTick]);
+
+  // (4) 3D-контур блоков (не пустых клеток) при hover/fixed.
+  useEffect(() => {
+    if (!editor3DReady) return;
+    const hoverForSel = hovCell && isInPlayArea(hovCell.x, hovCell.y) ? hovCell : null;
+    const fixedForSel = fixedCell && isInPlayArea(fixedCell.x, fixedCell.y) ? fixedCell : null;
+    setEditorCellHighlights({
+      hover: hoverForSel,
+      fixed: fixedForSel,
+      cells: cells.current,
+      overlays: overlays.current,
+      rotations: rotations.current,
+      gs: GS,
+    });
+    renderEditor3D();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editor3DReady, tileTick, cameraTick, hovCell, fixedCell]);
+
+  // (5) Hit-test для HTML-стрелок.
+  // стрелки не прыгают на соседнюю клетку под курсором.
+  useEffect(() => {
+    const arrowCell = fixedCell ?? hovCell;
+    if (!arrowCell) { rotBtnsRef.current = null; return; }
+    const hovT = cells.current[IDX(arrowCell.x, arrowCell.y)];
+    const isLine = hovT === 5 || hovT === 6;
+    const isRot = hovT === 1 || hovT === 11;
+    if (!isLine && !isRot) { rotBtnsRef.current = null; return; }
     const cs = zoom.current;
-    const ox = camX.current, oy = camY.current;
-    const W = cssCanvas.current.w;
-    const H = cssCanvas.current.h;
+    const sx = arrowCell.x * cs - camX.current;
+    const sy = arrowCell.y * cs - camY.current;
+    const btnH = Math.max(16, Math.round(cs * 0.40));
+    const btnW = Math.max(20, Math.round(cs * 0.46));
+    const gap = Math.round(cs * 0.08);
+    const totalW = btnW * 2 + gap;
+    const bx = sx + (cs - totalW) / 2;
+    const by = sy - btnH - 4;
+    rotBtnsRef.current = {
+      H: { x: bx, y: by, w: btnW, h: btnH },
+      V: { x: bx + btnW + gap, y: by, w: btnW, h: btnH },
+      gx: arrowCell.x, gy: arrowCell.y,
+      mode: isLine ? "line" : "rot",
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hovCell, fixedCell, tileTick, cameraTick]);
 
-    ctx.clearRect(0, 0, W, H);
-
-    // Dark void outside the map area
-    ctx.fillStyle = "#0d0d1a";
-    ctx.fillRect(0, 0, W, H);
-
-    const x0 = Math.max(0, Math.floor(ox / cs));
-    const x1 = Math.min(GS - 1, Math.ceil((ox + W) / cs));
-    const y0 = Math.max(0, Math.floor(oy / cs));
-    const y1 = Math.min(GS - 1, Math.ceil((oy + H) / cs));
-
-    const platformCanvas = getPlatformTileCanvas();
-
-    // ── Pass 1: ONE platform image stretched across the entire 60×60 map ───
-    const mapSX = -ox, mapSY = -oy, mapSW = GS * cs, mapSH = GS * cs;
-    if (platformCanvas) {
-      ctx.drawImage(platformCanvas, mapSX, mapSY, mapSW, mapSH);
-    } else {
-      ctx.fillStyle = "#5a8c44";
-      ctx.fillRect(mapSX, mapSY, mapSW, mapSH);
-    }
-
-    // ── Pass 2: Tile models — painter order by (gx+gy) so NW is “back”, SE is “front”
-    // (same idea as MapRenderer). Row-major gy→gx mis-orders diagonal neighbors.
-    const SOLID_OD = cs * 0.08;
-    const BUSH_OD  = cs * 0.40;
-    const WATER_OD = cs * 0.20;
-    // Tall solid tiles (wall, mountain, cactus, wood, stone, pyramid) use extra
-    // upward overdraw; clip when stacking matches MapRenderer to avoid wrong overlap.
-    const TALL_TILES = new Set([1, 2, 9, 10, 11, 12]);
-    // Line tiles (fence, bone) auto-rotate 90° when they only have vertical neighbors
-    const LINE_TILES = new Set([5, 6]);
-
-    const sMin = x0 + y0;
-    const sMax = x1 + y1;
-    for (let s = sMin; s <= sMax; s++) {
-      const gxMin = Math.max(x0, s - y1);
-      const gxMax = Math.min(x1, s - y0);
-      for (let gx = gxMin; gx <= gxMax; gx++) {
-        const gy = s - gx;
-        const sx = gx * cs - ox, sy = gy * cs - oy;
-        const t = cells.current[IDX(gx, gy)];
-        const ov = overlays.current[IDX(gx, gy)];
-
-        if (t === 0 && ov === 0) continue; // pure grass — already drawn
-
-        if (t !== 0) {
-          const modelCanvas = getTileCanvas(t);
-          const tileDef = (TILE_DEFS as readonly { type: number; color: string; icon: string }[]).find(d => d.type === t);
-
-          if (modelCanvas) {
-            if (LINE_TILES.has(t)) {
-              // Bones (5) and Fence (6) orientation stored per-cell in rotations.current.
-              // Arrow keys / toolbar set lineDir (default for newly placed tiles).
-              const isVertical = rotations.current[IDX(gx, gy)] === 1;
-              const od = 0;
-              if (isVertical) {
-                ctx.save();
-                ctx.translate(sx + cs / 2, sy + cs / 2);
-                ctx.rotate(Math.PI / 2);
-                ctx.drawImage(modelCanvas, -cs / 2, -cs / 2, cs, cs);
-                ctx.restore();
-              } else {
-                ctx.drawImage(modelCanvas, sx, sy, cs, cs);
-              }
-            } else if (TALL_TILES.has(t)) {
-              // Fix south-side bleed: when same-type block is directly BELOW (hasSameSouth),
-              // clip this block's bottom at 73% of cell height — that is where the lower
-              // block's diamond face starts, so the seam is seamless with no south-wall peek.
-              // When a same-type block is ABOVE (hasSameNorth), extend odTop to 1.3×cs so
-              // this block's diamond covers the gap left by the upper block's clip.
-              const odSide = cs * 0.08;
-              const hasSameNorth = gy > 0       && cells.current[IDX(gx, gy - 1)] === t;
-              const hasSameSouth = gy < GS - 1  && cells.current[IDX(gx, gy + 1)] === t;
-              const odTop = hasSameNorth ? cs * 0.55 : cs * 0.26;
-              if (hasSameSouth) {
-                ctx.save();
-                ctx.beginPath();
-                // Column-local clip (same as MapRenderer) — full-width clip caused bad seams.
-                ctx.rect(sx - cs, 0, cs * 3, Math.round(sy + cs * 0.50));
-                ctx.clip();
-                ctx.drawImage(modelCanvas, sx - odSide, sy - odTop, cs + odSide * 2, cs + odTop);
-                ctx.restore();
-              } else {
-                ctx.drawImage(modelCanvas, sx - odSide, sy - odTop, cs + odSide * 2, cs + odTop);
-              }
-            } else {
-              // Barrel (type 7) gets a modest overdraw so it looks fuller in the cell
-              const od = t === 3 ? BUSH_OD : t === 4 ? WATER_OD : t === 7 ? cs * 0.10 : SOLID_OD;
-              const odTop = t === 7 ? cs * 0.10 : od;
-              ctx.drawImage(modelCanvas, sx - od, sy - odTop, cs + od * 2, cs + odTop);
-            }
-          } else {
-            // Models not loaded yet — fallback flat colour + icon
-            ctx.fillStyle = tileDef?.color ?? "#888";
-            ctx.fillRect(sx, sy, cs, cs);
-            if (cs >= 18) {
-              ctx.font = `${Math.min(cs * 0.5, 16)}px serif`;
-              ctx.textAlign = "center"; ctx.textBaseline = "middle";
-              ctx.fillText(tileDef?.icon ?? "?", sx + cs / 2, sy + cs / 2);
-            }
-          }
-        }
-
-        // Overlay markers (spawn points, safes, goals, etc.)
-        if (ov !== 0) {
-          const ovDef = ALL_OVERLAY_DEFS.find(d => d.ov === ov);
-          if (ovDef) {
-            const r = cs * 0.38;
-            ctx.save();
-            const isSafeOv = ov === OV.SAFE_BLUE || ov === OV.SAFE_RED
-              || ov === OV.BASE_BLUE || ov === OV.BASE_RED;
-            if (ov === OV.POWER_BOX) {
-              const boxSprite = getPowerBoxCanvas();
-              if (boxSprite) {
-                const D = cs * 1.4;
-                ctx.globalAlpha = 0.95;
-                ctx.shadowColor = "#CE93D8";
-                ctx.shadowBlur = 10;
-                ctx.drawImage(boxSprite, sx + cs / 2 - D / 2, sy + cs / 2 - D / 2 - 2, D, D);
-                ctx.shadowBlur = 0;
-                ctx.globalAlpha = 1;
-              } else {
-                ctx.globalAlpha = 0.92;
-                ctx.fillStyle = ovDef.color;
-                ctx.beginPath();
-                ctx.arc(sx + cs / 2, sy + cs / 2, r, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.globalAlpha = 1;
-                ctx.font = `${Math.min(r * 1.2, 18)}px serif`;
-                ctx.textAlign = "center"; ctx.textBaseline = "middle";
-                ctx.fillText(ovDef.icon, sx + cs / 2, sy + cs / 2);
-              }
-            } else if (isSafeOv) {
-              const safeSprite = getSafeCanvas();
-              if (safeSprite) {
-                const D = cs * 1.35;
-                ctx.globalAlpha = 0.95;
-                ctx.shadowColor = ovDef.color;
-                ctx.shadowBlur = 10;
-                ctx.drawImage(safeSprite, sx + cs / 2 - D / 2, sy + cs / 2 - D / 2 - 2, D, D);
-                ctx.shadowBlur = 0;
-                ctx.globalAlpha = 1;
-                // Team tint
-                const isBlue = ov === OV.SAFE_BLUE || ov === OV.BASE_BLUE;
-                ctx.fillStyle = isBlue ? "rgba(25,100,210,0.22)" : "rgba(210,30,30,0.22)";
-                ctx.fillRect(sx + cs / 2 - D / 2, sy + cs / 2 - D / 2 - 2, D, D);
-              } else {
-                ctx.globalAlpha = 0.92;
-                ctx.fillStyle = ovDef.color;
-                ctx.beginPath();
-                ctx.arc(sx + cs / 2, sy + cs / 2, r, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.globalAlpha = 1;
-                ctx.font = `${Math.min(r * 1.2, 18)}px serif`;
-                ctx.textAlign = "center"; ctx.textBaseline = "middle";
-                ctx.fillText(ovDef.icon, sx + cs / 2, sy + cs / 2);
-              }
-            } else {
-              ctx.globalAlpha = 0.92;
-              ctx.fillStyle = ovDef.color;
-              ctx.beginPath();
-              ctx.arc(sx + cs / 2, sy + cs / 2, r, 0, Math.PI * 2);
-              ctx.fill();
-              ctx.globalAlpha = 1;
-              if (cs >= 16) {
-                ctx.font = `${Math.min(r * 1.2, 18)}px serif`;
-                ctx.textAlign = "center"; ctx.textBaseline = "middle";
-                ctx.fillText(ovDef.icon, sx + cs / 2, sy + cs / 2);
-              }
-            }
-            ctx.restore();
-          }
-        }
+  // Escape — снять закрепление.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setFixedCell(null);
+        setDragGhost(null);
+        isDraggingTile.current = false;
+        dragFrom.current = null;
       }
-    }
-
-    // Grid lines
-    ctx.strokeStyle = "rgba(255,255,255,0.08)";
-    ctx.lineWidth = 0.5;
-    for (let gx = x0; gx <= x1 + 1; gx++) {
-      const sx = gx * cs - ox;
-      ctx.beginPath(); ctx.moveTo(sx, 0); ctx.lineTo(sx, H); ctx.stroke();
-    }
-    for (let gy = y0; gy <= y1 + 1; gy++) {
-      const sy = gy * cs - oy;
-      ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(W, sy); ctx.stroke();
-    }
-
-    // Center cross (for gem grab etc.)
-    const halfSx = 30 * cs - ox, halfSy = 30 * cs - oy;
-    ctx.strokeStyle = "rgba(255,255,255,0.25)";
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([4, 4]);
-    ctx.beginPath(); ctx.moveTo(halfSx, 0); ctx.lineTo(halfSx, H); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0, halfSy); ctx.lineTo(W, halfSy); ctx.stroke();
-    ctx.setLineDash([]);
-
-    // Half-map border (for symmetric placement guidance)
-    ctx.strokeStyle = "rgba(255,255,0,0.15)";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(-ox, -oy, GS * cs, GS * cs);
-
-    // Fill rect selection
-    if (fillSel) {
-      const fx0 = Math.min(fillSel.x0, fillSel.x1) * cs - ox;
-      const fy0 = Math.min(fillSel.y0, fillSel.y1) * cs - oy;
-      const fw = (Math.abs(fillSel.x1 - fillSel.x0) + 1) * cs;
-      const fh = (Math.abs(fillSel.y1 - fillSel.y0) + 1) * cs;
-      ctx.fillStyle = "rgba(255,255,0,0.15)";
-      ctx.fillRect(fx0, fy0, fw, fh);
-      ctx.strokeStyle = "#FFD54F";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(fx0, fy0, fw, fh);
-    }
-
-    // Hover highlight + LINE_TILE rotation arrows
-    rotBtnsRef.current = null;
-    if (hovCell) {
-      const sx = hovCell.x * cs - ox, sy = hovCell.y * cs - oy;
-      ctx.strokeStyle = "#ffffff99";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(sx + 1, sy + 1, cs - 2, cs - 2);
-      // Mirror highlights
-      mirrorCells(hovCell.x, hovCell.y).slice(1).forEach(([mx, my]) => {
-        const msx = mx * cs - ox, msy = my * cs - oy;
-        ctx.strokeStyle = "#FFD54F88";
-        ctx.strokeRect(msx + 1, msy + 1, cs - 2, cs - 2);
-      });
-      // If hovered cell is a LINE_TILE (bones=5, fence=6), draw H/V rotation arrows above it
-      const hovT = cells.current[IDX(hovCell.x, hovCell.y)];
-      if (hovT === 5 || hovT === 6) {
-        const curRot = rotations.current[IDX(hovCell.x, hovCell.y)];
-        const btnH = Math.max(16, Math.round(cs * 0.40));
-        const btnW = Math.max(20, Math.round(cs * 0.46));
-        const gap = Math.round(cs * 0.08);
-        const totalW = btnW * 2 + gap;
-        const bx = sx + (cs - totalW) / 2;
-        const by = sy - btnH - 4;
-        const hBtn = { x: bx, y: by, w: btnW, h: btnH };
-        const vBtn = { x: bx + btnW + gap, y: by, w: btnW, h: btnH };
-        rotBtnsRef.current = { H: hBtn, V: vBtn, gx: hovCell.x, gy: hovCell.y };
-        const fontSize = Math.min(btnH * 0.65, 13);
-
-        // H button
-        ctx.fillStyle = curRot === 0 ? "rgba(76,175,80,0.88)" : "rgba(30,30,50,0.78)";
-        ctx.beginPath();
-        ctx.roundRect(hBtn.x, hBtn.y, hBtn.w, hBtn.h, 4);
-        ctx.fill();
-        ctx.strokeStyle = curRot === 0 ? "#A5D6A7" : "#555";
-        ctx.lineWidth = 1;
-        ctx.stroke();
-        ctx.fillStyle = "white";
-        ctx.font = `bold ${fontSize}px sans-serif`;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText("↔", hBtn.x + hBtn.w / 2, hBtn.y + hBtn.h / 2);
-
-        // V button
-        ctx.fillStyle = curRot === 1 ? "rgba(76,175,80,0.88)" : "rgba(30,30,50,0.78)";
-        ctx.beginPath();
-        ctx.roundRect(vBtn.x, vBtn.y, vBtn.w, vBtn.h, 4);
-        ctx.fill();
-        ctx.strokeStyle = curRot === 1 ? "#A5D6A7" : "#555";
-        ctx.lineWidth = 1;
-        ctx.stroke();
-        ctx.fillStyle = "white";
-        ctx.font = `bold ${fontSize}px sans-serif`;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText("↕", vBtn.x + vBtn.w / 2, vBtn.y + vBtn.h / 2);
-      }
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [forceRedraw, hovCell, fillSel, zoom.current, camX.current, camY.current, lineDir]);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // ── Arrow keys toggle line direction when bones/fence selected ──────────────
   useEffect(() => {
@@ -820,23 +835,25 @@ function EditorCore({ onBack }: { onBack: () => void }) {
       if (!c) return;
       const pw = c.parentElement?.clientWidth  ?? window.innerWidth;
       const ph = c.parentElement?.clientHeight ?? window.innerHeight;
-      if (pw === 0 || ph === 0) return; // layout not settled yet
-      const dpr = window.devicePixelRatio || 1;
-      c.width  = Math.round(pw * dpr);
-      c.height = Math.round(ph * dpr);
+      if (pw === 0 || ph === 0) return;
+      // Не выставляем c.width/c.height вручную — это делает three.js через
+      // setEditorCanvasSize → renderer.setSize(pw, ph, false). Дополнительно
+      // ставим CSS-размер, чтобы canvas занимал весь parent.
       c.style.width  = pw + "px";
       c.style.height = ph + "px";
       cssCanvas.current = { w: pw, h: ph };
-      // On first load, zoom so the full 60-cell map fills the canvas width (CSS px)
+      setEditorCanvasSize(pw, ph);
       if (!initialCamSet.current) {
         initialCamSet.current = true;
-        zoom.current = Math.max(10, Math.min(28, Math.floor(pw / GS)));
+        zoom.current = Math.max(getMinZoom(), Math.min(28, Math.floor(pw / GS)));
         const mapPx = GS * zoom.current;
         camX.current = 0;
         camY.current = Math.max(0, (mapPx - ph) / 2);
       }
       clampCam();
-      redraw();
+      setEditorCamera(camX.current, camY.current, zoom.current);
+      renderEditor3D();
+      redrawCamera();
     };
     // Defer so parent flex container has settled to its final dimensions
     const rafId = requestAnimationFrame(resize);
@@ -862,22 +879,49 @@ function EditorCore({ onBack }: { onBack: () => void }) {
     }
     if (e.button !== 0) return;
 
-    // Check if click lands on a LINE_TILE rotation arrow button
+    // Клик попадает на стрелочную кнопку поверх hover-клетки.
     if (rotBtnsRef.current) {
       const { x: cx, y: cy } = clientToCanvas(e.clientX, e.clientY);
-      const { H, V, gx: bgx, gy: bgy } = rotBtnsRef.current;
+      const { H, V, gx: bgx, gy: bgy, mode: rotMode } = rotBtnsRef.current;
       const inRect = (r: { x: number; y: number; w: number; h: number }) =>
         cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h;
-      if (inRect(H)) {
-        rotations.current[IDX(bgx, bgy)] = 0;
+      const hit = inRect(H) ? "H" : inRect(V) ? "V" : null;
+      if (hit) {
+        const idx = IDX(bgx, bgy);
+        if (rotMode === "line") {
+          // bones/fence: H = горизонталь (0), V = вертикаль (1).
+          rotations.current[idx] = hit === "H" ? 0 : 1;
+        } else {
+          // wall/sand_wall: H = поворот влево (−90°), V = поворот вправо (+90°).
+          const cur = rotations.current[idx] | 0;
+          rotations.current[idx] = hit === "H" ? (cur + 3) & 3 : (cur + 1) & 3;
+        }
         redraw();
         return;
       }
-      if (inRect(V)) {
-        rotations.current[IDX(bgx, bgy)] = 1;
-        redraw();
+    }
+
+    const { x: sx, y: sy } = clientToCanvas(e.clientX, e.clientY);
+    const { gx, gy } = screenToGrid(sx, sy);
+
+    // Режим панорамы: клик по объекту закрепляет, повторный drag на нём — перенос,
+    // клик по пустой клетке — снять закрепление и панорамировать.
+    if (isPanInspectMode()) {
+      if (fixedCell && fixedCell.x === gx && fixedCell.y === gy && cellIsInteractive(gx, gy)) {
+        isDraggingTile.current = true;
+        dragFrom.current = { x: gx, y: gy };
+        setDragGhost({ x: gx, y: gy });
+        lastMouse.current = { x: e.clientX, y: e.clientY };
         return;
       }
+      if (cellIsInteractive(gx, gy)) {
+        setFixedCell({ x: gx, y: gy });
+        return;
+      }
+      setFixedCell(null);
+      isPanning.current = true;
+      lastMouse.current = { x: e.clientX, y: e.clientY };
+      return;
     }
 
     if (
@@ -889,9 +933,6 @@ function EditorCore({ onBack }: { onBack: () => void }) {
       lastMouse.current = { x: e.clientX, y: e.clientY };
       return;
     }
-
-    const { x: sx, y: sy } = clientToCanvas(e.clientX, e.clientY);
-    const { gx, gy } = screenToGrid(sx, sy);
 
     if (tool === "fill_rect") {
       fillStart.current = { x: gx, y: gy };
@@ -906,6 +947,13 @@ function EditorCore({ onBack }: { onBack: () => void }) {
 
   const onMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const { x: sx, y: sy } = clientToCanvas(e.clientX, e.clientY);
+    const { gx, gy } = screenToGrid(sx, sy);
+
+    if (isDraggingTile.current) {
+      setDragGhost(inBounds(gx, gy) ? { x: gx, y: gy } : null);
+      setHovCell(inBounds(gx, gy) ? { x: gx, y: gy } : null);
+      return;
+    }
 
     if (isPanning.current) {
       const { dx, dy } = clientDeltaToCanvasDelta(
@@ -918,11 +966,10 @@ function EditorCore({ onBack }: { onBack: () => void }) {
       lastMouse.current = { x: e.clientX, y: e.clientY };
     }
 
-    const { gx, gy } = screenToGrid(sx, sy);
-    setHovCell({ x: gx, y: gy });
+    setHovCell(inBounds(gx, gy) ? { x: gx, y: gy } : null);
 
     if (isPanning.current) {
-      redraw();
+      redrawCamera();
       return;
     }
 
@@ -939,6 +986,21 @@ function EditorCore({ onBack }: { onBack: () => void }) {
   };
 
   const onMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (isDraggingTile.current && dragFrom.current) {
+      const { x: sx, y: sy } = clientToCanvas(e.clientX, e.clientY);
+      const { gx, gy } = screenToGrid(sx, sy);
+      const from = dragFrom.current;
+      if (inBounds(gx, gy) && (gx !== from.x || gy !== from.y)) {
+        if (moveCellContents(from.x, from.y, gx, gy)) {
+          setFixedCell({ x: gx, y: gy });
+          redraw();
+        }
+      }
+      isDraggingTile.current = false;
+      dragFrom.current = null;
+      setDragGhost(null);
+      return;
+    }
     if (isPanning.current) { isPanning.current = false; return; }
     if (fillStart.current && fillSel && tool === "fill_rect") {
       applyFillRect(fillSel);
@@ -948,38 +1010,66 @@ function EditorCore({ onBack }: { onBack: () => void }) {
     brushLastCell.current = null;
   };
 
-  const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
-    e.preventDefault();
-    const { x: mx, y: my } = clientToCanvas(e.clientX, e.clientY);
-    const worldX = (mx + camX.current) / zoom.current;
-    const worldY = (my + camY.current) / zoom.current;
-    // Multiplicative zoom (±15% per tick) for smooth, even steps at all zoom levels
-    const factor = e.deltaY > 0 ? (1 / 1.15) : 1.15;
-    zoom.current = Math.max(8, Math.min(40, zoom.current * factor));
-    camX.current = worldX * zoom.current - mx;
-    camY.current = worldY * zoom.current - my;
-    clampCam();
-    const { gx, gy } = screenToGrid(mx, my);
-    setHovCell({ x: gx, y: gy });
-    redraw();
-  };
+  // Wheel-зум через native-listener с {passive: false}, чтобы preventDefault
+  // реально работал (React 17+ навешивает onWheel в режиме passive=true и
+  // preventDefault для него игнорируется браузером).
+  useEffect(() => {
+    const c = canvasRef.current;
+    if (!c) return;
+    const handler = (e: WheelEvent) => {
+      e.preventDefault();
+      const { x: mx, y: my } = clientToCanvas(e.clientX, e.clientY);
+      const worldX = (mx + camX.current) / zoom.current;
+      const worldY = (my + camY.current) / zoom.current;
+      const factor = e.deltaY > 0 ? (1 / 1.15) : 1.15;
+      zoom.current = Math.max(getMinZoom(), Math.min(ZOOM_MAX, zoom.current * factor));
+      camX.current = worldX * zoom.current - mx;
+      camY.current = worldY * zoom.current - my;
+      clampCam();
+      const { gx, gy } = screenToGrid(mx, my);
+      setHovCell({ x: gx, y: gy });
+      redrawCamera();
+    };
+    c.addEventListener("wheel", handler, { passive: false });
+    return () => c.removeEventListener("wheel", handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
 
   // ── Touch support ───────────────────────────────────────────────────────────
   const lastTouches = useRef<React.Touch[]>([]);
   const onTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
     lastTouches.current = Array.from(e.touches) as React.Touch[];
     if (e.touches.length === 1) {
+      const t = e.touches[0];
+      const { x: tx, y: ty } = clientToCanvas(t.clientX, t.clientY);
+      const { gx, gy } = screenToGrid(tx, ty);
+
+      if (isPanInspectMode()) {
+        if (fixedCell && fixedCell.x === gx && fixedCell.y === gy && cellIsInteractive(gx, gy)) {
+          isDraggingTile.current = true;
+          dragFrom.current = { x: gx, y: gy };
+          setDragGhost({ x: gx, y: gy });
+          lastMouse.current = { x: t.clientX, y: t.clientY };
+          return;
+        }
+        if (cellIsInteractive(gx, gy)) {
+          setFixedCell({ x: gx, y: gy });
+          return;
+        }
+        setFixedCell(null);
+        isPanning.current = true;
+        lastMouse.current = { x: t.clientX, y: t.clientY };
+        return;
+      }
+
       const isPanMode =
         spacePan.current ||
         tool === "pan" ||
         (tool === "place" && selectedTile === 0 && selectedOv === 0);
       if (isPanMode) {
         isPanning.current = true;
-        lastMouse.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        lastMouse.current = { x: t.clientX, y: t.clientY };
       } else {
-        const t = e.touches[0];
-        const { x: tx, y: ty } = clientToCanvas(t.clientX, t.clientY);
-        const { gx, gy } = screenToGrid(tx, ty);
         isDrawing.current = true;
         applyToCell(gx, gy, tool === "erase" ? "erase" : "place");
       }
@@ -995,7 +1085,7 @@ function EditorCore({ onBack }: { onBack: () => void }) {
         const curDist  = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
         const ratio = curDist / prevDist;
         const oldZ = zoom.current;
-        zoom.current = Math.max(8, Math.min(40, oldZ * ratio));
+        zoom.current = Math.max(getMinZoom(), Math.min(ZOOM_MAX, oldZ * ratio));
         const cx = (a.clientX + b.clientX) / 2;
         const cy = (a.clientY + b.clientY) / 2;
         const { x: cmx, y: cmy } = clientToCanvas(cx, cy);
@@ -1014,9 +1104,19 @@ function EditorCore({ onBack }: { onBack: () => void }) {
         camY.current -= dy;
         clampCam();
       }
-      redraw();
+      redrawCamera();
     } else if (e.touches.length === 1) {
       const t = e.touches[0];
+      const { x: tx, y: ty } = clientToCanvas(t.clientX, t.clientY);
+      const { gx, gy } = screenToGrid(tx, ty);
+
+      if (isDraggingTile.current) {
+        setDragGhost(inBounds(gx, gy) ? { x: gx, y: gy } : null);
+        setHovCell(inBounds(gx, gy) ? { x: gx, y: gy } : null);
+        lastTouches.current = Array.from(e.touches) as React.Touch[];
+        return;
+      }
+
       if (isPanning.current) {
         const { dx, dy } = clientDeltaToCanvasDelta(
           t.clientX - lastMouse.current.x,
@@ -1029,7 +1129,7 @@ function EditorCore({ onBack }: { onBack: () => void }) {
         const { x: tx, y: ty } = clientToCanvas(t.clientX, t.clientY);
         const { gx, gy } = screenToGrid(tx, ty);
         setHovCell({ x: gx, y: gy });
-        redraw();
+        redrawCamera();
       } else if (isDrawing.current) {
         const { x: tx, y: ty } = clientToCanvas(t.clientX, t.clientY);
         const { gx, gy } = screenToGrid(tx, ty);
@@ -1041,7 +1141,25 @@ function EditorCore({ onBack }: { onBack: () => void }) {
     }
     lastTouches.current = Array.from(e.touches) as React.Touch[];
   };
-  const onTouchEnd = () => { isDrawing.current = false; isPanning.current = false; };
+  const onTouchEnd = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (isDraggingTile.current && dragFrom.current && e.changedTouches.length > 0) {
+      const t = e.changedTouches[0];
+      const { x: tx, y: ty } = clientToCanvas(t.clientX, t.clientY);
+      const { gx, gy } = screenToGrid(tx, ty);
+      const from = dragFrom.current;
+      if (inBounds(gx, gy) && (gx !== from.x || gy !== from.y)) {
+        if (moveCellContents(from.x, from.y, gx, gy)) {
+          setFixedCell({ x: gx, y: gy });
+          redraw();
+        }
+      }
+      isDraggingTile.current = false;
+      dragFrom.current = null;
+      setDragGhost(null);
+    }
+    isDrawing.current = false;
+    isPanning.current = false;
+  };
 
   // ── Map actions ─────────────────────────────────────────────────────────────
   const handleClear = () => {
@@ -1049,6 +1167,9 @@ function EditorCore({ onBack }: { onBack: () => void }) {
     cells.current     = new Array(GS * GS).fill(0);
     overlays.current  = new Array(GS * GS).fill(0);
     rotations.current = new Array(GS * GS).fill(0);
+    enforceRim(cells.current, overlays.current, rotations.current);
+    setFixedCell(null);
+    setDragGhost(null);
     redraw();
   };
 
@@ -1058,6 +1179,7 @@ function EditorCore({ onBack }: { onBack: () => void }) {
     cells.current     = gen.cells;
     overlays.current  = gen.overlays;
     rotations.current = new Array(GS * GS).fill(0);
+    enforceRim(cells.current, overlays.current, rotations.current);
     redraw();
     notify("Карта сгенерирована случайно");
   };
@@ -1091,6 +1213,7 @@ function EditorCore({ onBack }: { onBack: () => void }) {
     cells.current    = [...map.cells];
     overlays.current = [...map.overlays];
     rotations.current = map.rotations ? [...map.rotations] : new Array(GS * GS).fill(0);
+    enforceRim(cells.current, overlays.current, rotations.current);
     setCurrentId(map.id);
     setSaveName(map.name);
     setMode(map.mode);
@@ -1106,7 +1229,9 @@ function EditorCore({ onBack }: { onBack: () => void }) {
   };
 
   const doPublish = (map: MapSave) => {
-    publishMap({ ...map, cells: Array.from(cells.current), overlays: Array.from(overlays.current), rotations: Array.from(rotations.current), updatedAt: Date.now() });
+    const published = { ...map, cells: Array.from(cells.current), overlays: Array.from(overlays.current), rotations: Array.from(rotations.current), updatedAt: Date.now() };
+    publishMap(published);
+    markMapSeen(map.mode, published.id);
     setShowMaps(false);
     notify(`Карта «${map.name}» опубликована для режима ${EDITOR_MODES.find(m => m.id === map.mode)?.label}`);
   };
@@ -1176,6 +1301,7 @@ function EditorCore({ onBack }: { onBack: () => void }) {
           cells.current     = [...data.cells];
           overlays.current  = data.overlays?.length === GS * GS ? [...data.overlays] : new Array(GS * GS).fill(0);
           rotations.current = data.rotations?.length === GS * GS ? [...data.rotations] : new Array(GS * GS).fill(0);
+          enforceRim(cells.current, overlays.current, rotations.current);
           if (data.mode) setMode(data.mode as EditorMode);
           if (data.name) setSaveName(data.name);
           setCurrentId(null);
@@ -1190,130 +1316,206 @@ function EditorCore({ onBack }: { onBack: () => void }) {
     input.click();
   };
 
-  // Show mode select if no mode chosen
-  if (!mode) {
-    return <ModeSelectModal onSelect={(m) => {
-      setMode(m);
-      // Auto-place default spawn points immediately when a mode is chosen.
-      // The user can delete or move them later.
-      applyAutoSpawns(m, overlays.current);
-      redraw();
-    }} />;
-  }
-
   const modeInfo = EDITOR_MODES.find(m => m.id === mode)!;
   const allMaps = getSavedMaps();
 
   return (
-    <div style={{
-      position: "fixed", inset: 0,
-      background: "#0a0020",
-      display: "flex", flexDirection: "column",
-      fontFamily: "'Segoe UI', Arial, sans-serif",
-      userSelect: "none",
-    }}>
+    <div className="map-editor-root" style={{ fontFamily: "'Segoe UI', Arial, sans-serif" }}>
 
-      {/* ── Top bar ──────────────────────────────────────────────────────── */}
-      <div style={{
-        height: 52, background: "rgba(0,0,0,0.7)", borderBottom: "1px solid rgba(255,255,255,0.1)",
-        display: "flex", alignItems: "center", gap: 8, padding: "0 12px", flexShrink: 0,
-        overflowX: "auto",
-      }}>
-        <button onClick={onBack} style={tbBtn("#FF5252")}>← Выйти</button>
-
-        <div style={{ width: 1, height: 28, background: "rgba(255,255,255,0.15)", flexShrink: 0 }} />
-
-        {/* Mode chip */}
-        <div style={{
-          background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.15)",
-          borderRadius: 8, padding: "4px 10px", fontSize: 12, color: "rgba(255,255,255,0.7)",
-          flexShrink: 0, whiteSpace: "nowrap",
-        }}>
-          {modeInfo.icon} {modeInfo.label}
-        </div>
-
-        <div style={{ width: 1, height: 28, background: "rgba(255,255,255,0.15)", flexShrink: 0 }} />
-
-        {/* Tools */}
-        <ToolBtn active={tool === "pan"}       onClick={() => setTool("pan")}      label="✋ Пан" />
-        <ToolBtn active={tool === "place"}     onClick={() => setTool("place")}    label="✏️ Ставить" />
-        <ToolBtn active={tool === "erase"}     onClick={() => setTool("erase")}    label="🧹 Ластик" />
-        <ToolBtn active={tool === "brush"}     onClick={() => setTool("brush")}    label="🖌️ Кисть" />
-        <ToolBtn active={tool === "fill_rect"} onClick={() => setTool("fill_rect")}label="▭ Заполнить" />
-
-        {/* Bones/Fence direction — only shown when bones or fence tile is selected */}
-        {(selectedTile === 5 || selectedTile === 6) && (
-          <>
-            <div style={{ width: 1, height: 28, background: "rgba(255,255,255,0.15)", flexShrink: 0 }} />
-            <ToolBtn active={lineDir !== "v"} onClick={() => setLineDir("h")}    label="↔ Гориз." />
-            <ToolBtn active={lineDir === "v"} onClick={() => setLineDir("v")}    label="↕ Верт." />
-          </>
-        )}
-
-        <div style={{ width: 1, height: 28, background: "rgba(255,255,255,0.15)", flexShrink: 0 }} />
-
-        {/* Mirror */}
-        <select
-          value={mirror}
-          onChange={e => setMirror(e.target.value as Mirror)}
-          style={{
-            background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.2)",
-            borderRadius: 8, padding: "4px 8px", color: "white", fontSize: 12, cursor: "pointer",
-            flexShrink: 0,
-          }}
-        >
-          <option value="none">🔲 Без зеркала</option>
-          <option value="h">↔ По гориз.</option>
-          <option value="v">↕ По верт.</option>
-          <option value="both">⊞ Оба</option>
-        </select>
-
-        <div style={{ width: 1, height: 28, background: "rgba(255,255,255,0.15)", flexShrink: 0 }} />
-
-        <button onClick={handleClear}  style={tbBtn("#FF7043")}>🗑️ Очистить</button>
-        <button onClick={handleRandom} style={tbBtn("#AB47BC")}>🎲 Рандом</button>
-        <button onClick={() => { setMaps(getSavedMaps()); setShowMaps(true); }} style={tbBtn("#26C6DA")}>📂 Карты</button>
-        <button onClick={() => setShowSave(true)} style={tbBtn("#66BB6A")}>💾 Сохранить</button>
-        <button onClick={handlePublishCurrent}     style={tbBtn("#FFD54F")}>🌐 Опубликовать</button>
-
-        <div style={{ width: 1, height: 28, background: "rgba(255,255,255,0.15)", flexShrink: 0 }} />
-
-        <button onClick={handleExport} style={tbBtn("rgba(255,255,255,0.4)")}>⬇ Экспорт</button>
-        <button onClick={handleImport} style={tbBtn("rgba(255,255,255,0.4)")}>⬆ Импорт</button>
-
-        <button onClick={() => {
-          lockAdmin();
-          onBack();
-        }} style={{ ...tbBtn("#FF5252"), marginLeft: "auto", flexShrink: 0 }}>🔒 Выйти</button>
-      </div>
-
-      {/* ── Canvas area ──────────────────────────────────────────────────── */}
-      <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
+      {/* 3D на весь экран — панели лежат поверх, сквозь них видна карта */}
+      <div className="map-editor-viewport">
         <canvas
           ref={canvasRef}
           style={{
             display: "block", width: "100%", height: "100%", touchAction: "none",
-            cursor: tool === "pan" ? (isPanning.current ? "grabbing" : "grab") : tool === "erase" ? "cell" : "crosshair",
+            cursor: dragGhost
+              ? "grabbing"
+              : tool === "pan" || (tool === "place" && selectedTile === 0 && selectedOv === 0)
+                ? (fixedCell && hovCell && fixedCell.x === hovCell.x && fixedCell.y === hovCell.y
+                  ? "grab"
+                  : isPanning.current ? "grabbing" : "default")
+                : tool === "erase" ? "cell" : "crosshair",
           }}
           onMouseDown={onMouseDown}
           onMouseMove={onMouseMove}
           onMouseUp={onMouseUp}
-          onMouseLeave={() => { isPanning.current = false; isDrawing.current = false; setHovCell(null); }}
-          onWheel={onWheel}
+          onMouseLeave={() => {
+            isPanning.current = false;
+            isDrawing.current = false;
+            isDraggingTile.current = false;
+            dragFrom.current = null;
+            setDragGhost(null);
+            setHovCell(null);
+          }}
           onContextMenu={e => e.preventDefault()}
           onTouchStart={onTouchStart}
           onTouchMove={onTouchMove}
           onTouchEnd={onTouchEnd}
         />
 
+        {/* Hover / mirror / fill_rect / H-V стрелки — всё HTML-overlay поверх
+            3D-канваса. Это намеренно: HTML позиционируется в CSS-пикселях по тем
+            же формулам, что и `screenToGrid`, поэтому индикатор ВСЕГДА точно
+            под курсором (в отличие от 3D-кольца, которое могло «потеряться» на
+            маленьком zoom из-за tilt-проекции). И стиль на CSS — это просто
+            быстрее, чем гонять InstancedMesh на каждое движение мыши. */}
+        <div style={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "hidden" }}>
+          {fixedCell && isInPlayArea(fixedCell.x, fixedCell.y)
+            && !cellHasContent(fixedCell.x, fixedCell.y)
+            && (!hovCell || hovCell.x !== fixedCell.x || hovCell.y !== fixedCell.y || dragGhost) && (
+            <div style={{
+              position: "absolute",
+              left: fixedCell.x * zoom.current - camX.current,
+              top: fixedCell.y * zoom.current - camY.current,
+              width: zoom.current,
+              height: zoom.current,
+              background: "rgba(76,175,80,0.22)",
+              border: "2px solid rgba(129,199,132,0.95)",
+              boxSizing: "border-box",
+              borderRadius: 2,
+              boxShadow: "0 0 12px rgba(76,175,80,0.55)",
+            }} />
+          )}
+
+          {hovCell && isInPlayArea(hovCell.x, hovCell.y) && !cellHasContent(hovCell.x, hovCell.y) && (
+            <div style={{
+              position: "absolute",
+              left: hovCell.x * zoom.current - camX.current,
+              top: hovCell.y * zoom.current - camY.current,
+              width: zoom.current,
+              height: zoom.current,
+              background: fixedCell && fixedCell.x === hovCell.x && fixedCell.y === hovCell.y
+                ? "rgba(76,175,80,0.28)"
+                : "rgba(255,255,255,0.18)",
+              border: fixedCell && fixedCell.x === hovCell.x && fixedCell.y === hovCell.y
+                ? "2px solid rgba(165,214,167,1)"
+                : "2px solid rgba(255,255,255,0.85)",
+              boxSizing: "border-box",
+              borderRadius: 2,
+              boxShadow: fixedCell && fixedCell.x === hovCell.x && fixedCell.y === hovCell.y
+                ? "0 0 12px rgba(76,175,80,0.6)"
+                : "0 0 10px rgba(255,255,255,0.45)",
+            }} />
+          )}
+
+          {dragGhost && (
+            <div style={{
+              position: "absolute",
+              left: dragGhost.x * zoom.current - camX.current,
+              top: dragGhost.y * zoom.current - camY.current,
+              width: zoom.current,
+              height: zoom.current,
+              background: "rgba(255,213,79,0.25)",
+              border: "2px dashed #FFD54F",
+              boxSizing: "border-box",
+              borderRadius: 2,
+            }} />
+          )}
+
+          {/* Подсветка зеркал */}
+          {hovCell && mirrorCells(hovCell.x, hovCell.y).slice(1)
+            .filter(([mx, my]) => isInPlayArea(mx, my))
+            .map(([mx, my]) => (
+            <div key={`mirror-${mx}-${my}`} style={{
+              position: "absolute",
+              left: mx * zoom.current - camX.current,
+              top: my * zoom.current - camY.current,
+              width: zoom.current,
+              height: zoom.current,
+              background: "rgba(255,213,79,0.12)",
+              border: "2px solid rgba(255,213,79,0.7)",
+              boxSizing: "border-box",
+              borderRadius: 2,
+            }} />
+          ))}
+
+          {/* Прямоугольник заполнения */}
+          {fillSel && (() => {
+            const x0 = Math.min(fillSel.x0, fillSel.x1);
+            const y0 = Math.min(fillSel.y0, fillSel.y1);
+            const w  = (Math.abs(fillSel.x1 - fillSel.x0) + 1);
+            const h  = (Math.abs(fillSel.y1 - fillSel.y0) + 1);
+            return (
+              <div style={{
+                position: "absolute",
+                left: x0 * zoom.current - camX.current,
+                top: y0 * zoom.current - camY.current,
+                width: w * zoom.current,
+                height: h * zoom.current,
+                background: "rgba(255,213,79,0.15)",
+                border: "2px solid #FFD54F",
+                boxSizing: "border-box",
+                borderRadius: 2,
+              }} />
+            );
+          })()}
+
+          {/* Стрелочные кнопки: на закреплённой клетке (приоритет) или под курсором */}
+          {(fixedCell ?? hovCell) && (() => {
+            const r = rotBtnsRef.current;
+            if (!r) return null;
+            const idx = IDX(r.gx, r.gy);
+            const curRot = rotations.current[idx] ?? 0;
+            const isLine = r.mode === "line";
+
+            const onHit = (which: "H" | "V") => {
+              if (isLine) {
+                rotations.current[idx] = which === "H" ? 0 : 1;
+              } else {
+                const cur = rotations.current[idx] | 0;
+                rotations.current[idx] = which === "H" ? (cur + 3) & 3 : (cur + 1) & 3;
+              }
+              redraw();
+            };
+
+            const btnStyle = (active: boolean): React.CSSProperties => ({
+              position: "absolute",
+              background: active ? "rgba(76,175,80,0.88)" : "rgba(30,30,50,0.78)",
+              border: `1px solid ${active ? "#A5D6A7" : "#555"}`,
+              borderRadius: 4,
+              color: "white",
+              fontWeight: 700,
+              fontSize: Math.min(r.H.h * 0.65, 13),
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
+              userSelect: "none",
+              pointerEvents: "auto",
+            });
+
+            const lblH = isLine ? "↔" : "↺";
+            const lblV = isLine ? "↕" : "↻";
+            // У rot-режима «active» подсветки нет — каждый клик меняет rot,
+            // нет одного «правильного» состояния. Для line-режима подсвечиваем
+            // текущее направление.
+            const aH = isLine ? curRot === 0 : false;
+            const aV = isLine ? curRot === 1 : false;
+
+            return (
+              <>
+                <div
+                  style={{ ...btnStyle(aH), left: r.H.x, top: r.H.y, width: r.H.w, height: r.H.h }}
+                  onMouseDown={(e) => { e.stopPropagation(); onHit("H"); }}
+                >{lblH}</div>
+                <div
+                  style={{ ...btnStyle(aV), left: r.V.x, top: r.V.y, width: r.V.w, height: r.V.h }}
+                  onMouseDown={(e) => { e.stopPropagation(); onHit("V"); }}
+                >{lblV}</div>
+              </>
+            );
+          })()}
+        </div>
+
         {/* Zoom indicator */}
         <div style={{
-          position: "absolute", top: 10, right: 10,
-          background: "rgba(0,0,0,0.5)", borderRadius: 8, padding: "6px 10px",
+          position: "absolute", top: 58, right: 10,
+          background: "rgba(8,6,22,0.42)", border: "1px solid rgba(255,255,255,0.35)",
+          borderRadius: 8, padding: "6px 10px",
           fontSize: 11, color: "rgba(255,255,255,0.65)", lineHeight: 1.35, textAlign: "right",
         }}>
           <div>{Math.round(zoom.current)} px / клетка</div>
-          <div style={{ fontSize: 10, color: "rgba(255,255,255,0.45)" }}>Панорама: пробел + ЛКМ или СКМ</div>
+          <div style={{ fontSize: 10, color: "rgba(255,255,255,0.45)" }}>Пан: пустая клетка · Закрепить: клик · Перенос: потянуть закреплённый</div>
         </div>
 
         {/* Notification */}
@@ -1329,12 +1531,61 @@ function EditorCore({ onBack }: { onBack: () => void }) {
         )}
       </div>
 
-      {/* ── Bottom palette ────────────────────────────────────────────────── */}
-      <div style={{
-        height: 82, background: "rgba(0,0,0,0.85)", borderTop: "1px solid rgba(255,255,255,0.1)",
-        display: "flex", alignItems: "center", gap: 6, padding: "0 12px",
-        overflowX: "auto", flexShrink: 0,
-      }}>
+      {/* ── Top bar (overlay) ─────────────────────────────────────────────── */}
+      <div className="map-editor-toolbar map-editor-toolbar--top ui-scroll-hidden">
+        <button className="no-ui-shear map-editor-btn" onClick={onBack} style={tbBtn("#FF5252")}>← Назад</button>
+
+        <div className="map-editor-sep" />
+
+        <div className="map-editor-chip">
+          {modeInfo.icon} {modeInfo.label}
+        </div>
+
+        <div className="map-editor-sep" />
+
+        <ToolBtn active={tool === "pan"}       onClick={() => setTool("pan")}      label="✋ Пан" />
+        <ToolBtn active={tool === "place"}     onClick={() => setTool("place")}    label="✏️ Ставить" />
+        <ToolBtn active={tool === "erase"}     onClick={() => setTool("erase")}    label="🧹 Ластик" />
+        <ToolBtn active={tool === "brush"}     onClick={() => setTool("brush")}    label="🖌️ Кисть" />
+        <ToolBtn active={tool === "fill_rect"} onClick={() => setTool("fill_rect")}label="▭ Заполнить" />
+
+        {(selectedTile === 5 || selectedTile === 6) && (
+          <>
+            <div className="map-editor-sep" />
+            <ToolBtn active={lineDir !== "v"} onClick={() => setLineDir("h")}    label="↔ Гориз." />
+            <ToolBtn active={lineDir === "v"} onClick={() => setLineDir("v")}    label="↕ Верт." />
+          </>
+        )}
+
+        <div className="map-editor-sep" />
+
+        <select
+          className="map-editor-select"
+          value={mirror}
+          onChange={e => setMirror(e.target.value as Mirror)}
+        >
+          <option value="none">🔲 Без зеркала</option>
+          <option value="h">↔ По гориз.</option>
+          <option value="v">↕ По верт.</option>
+          <option value="both">⊞ Оба</option>
+        </select>
+
+        <div className="map-editor-sep" />
+
+        <button className="no-ui-shear map-editor-btn" onClick={handleClear}  style={tbBtn("#FF7043")}>🗑️ Очистить</button>
+        <button className="no-ui-shear map-editor-btn" onClick={handleRandom} style={tbBtn("#AB47BC")}>🎲 Рандом</button>
+        <button className="no-ui-shear map-editor-btn" onClick={() => { setMaps(getSavedMaps()); setShowMaps(true); }} style={tbBtn("#26C6DA")}>📂 Карты</button>
+        <button className="no-ui-shear map-editor-btn" onClick={() => setShowSave(true)} style={tbBtn("#66BB6A")}>💾 Сохранить</button>
+        <button className="no-ui-shear map-editor-btn" onClick={handlePublishCurrent} style={tbBtn("#FFD54F")}>🌐 Опубликовать</button>
+
+        <div className="map-editor-sep" />
+
+        <button className="no-ui-shear map-editor-btn" onClick={handleExport} style={tbBtn("rgba(255,255,255,0.4)")}>⬇ Экспорт</button>
+        <button className="no-ui-shear map-editor-btn" onClick={handleImport} style={tbBtn("rgba(255,255,255,0.4)")}>⬆ Импорт</button>
+      </div>
+
+      {/* ── Bottom palette (overlay) ──────────────────────────────────────── */}
+      <div className="map-editor-toolbar map-editor-toolbar--bottom ui-scroll-hidden">
         {/* Tile palette — uses pre-rendered 3D model thumbnails */}
         {TILE_DEFS.map(td => (
           <TileModelPaletteItem
@@ -1350,7 +1601,7 @@ function EditorCore({ onBack }: { onBack: () => void }) {
           />
         ))}
 
-        <div style={{ width: 2, height: 54, background: "rgba(255,255,255,0.15)", flexShrink: 0, margin: "0 4px" }} />
+        <div className="map-editor-sep--tall" />
 
         {/* Overlay palette — filtered to current mode only */}
         {ALL_OVERLAY_DEFS.filter(od => mode && MODE_OVERLAYS[mode]?.includes(od.ov)).map(od => (
@@ -1455,7 +1706,8 @@ function Btn({ children, color, onClick }: { children: React.ReactNode; color: s
     <button onClick={onClick} style={{
       flex: 1, padding: "10px 18px", borderRadius: 10,
       background: color + "22", border: `1px solid ${color}55`,
-      color, fontWeight: 800, fontSize: 14, cursor: "pointer", fontFamily: "inherit",
+      color: textOnTintedAccent(color), fontWeight: 800, fontSize: 14, cursor: "pointer", fontFamily: "inherit",
+      textShadow: "0 1px 2px rgba(0,0,0,0.72)",
     }}>{children}</button>
   );
 }
@@ -1465,29 +1717,39 @@ function SmBtn({ children, color, onClick }: { children: React.ReactNode; color:
     <button onClick={onClick} style={{
       padding: "5px 10px", borderRadius: 8,
       background: color + "20", border: `1px solid ${color}50`,
-      color, fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit",
+      color: textOnTintedAccent(color), fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit",
       whiteSpace: "nowrap",
+      textShadow: "0 1px 2px rgba(0,0,0,0.72)",
     }}>{children}</button>
   );
 }
 
 function ToolBtn({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) {
   return (
-    <button onClick={onClick} style={{
-      padding: "4px 10px", borderRadius: 8, fontSize: 12, cursor: "pointer",
-      fontFamily: "inherit", fontWeight: 700, flexShrink: 0, whiteSpace: "nowrap",
-      background: active ? "rgba(105,240,174,0.2)" : "rgba(255,255,255,0.06)",
-      border: `1px solid ${active ? "rgba(105,240,174,0.5)" : "rgba(255,255,255,0.1)"}`,
-      color: active ? "#69F0AE" : "rgba(255,255,255,0.7)",
-    }}>{label}</button>
+    <button
+      className={`no-ui-shear map-editor-btn${active ? " map-editor-btn--active" : ""}`}
+      onClick={onClick}
+      style={{
+        padding: "4px 10px", fontSize: 12, cursor: "pointer",
+        fontFamily: "inherit", fontWeight: 700, whiteSpace: "nowrap",
+        color: active ? "#69F0AE" : "rgba(255,255,255,0.95)",
+        textShadow: "0 1px 3px rgba(0,0,0,0.85)",
+      }}
+    >{label}</button>
   );
 }
 
 function tbBtn(color: string): React.CSSProperties {
+  const isRgba = color.startsWith("rgba");
+  const label = isRgba ? "#ffffff" : textOnTintedAccent(color);
   return {
-    padding: "4px 10px", borderRadius: 8, fontSize: 12, cursor: "pointer",
-    fontFamily: "inherit", fontWeight: 700, flexShrink: 0, whiteSpace: "nowrap",
-    background: color + "18", border: `1px solid ${color}40`, color,
+    padding: "4px 10px", fontSize: 12, cursor: "pointer",
+    fontFamily: "inherit", fontWeight: 700, whiteSpace: "nowrap",
+    color: label,
+    textShadow: "0 1px 3px rgba(0,0,0,0.85)",
+    ["--me-bg" as string]: isRgba ? "rgba(8, 6, 22, 0.38)" : `${color}40`,
+    ["--me-bg-hover" as string]: isRgba ? "rgba(8, 6, 22, 0.52)" : `${color}55`,
+    ["--me-border" as string]: isRgba ? "rgba(255,255,255,0.48)" : `${color}CC`,
   };
 }
 
@@ -1495,17 +1757,27 @@ function PaletteItem({ icon, label, color, active, onClick }: {
   icon: string; label: string; color: string; active: boolean; onClick: () => void;
 }) {
   return (
-    <button onClick={onClick} style={{
-      display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
-      padding: "6px 8px", borderRadius: 10, cursor: "pointer", flexShrink: 0,
-      background: active ? color + "33" : "rgba(255,255,255,0.04)",
-      border: `2px solid ${active ? color : "rgba(255,255,255,0.08)"}`,
-      color: "white", fontFamily: "inherit",
-      boxShadow: active ? `0 0 12px ${color}66` : "none",
-      minWidth: 52,
-    }}>
-      <span style={{ fontSize: 22 }}>{icon}</span>
-      <span style={{ fontSize: 9, color: active ? color : "rgba(255,255,255,0.5)", fontWeight: 700, lineHeight: 1.2, textAlign: "center" }}>
+    <button
+      className={`no-ui-shear map-editor-palette-btn${active ? " map-editor-palette-btn--active" : ""}`}
+      onClick={onClick}
+      style={{
+        display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
+        padding: "6px 8px", cursor: "pointer",
+        color: "white", fontFamily: "inherit",
+        minWidth: 52,
+        ...(active ? {
+          ["--me-bg" as string]: `${color}38`,
+          ["--me-bg-hover" as string]: `${color}48`,
+          ["--me-border" as string]: color,
+        } : {}),
+      }}
+    >
+      <span style={{ fontSize: 22, filter: "drop-shadow(0 1px 2px rgba(0,0,0,0.7))" }}>{icon}</span>
+      <span style={{
+        fontSize: 9, color: "rgba(255,255,255,0.92)",
+        fontWeight: 700, lineHeight: 1.2, textAlign: "center",
+        textShadow: "0 1px 2px rgba(0,0,0,0.7)",
+      }}>
         {label}
       </span>
     </button>
@@ -1523,39 +1795,59 @@ function TileModelPaletteItem({ tileType, label, color, icon, active, modelsRead
     const ctx = cv.getContext("2d");
     if (!ctx) return;
     const modelCanvas = getTileCanvas(tileType);
-    ctx.clearRect(0, 0, 48, 48);
+    const px = PALETTE_THUMB_PX;
+    ctx.clearRect(0, 0, px, px);
     if (modelCanvas) {
-      if (tileType === 3) {
-        // BUSH — tall canvas (256×512), show full model squished to fit
-        ctx.drawImage(modelCanvas, 0, 0, 48, 48);
-      } else {
-        ctx.drawImage(modelCanvas, 0, 0, 48, 48);
-      }
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      const sw = modelCanvas.width;
+      const sh = modelCanvas.height;
+      // Вписываем с сохранением пропорций (cover для высоких моделей вроде куста).
+      const scale = Math.max(px / sw, px / sh);
+      const dw = sw * scale;
+      const dh = sh * scale;
+      ctx.drawImage(modelCanvas, (px - dw) / 2, (px - dh) / 2, dw, dh);
     } else {
       ctx.fillStyle = color;
-      ctx.fillRect(0, 0, 48, 48);
-      ctx.font = "24px serif";
+      ctx.fillRect(0, 0, px, px);
+      ctx.font = `${Math.round(px * 0.5)}px serif`;
       ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillText(icon, 24, 24);
+      ctx.fillText(icon, px / 2, px / 2);
     }
   }, [modelsReady, tileType, color, icon]);
 
   return (
-    <button onClick={onClick} style={{
-      display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
-      padding: "4px 6px", borderRadius: 10, cursor: "pointer", flexShrink: 0,
-      background: active ? color + "33" : "rgba(255,255,255,0.04)",
-      border: `2px solid ${active ? color : "rgba(255,255,255,0.08)"}`,
-      color: "white", fontFamily: "inherit",
-      boxShadow: active ? `0 0 12px ${color}66` : "none",
-      minWidth: 52,
-    }}>
+    <button
+      className={`no-ui-shear map-editor-palette-btn${active ? " map-editor-palette-btn--active" : ""}`}
+      onClick={onClick}
+      style={{
+        display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
+        padding: "4px 6px", cursor: "pointer",
+        color: "white", fontFamily: "inherit",
+        minWidth: 52,
+        ...(active ? {
+          ["--me-bg" as string]: `${color}38`,
+          ["--me-bg-hover" as string]: `${color}48`,
+          ["--me-border" as string]: color,
+        } : {}),
+      }}
+    >
       <canvas
         ref={canvasRef}
-        width={48} height={48}
-        style={{ width: 48, height: 48, borderRadius: 6, imageRendering: "pixelated" }}
+        width={PALETTE_THUMB_PX}
+        height={PALETTE_THUMB_PX}
+        style={{
+          width: PALETTE_THUMB_CSS,
+          height: PALETTE_THUMB_CSS,
+          borderRadius: 6,
+          imageRendering: "auto",
+        }}
       />
-      <span style={{ fontSize: 9, color: active ? color : "rgba(255,255,255,0.5)", fontWeight: 700, lineHeight: 1.2, textAlign: "center" }}>
+      <span style={{
+        fontSize: 9, color: "rgba(255,255,255,0.92)",
+        fontWeight: 700, lineHeight: 1.2, textAlign: "center",
+        textShadow: "0 1px 2px rgba(0,0,0,0.7)",
+      }}>
         {label}
       </span>
     </button>

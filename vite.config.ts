@@ -50,6 +50,20 @@ export default defineConfig({
     strictPort: true,
     host: "0.0.0.0",
     allowedHosts: true,
+    proxy: {
+      "/llm-proxy/openrouter": {
+        target: "https://openrouter.ai",
+        changeOrigin: true,
+        secure: true,
+        rewrite: (p) => p.replace(/^\/llm-proxy\/openrouter/, ""),
+      },
+      "/llm-proxy/openai": {
+        target: "https://api.openai.com",
+        changeOrigin: true,
+        secure: true,
+        rewrite: (p) => p.replace(/^\/llm-proxy\/openai/, ""),
+      },
+    },
     fs: {
       strict: true,
     },
@@ -75,5 +89,19 @@ export default defineConfig({
     port,
     host: "0.0.0.0",
     allowedHosts: true,
+    proxy: {
+      "/llm-proxy/openrouter": {
+        target: "https://openrouter.ai",
+        changeOrigin: true,
+        secure: true,
+        rewrite: (p) => p.replace(/^\/llm-proxy\/openrouter/, ""),
+      },
+      "/llm-proxy/openai": {
+        target: "https://api.openai.com",
+        changeOrigin: true,
+        secure: true,
+        rewrite: (p) => p.replace(/^\/llm-proxy\/openai/, ""),
+      },
+    },
   },
 });

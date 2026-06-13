@@ -29,8 +29,12 @@ export class InputHandler {
 
   // Joystick (mobile) overrides. When `active`, the corresponding aim
   // direction supersedes the mouse-derived aim used by all modes.
-  attackJoystick: { active: boolean; angle: number } = { active: false, angle: 0 };
-  superJoystick:  { active: boolean; angle: number } = { active: false, angle: 0 };
+  attackJoystick: { active: boolean; angle: number; magnitude: number } = { active: false, angle: 0, magnitude: 1 };
+  superJoystick:  { active: boolean; angle: number; magnitude: number } = { active: false, angle: 0, magnitude: 1 };
+  /** Space — auto-aim attack (PC). */
+  autoAttackHeld = false;
+  /** LMB — manual aim toward cursor (PC). */
+  manualAttackHeld = false;
   // Tracks whether mobile controls are currently driving movement.
   // While true, keyboard movement keys are ignored so a stuck `WASD` value
   // can never linger between modes.
@@ -65,7 +69,9 @@ export class InputHandler {
       case "KeyA": case "ArrowLeft": this.state.left = true; break;
       case "KeyD": case "ArrowRight": this.state.right = true; break;
       case "Space":
-        if (!this.state.attack) { this.state.attack = true; this.onAttack?.(); }
+        if (!e.repeat) this.onAttack?.();
+        this.autoAttackHeld = true;
+        this.state.attack = true;
         e.preventDefault();
         break;
       case "KeyE":
@@ -81,7 +87,10 @@ export class InputHandler {
       case "KeyS": case "ArrowDown": this.state.down = false; break;
       case "KeyA": case "ArrowLeft": this.state.left = false; break;
       case "KeyD": case "ArrowRight": this.state.right = false; break;
-      case "Space": this.state.attack = false; break;
+      case "Space":
+        this.autoAttackHeld = false;
+        this.state.attack = this.manualAttackHeld;
+        break;
       case "KeyE": case "KeyQ": this.state.super = false; break;
     }
   };
@@ -94,8 +103,8 @@ export class InputHandler {
 
   private onMouseDown = (e: MouseEvent): void => {
     if (e.button === 0) {
+      this.manualAttackHeld = true;
       this.state.attack = true;
-      this.onAttack?.();
     } else if (e.button === 2) {
       this.state.super = true;
       this.onSuper?.();
@@ -103,7 +112,10 @@ export class InputHandler {
   };
 
   private onMouseUp = (e: MouseEvent): void => {
-    if (e.button === 0) this.state.attack = false;
+    if (e.button === 0) {
+      this.manualAttackHeld = false;
+      this.state.attack = this.autoAttackHeld;
+    }
     if (e.button === 2) this.state.super = false;
   };
 
@@ -169,14 +181,20 @@ export class InputHandler {
 
   /** Updates the attack joystick's aim. When `active` is true the world
    * cursor anchors to the player + cos/sin(angle) on the next update. */
-  setAttackJoystick(active: boolean, angle: number): void {
+  setAttackJoystick(active: boolean, angle: number, magnitude = 1): void {
     this.attackJoystick.active = active;
-    if (active) this.attackJoystick.angle = angle;
+    if (active) {
+      this.attackJoystick.angle = angle;
+      this.attackJoystick.magnitude = magnitude;
+    }
   }
 
-  setSuperJoystick(active: boolean, angle: number): void {
+  setSuperJoystick(active: boolean, angle: number, magnitude = 1): void {
     this.superJoystick.active = active;
-    if (active) this.superJoystick.angle = angle;
+    if (active) {
+      this.superJoystick.angle = angle;
+      this.superJoystick.magnitude = magnitude;
+    }
   }
 
   /**
@@ -193,23 +211,35 @@ export class InputHandler {
       this.attackJoystick.active
     ) {
       const angle = this.attackJoystick.angle;
-      this.state.mouseWorldX = playerX + Math.cos(angle) * 1000;
-      this.state.mouseWorldY = playerY + Math.sin(angle) * 1000;
+      const mag = this.attackJoystick.magnitude;
+      const dist = mag > 0.01 ? mag * 1000 : 1000;
+      this.state.mouseWorldX = playerX + Math.cos(angle) * dist;
+      this.state.mouseWorldY = playerY + Math.sin(angle) * dist;
     }
     this.state.attack = true;
     this.onAttack();
-    queueMicrotask(() => { this.state.attack = false; });
+    queueMicrotask(() => {
+      this.state.attack = false;
+    });
   }
 
-  triggerSuper(playerX?: number, playerY?: number): void {
+  /**
+   * @param superAimMag 0…1 from mobile super stick; placed-area supers use
+   * `mag * 300` world units instead of a fixed 1000px ray.
+   */
+  triggerSuper(playerX?: number, playerY?: number, superAimMag = 0): void {
     if (!this.onSuper) return;
-    if (
-      typeof playerX === "number" && typeof playerY === "number" &&
-      this.superJoystick.active
-    ) {
-      const angle = this.superJoystick.angle;
-      this.state.mouseWorldX = playerX + Math.cos(angle) * 1000;
-      this.state.mouseWorldY = playerY + Math.sin(angle) * 1000;
+    if (typeof playerX === "number" && typeof playerY === "number") {
+      if (this.superJoystick.active && superAimMag > 0.01) {
+        const angle = this.superJoystick.angle;
+        this.superJoystick.magnitude = superAimMag;
+        const dist = superAimMag * 300;
+        this.state.mouseWorldX = playerX + Math.cos(angle) * dist;
+        this.state.mouseWorldY = playerY + Math.sin(angle) * dist;
+      } else {
+        this.state.mouseWorldX = playerX;
+        this.state.mouseWorldY = playerY;
+      }
     }
     this.state.super = true;
     this.onSuper();

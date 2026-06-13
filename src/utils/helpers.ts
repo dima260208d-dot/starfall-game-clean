@@ -1,3 +1,5 @@
+import { TILE_CELL_SIZE } from "../game/TileMap";
+
 export function clamp(val: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, val));
 }
@@ -50,38 +52,158 @@ export function normalizeAngle(a: number): number {
 export interface AutoAimTarget {
   alive: boolean;
   inBush: boolean;
+  inOctaviaInk?: boolean;
   team: string;
   x: number;
   y: number;
   radius: number;
+  isPlayer?: boolean;
+  bushRevealTimer?: number;
+}
+
+export interface AutoAimCamera {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  zoom: number;
+}
+
+export interface AutoAimCrate {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  destroyed: boolean;
+}
+
+export interface AutoAimOptions {
+  camera?: AutoAimCamera;
+  viewerTeam?: string;
+  friendliesInBush?: { tx: number; ty: number }[];
+  /** Power boxes — only when no visible enemy in range. */
+  crates?: AutoAimCrate[];
+}
+
+function visibleRangeFromPlayer(
+  player: { x: number; y: number },
+  cam: AutoAimCamera,
+): number {
+  const ww = cam.w / cam.zoom;
+  const wh = cam.h / cam.zoom;
+  const corners: [number, number][] = [
+    [cam.x, cam.y],
+    [cam.x + ww, cam.y],
+    [cam.x + ww, cam.y + wh],
+    [cam.x, cam.y + wh],
+  ];
+  let max = 0;
+  for (const [cx, cy] of corners) {
+    max = Math.max(max, distance(player.x, player.y, cx, cy));
+  }
+  return max;
+}
+
+function isOnScreen(wx: number, wy: number, cam: AutoAimCamera, margin = 48): boolean {
+  const ww = cam.w / cam.zoom;
+  const wh = cam.h / cam.zoom;
+  return (
+    wx >= cam.x - margin &&
+    wx <= cam.x + ww + margin &&
+    wy >= cam.y - margin &&
+    wy <= cam.y + wh + margin
+  );
+}
+
+/** Same bush-hide rules as battle3DWorld syncBrawlerEntry. */
+export function isAutoAimTargetVisible(
+  target: AutoAimTarget,
+  viewerTeam: string,
+  friendliesInBush: { tx: number; ty: number }[],
+): boolean {
+  if (!target.alive || target.team === viewerTeam) return false;
+  const isEnemyToViewer = !target.isPlayer && target.team !== viewerTeam;
+  if (!isEnemyToViewer || (!target.inBush && !target.inOctaviaInk)) return true;
+  let revealed = (target.bushRevealTimer ?? 0) > 0;
+  if (!revealed && target.inBush) {
+    const bTx = Math.floor(target.x / TILE_CELL_SIZE);
+    const bTy = Math.floor(target.y / TILE_CELL_SIZE);
+    for (const f of friendliesInBush) {
+      if (Math.abs(bTx - f.tx) <= 1 && Math.abs(bTy - f.ty) <= 1) {
+        revealed = true;
+        break;
+      }
+    }
+  }
+  if (!revealed && target.inOctaviaInk) return false;
+  return revealed;
+}
+
+/** Nearest intact power box in visible range (enemies take priority in autoAimAngle). */
+export function autoAimCrateTarget(
+  player: { x: number; y: number; stats: { attackRange: number } },
+  crates: AutoAimCrate[],
+  rangeMultiplier = 1.15,
+  opts?: AutoAimOptions,
+): { x: number; y: number } | null {
+  if (!crates.length) return null;
+  let range = player.stats.attackRange * rangeMultiplier;
+  if (opts?.camera) {
+    range = Math.min(range, visibleRangeFromPlayer(player, opts.camera));
+  }
+  let best: { x: number; y: number } | null = null;
+  let bestD = Infinity;
+  for (const c of crates) {
+    if (c.destroyed) continue;
+    const cx = c.x + c.w / 2;
+    const cy = c.y + c.h / 2;
+    if (opts?.camera && !isOnScreen(cx, cy, opts.camera)) continue;
+    const crateR = Math.hypot(c.w, c.h) * 0.5;
+    const d = distance(player.x, player.y, cx, cy);
+    if (d < range + crateR && d < bestD) {
+      bestD = d;
+      best = { x: cx, y: cy };
+    }
+  }
+  return best;
 }
 
 export function autoAimAngle(
   player: { x: number; y: number; team: string; stats: { attackRange: number } },
   candidates: AutoAimTarget[],
   fallbackAngle: number,
-  rangeMultiplier = 1.15
+  rangeMultiplier = 1.15,
+  opts?: AutoAimOptions,
 ): number {
-  const best = autoAimTarget(player, candidates, rangeMultiplier);
+  const best = autoAimTarget(player, candidates, rangeMultiplier, opts);
   if (best) return angleTo(player.x, player.y, best.x, best.y);
+  const crates = opts?.crates;
+  if (crates?.length) {
+    const crate = autoAimCrateTarget(player, crates, rangeMultiplier, opts);
+    if (crate) return angleTo(player.x, player.y, crate.x, crate.y);
+  }
   return fallbackAngle;
 }
 
 export function autoAimTarget(
   player: { x: number; y: number; team: string; stats: { attackRange: number } },
   candidates: AutoAimTarget[],
-  rangeMultiplier = 1.15
+  rangeMultiplier = 1.15,
+  opts?: AutoAimOptions,
 ): AutoAimTarget | null {
-  const range = player.stats.attackRange * rangeMultiplier;
+  let range = player.stats.attackRange * rangeMultiplier;
+  if (opts?.camera) {
+    range = Math.min(range, visibleRangeFromPlayer(player, opts.camera));
+  }
+  const viewerTeam = opts?.viewerTeam ?? player.team;
+  const friendliesInBush = opts?.friendliesInBush ?? [];
   let best: AutoAimTarget | null = null;
   let bestD = Infinity;
   for (const c of candidates) {
     if (!c.alive) continue;
     if (c.team === player.team) continue;
-    if (c.inBush) {
-      const dd = distance(player.x, player.y, c.x, c.y);
-      if (dd > 140) continue;
-    }
+    if (opts?.camera && !isOnScreen(c.x, c.y, opts.camera)) continue;
+    if (!isAutoAimTargetVisible(c, viewerTeam, friendliesInBush)) continue;
     const d = distance(player.x, player.y, c.x, c.y);
     if (d < range + c.radius && d < bestD) {
       bestD = d;

@@ -9,88 +9,82 @@ import {
   type DealTemplate, type DealItem, type Currency,
 } from "../utils/dailyDeals";
 import {
-  getNews, getNewsCategories, addNews, updateNews, deleteNews, moveNews,
+  getNews, getNewsCategories, moveNews,
   upsertNewsCategory, deleteNewsCategory,
-  exportNewsJson, importNewsJson,
+  exportNewsJson,
   extractYouTubeId, fileToDataUrl,
   NEWS_VIDEO_MAX_BYTES, NEWS_IMAGE_MAX_BYTES,
   type NewsItem, type NewsCategory,
 } from "../utils/news";
 import {
-  broadcastGift, describeGiftItem,
+  broadcastGift, describeGiftItem, sendGiftToPlayer,
   MAX_GIFT_ITEMS, MAX_GIFT_MESSAGE,
   MAX_AMOUNT_COINS, MAX_AMOUNT_GEMS, MAX_AMOUNT_PP, MAX_AMOUNT_CHEST,
+  listGiftPinOptions,
+  listGiftProfileIconOptions,
   type GiftItem,
 } from "../utils/gifts";
+import { PROFILE_ICON_DISPLAY_LABEL } from "../data/profileIcons";
+import { textOnSolidFill, textOnTintedAccent, textShadowOnSolidFill } from "../utils/contrastText";
+import AdminPlayersTab from "../components/admin/AdminPlayersTab";
+import AdminAiTab from "../components/admin/AdminAiTab";
+import AdminSecurityTab from "../components/admin/AdminSecurityTab";
+import AdminMapsTab from "../components/admin/AdminMapsTab";
+import AdminImportedModelsTab from "../components/admin/AdminImportedModelsTab";
+import AdminTrophyTablesTab from "../components/admin/AdminTrophyTablesTab";
+import AdminCharactersPetsTab from "../components/admin/AdminCharactersPetsTab";
+import AdminEconomyTab from "../components/admin/AdminEconomyTab";
+import AdminChestsTab from "../components/admin/AdminChestsTab";
+import AdminScheduleControls, { useAdminScheduleState } from "../components/admin/AdminScheduleControls";
+import AdminScheduledTab from "../components/admin/AdminScheduledTab";
+import AdminTechBreakTab from "../components/admin/AdminTechBreakTab";
+import { commitAdminAction, ensureAdminScheduleTicker } from "../utils/adminScheduler";
+import {
+  broadcastSystemNotification,
+  getFeedbackThreads,
+  getPlayerFeedbackByCategory,
+  getDevBroadcastLog,
+  markFeedbackRead,
+  markAllFeedbackRead,
+  replyToFeedback,
+  getUnreadFeedbackCount,
+  getFeedbackCategoryInfo,
+  FEEDBACK_CATEGORIES,
+  MAX_INBOX_MESSAGE,
+  MAX_DEV_REPLY,
+  type FeedbackThread,
+  type ThreadMessage,
+  type FeedbackCategory,
+} from "../utils/messages";
 import { CHESTS, CHEST_RARITY_ORDER, type ChestRarity } from "../utils/chests";
 import { PETS } from "../entities/PetData";
 import { BRAWLERS } from "../entities/BrawlerData";
+import { getCollectiblePin } from "../entities/PinData";
+import {
+  loadDevNotes, saveDevNotes, createDevNote, touchNote,
+  fileToDevNoteImage, downloadNoteImage, formatBytes, totalNotesSizeBytes,
+  ensureSeedNotes,
+  DEV_NOTE_IMAGE_MAX_BYTES, DEV_NOTE_TEXT_MAX,
+  type DevNote, type DevNoteImage,
+} from "../utils/devNotes";
 
-type Tab = "deals" | "news" | "gifts";
+type Tab = "deals" | "news" | "gifts" | "players" | "ai" | "security" | "maps" | "trophies" | "characters" | "economy" | "chests" | "inbox" | "notifications" | "notes" | "models3d" | "schedule" | "techbreak";
 
 interface Props {
   onBack: () => void;
+  onPreviewTechBreak?: () => void;
 }
 
-export default function AdminPanel({ onBack }: Props) {
+export default function AdminPanel({ onBack, onPreviewTechBreak }: Props) {
   const [unlocked, setUnlocked] = useState(isAdminUnlocked());
   const [login, setLogin] = useState("");
   const [pass, setPass] = useState("");
   const [err, setErr] = useState("");
   const [tab, setTab] = useState<Tab>("deals");
 
-  if (!unlocked) {
-    return (
-      <div style={frame()}>
-        <Header title="🛡️ ПАНЕЛЬ РАЗРАБОТЧИКА" onBack={onBack} />
-        <div style={{
-          flex: 1, display: "flex", alignItems: "center", justifyContent: "center",
-          padding: 24,
-        }}>
-          <div style={{
-            width: "100%", maxWidth: 400,
-            background: "rgba(0,0,0,0.45)",
-            border: "1px solid rgba(255,213,79,0.3)",
-            borderRadius: 14, padding: 24,
-          }}>
-            <h3 style={{ margin: "0 0 14px", color: "#FFD54F", textAlign: "center" }}>
-              Требуется вход
-            </h3>
-            <input
-              placeholder="Логин"
-              value={login}
-              onChange={e => setLogin(e.target.value)}
-              style={inputStyle()}
-            />
-            <input
-              placeholder="Пароль"
-              type="password"
-              value={pass}
-              onChange={e => setPass(e.target.value)}
-              style={{ ...inputStyle(), marginTop: 10 }}
-              onKeyDown={e => { if (e.key === "Enter") doLogin(); }}
-            />
-            {err && (
-              <div style={{ marginTop: 10, color: "#FF7070", fontSize: 12, textAlign: "center" }}>
-                {err}
-              </div>
-            )}
-            <button
-              onClick={doLogin}
-              style={{
-                marginTop: 14, width: "100%",
-                background: "linear-gradient(135deg, #FFD54F, #FF8A00)",
-                color: "#1B1B1B", border: "none",
-                borderRadius: 10, padding: "10px 0",
-                fontSize: 13, fontWeight: 900, letterSpacing: 1.5,
-                cursor: "pointer",
-              }}
-            >ВОЙТИ</button>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  useEffect(() => {
+    if (unlocked) ensureAdminScheduleTicker();
+  }, [unlocked]);
 
   function doLogin() {
     if (tryAdminLogin(login, pass)) {
@@ -101,18 +95,90 @@ export default function AdminPanel({ onBack }: Props) {
     }
   }
 
+  if (!unlocked) {
+    return (
+      <div style={frame()}>
+        <Header title="🛡️ ПАНЕЛЬ РАЗРАБОТЧИКА" onBack={onBack} />
+        <div style={{
+          flex: 1, display: "flex", alignItems: "center", justifyContent: "center",
+          padding: 24,
+        }}>
+          <div className="ui-glass-strong" style={{
+            width: "100%", maxWidth: 400, padding: 24,
+            position: "relative", zIndex: 1,
+          }}>
+            <h3 className="ui-page-title" style={{ margin: "0 0 14px", fontSize: 22, textAlign: "center" }}>
+              Требуется вход
+            </h3>
+            <input
+              placeholder="Логин"
+              value={login}
+              onChange={e => setLogin(e.target.value)}
+              className="ui-input"
+            />
+            <input
+              placeholder="Пароль"
+              type="password"
+              value={pass}
+              onChange={e => setPass(e.target.value)}
+              className="ui-input"
+              style={{ marginTop: 10 }}
+              onKeyDown={e => { if (e.key === "Enter") doLogin(); }}
+            />
+            {err && (
+              <div style={{ marginTop: 10, color: "var(--c-danger)", fontSize: 12, textAlign: "center", fontWeight: 700 }}>
+                {err}
+              </div>
+            )}
+            <button
+              onClick={doLogin}
+              className="ui-btn ui-btn--primary ui-btn--block ui-btn--lg"
+              style={{ marginTop: 14, letterSpacing: "0.16em" }}
+            >ВОЙТИ</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={frame()}>
       <Header title="🛡️ ПАНЕЛЬ РАЗРАБОТЧИКА" onBack={onBack} />
       <div style={{
-        display: "flex", justifyContent: "center", gap: 8,
-        padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,0.08)",
+        flexShrink: 0,
+        overflowX: "auto",
+        overflowY: "hidden",
+        borderBottom: "1px solid rgba(255,255,255,0.08)",
         background: "rgba(0,0,0,0.20)",
+        WebkitOverflowScrolling: "touch",
+        overscrollBehaviorX: "contain",
       }}>
+        <div style={{
+          display: "flex",
+          gap: 8,
+          padding: "10px 14px",
+          width: "max-content",
+          minWidth: "100%",
+          boxSizing: "border-box",
+        }}>
         {([
           ["deals", "🔥 АКЦИИ"],
           ["news",  "📰 НОВОСТИ"],
           ["gifts", "🎁 ПОДАРКИ"],
+          ["players", "👥 ИГРОКИ"],
+          ["ai", "🤖 ИИ / БОТЫ"],
+          ["security", "🔒 БЕЗОПАСНОСТЬ"],
+          ["maps", "🗺️ КАРТЫ"],
+          ["trophies", "🏆 КУБКИ"],
+          ["characters", "⚔️ ПЕРСОНАЖИ"],
+          ["economy", "💰 СТОИМОСТЬ"],
+          ["chests", "📦 СУНДУКИ"],
+          ["inbox", `📥 ВХОДЯЩИЕ${getUnreadFeedbackCount() > 0 ? ` (${getUnreadFeedbackCount()})` : ""}`],
+          ["notifications", "🔔 УВЕДОМЛЕНИЯ"],
+          ["notes", "📝 ЗАМЕТКИ"],
+          ["schedule", "⏱️ РАСПИСАНИЕ"],
+          ["techbreak", "🚧 ТЕХ ПЕРЕРЫВ"],
+          ["models3d", "📦 3D МОДЕЛИ"],
         ] as const).map(([key, label]) => (
           <button
             key={key}
@@ -120,14 +186,467 @@ export default function AdminPanel({ onBack }: Props) {
             style={tabBtn(tab === key)}
           >{label}</button>
         ))}
+        </div>
       </div>
       <div style={{ flex: 1, overflowY: "auto", padding: 22 }}>
         {tab === "deals" && <DealsEditor />}
         {tab === "news"  && <NewsEditor />}
         {tab === "gifts" && <GiftBroadcaster />}
+        {tab === "players" && <AdminPlayersTab />}
+        {tab === "ai" && <AdminAiTab />}
+        {tab === "security" && <AdminSecurityTab />}
+        {tab === "maps" && <AdminMapsTab />}
+        {tab === "trophies" && <AdminTrophyTablesTab />}
+        {tab === "characters" && <AdminCharactersPetsTab />}
+        {tab === "economy" && <AdminEconomyTab />}
+        {tab === "chests" && <AdminChestsTab />}
+        {tab === "inbox" && <PlayerInboxEditor />}
+        {tab === "notifications" && <NotificationsEditor />}
+        {tab === "notes" && <NotesEditor />}
+        {tab === "schedule" && <AdminScheduledTab />}
+        {tab === "techbreak" && (
+          <AdminTechBreakTab onPreview={() => onPreviewTechBreak?.()} />
+        )}
+        {tab === "models3d" && <AdminImportedModelsTab />}
       </div>
     </div>
   );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// NOTES EDITOR — dev-only scratchpad: text + image attachments persisted
+// to localStorage. Useful for paste-in references and quick TODOs that
+// shouldn't ship to production.
+// ─────────────────────────────────────────────────────────────────────────
+function NotesEditor() {
+  const base = (import.meta as any).env?.BASE_URL ?? "/";
+  const [notes, setNotes] = useState<DevNote[]>(() => ensureSeedNotes(base));
+  const [savedNotes, setSavedNotes] = useState<DevNote[]>(() => loadDevNotes());
+  const [activeId, setActiveId] = useState<string | null>(() => {
+    const list = loadDevNotes();
+    return list[0]?.id ?? null;
+  });
+  const [err, setErr] = useState("");
+  const [info, setInfo] = useState("");
+  const { schedule, setSchedule, resetSchedule } = useAdminScheduleState();
+
+  const totalBytes = useMemo(() => totalNotesSizeBytes(notes), [notes]);
+
+  const sortedNotes = useMemo(() => {
+    return [...notes].sort((a, b) => {
+      if (!!b.pinned !== !!a.pinned) return (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0);
+      return b.updatedAt - a.updatedAt;
+    });
+  }, [notes]);
+
+  const active = useMemo(
+    () => notes.find(n => n.id === activeId) ?? null,
+    [notes, activeId],
+  );
+
+  function persistLocal(next: DevNote[]) {
+    setNotes(next);
+  }
+
+  function saveNotesNow() {
+    const r = commitAdminAction({
+      domain: "dev_notes",
+      label: "Сохранение заметок разработчика",
+      schedule,
+      payload: notes,
+    });
+    if (r.immediate) {
+      const res = saveDevNotes(notes);
+      if (!res.success) {
+        setErr(res.error);
+        setTimeout(() => setErr(""), 4000);
+        return;
+      }
+      setSavedNotes(notes);
+    }
+    flash(r.message);
+    resetSchedule();
+  }
+
+  function flash(msg: string) {
+    setInfo(msg);
+    setTimeout(() => setInfo(""), 1500);
+  }
+
+  function handleCreate() {
+    const note = createDevNote();
+    const next = [note, ...notes];
+    persistLocal(next);
+    setActiveId(note.id);
+  }
+
+  function handleDelete(id: string) {
+    if (!confirm("Удалить заметку без возможности восстановления?")) return;
+    const next = notes.filter(n => n.id !== id);
+    persistLocal(next);
+    if (activeId === id) setActiveId(next[0]?.id ?? null);
+  }
+
+  function updateActive(patch: Partial<DevNote>) {
+    if (!active) return;
+    const updated = touchNote({ ...active, ...patch });
+    const next = notes.map(n => (n.id === active.id ? updated : n));
+    persistLocal(next);
+  }
+
+  function togglePinned() {
+    if (!active) return;
+    updateActive({ pinned: !active.pinned });
+  }
+
+  async function handleAttach(files: FileList | null) {
+    if (!active || !files || files.length === 0) return;
+    const newImages: DevNoteImage[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      const r = await fileToDevNoteImage(f);
+      if (r.success) {
+        newImages.push(r.image);
+      } else {
+        setErr(r.error);
+        setTimeout(() => setErr(""), 3500);
+      }
+    }
+    if (newImages.length > 0) {
+      updateActive({ images: [...active.images, ...newImages] });
+      flash(`Прикреплено: ${newImages.length}`);
+    }
+  }
+
+  function handleDeleteImage(imgId: string) {
+    if (!active) return;
+    updateActive({ images: active.images.filter(img => img.id !== imgId) });
+  }
+
+  function handleDownloadImage(img: DevNoteImage) {
+    void downloadNoteImage(img);
+  }
+
+  function handleExportAll() {
+    try {
+      const json = JSON.stringify(notes, null, 2);
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `dev_notes_${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setErr("Ошибка экспорта: " + (e instanceof Error ? e.message : String(e)));
+      setTimeout(() => setErr(""), 3500);
+    }
+  }
+
+  async function handleImportFile(file: File) {
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      if (!Array.isArray(parsed)) throw new Error("JSON должен содержать массив заметок");
+      // Merge: incoming notes overwrite by id, others are kept.
+      const byId = new Map(notes.map(n => [n.id, n]));
+      for (const n of parsed) {
+        if (n && typeof n === "object" && typeof n.id === "string") byId.set(n.id, n);
+      }
+      persistLocal(Array.from(byId.values()));
+      flash("Импорт в черновик — нажмите «Сохранить заметки»");
+    } catch (e) {
+      setErr("Не удалось импортировать: " + (e instanceof Error ? e.message : String(e)));
+      setTimeout(() => setErr(""), 3500);
+    }
+  }
+
+  const notesDirty = JSON.stringify(notes) !== JSON.stringify(savedNotes);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+    <div style={{ display: "flex", gap: 14, height: "100%", minHeight: 500 }}>
+      {/* Sidebar — list of notes */}
+      <div style={{
+        width: 260, flexShrink: 0,
+        display: "flex", flexDirection: "column", gap: 8,
+      }}>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button onClick={handleCreate} style={notePrimaryBtn()}>+ Новая</button>
+          <button onClick={handleExportAll} style={ghostBtn()} title="Экспорт всех заметок в JSON">⤓</button>
+          <label style={{ ...ghostBtn(), cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center" }} title="Импорт JSON">
+            ⤒
+            <input
+              type="file"
+              accept="application/json"
+              style={{ display: "none" }}
+              onChange={e => {
+                const f = e.target.files?.[0];
+                if (f) handleImportFile(f);
+                e.target.value = "";
+              }}
+            />
+          </label>
+        </div>
+        <div style={{
+          flex: 1, overflowY: "auto",
+          background: "rgba(0,0,0,0.30)",
+          border: "1px solid rgba(255,255,255,0.10)",
+          borderRadius: 10, padding: 6,
+        }}>
+          {sortedNotes.length === 0 && (
+            <div style={{ color: "rgba(255,255,255,0.45)", fontSize: 12, padding: 10, textAlign: "center" }}>
+              Пока пусто. Создайте заметку.
+            </div>
+          )}
+          {sortedNotes.map(n => {
+            const isActive = n.id === activeId;
+            return (
+              <div
+                key={n.id}
+                onClick={() => setActiveId(n.id)}
+                style={{
+                  padding: "8px 10px",
+                  borderRadius: 8,
+                  background: isActive ? "rgba(255,213,79,0.18)" : "rgba(255,255,255,0.04)",
+                  border: `1px solid ${isActive ? "#FFD54F" : "rgba(255,255,255,0.06)"}`,
+                  marginBottom: 6,
+                  cursor: "pointer",
+                }}
+              >
+                <div style={{
+                  display: "flex", alignItems: "center", gap: 6,
+                  fontWeight: 800, fontSize: 13,
+                  color: isActive ? "#FFD54F" : "white",
+                }}>
+                  {n.pinned && <span title="Закреплено">📌</span>}
+                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {n.title.trim() || (n.text.trim().slice(0, 40) || "Без названия")}
+                  </span>
+                </div>
+                <div style={{ fontSize: 10, color: "rgba(255,255,255,0.45)", marginTop: 3 }}>
+                  {formatDate(n.updatedAt)} · {n.images.length} 🖼
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ fontSize: 10, color: "rgba(255,255,255,0.5)", padding: "2px 4px" }}>
+          Хранилище: {formatBytes(totalBytes)} · {notes.length} заметок
+        </div>
+      </div>
+
+      {/* Editor pane */}
+      <div style={{
+        flex: 1, minWidth: 0,
+        display: "flex", flexDirection: "column", gap: 10,
+        background: "rgba(0,0,0,0.30)",
+        border: "1px solid rgba(255,255,255,0.10)",
+        borderRadius: 10, padding: 14,
+      }}>
+        {!active ? (
+          <div style={{ color: "rgba(255,255,255,0.55)", textAlign: "center", padding: 40 }}>
+            Выберите заметку слева или создайте новую.
+          </div>
+        ) : (
+          <>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                value={active.title}
+                onChange={e => updateActive({ title: e.target.value.slice(0, 200) })}
+                placeholder="Заголовок"
+                style={{
+                  flex: 1,
+                  background: "rgba(0,0,0,0.45)",
+                  border: "1px solid rgba(255,255,255,0.18)",
+                  borderRadius: 8, padding: "8px 12px",
+                  color: "white", fontSize: 16, fontWeight: 800,
+                }}
+              />
+              <button onClick={togglePinned} style={ghostBtn()} title={active.pinned ? "Открепить" : "Закрепить"}>
+                {active.pinned ? "📌" : "📍"}
+              </button>
+              <button
+                onClick={() => handleDelete(active.id)}
+                style={{
+                  ...ghostBtn(),
+                  ["--ui-shear-text" as string]: "#FF8A80",
+                  ["--ui-shear-border" as string]: "rgba(255,112,112,0.55)",
+                }}
+                title="Удалить заметку"
+              >
+                🗑
+              </button>
+            </div>
+
+            <textarea
+              value={active.text}
+              onChange={e => updateActive({ text: e.target.value.slice(0, DEV_NOTE_TEXT_MAX) })}
+              placeholder="Текст заметки... (поддерживается обычный текст)"
+              style={{
+                width: "100%",
+                minHeight: 180,
+                background: "rgba(0,0,0,0.45)",
+                border: "1px solid rgba(255,255,255,0.18)",
+                borderRadius: 8, padding: 12,
+                color: "white", fontSize: 13, lineHeight: 1.5,
+                fontFamily: "'Segoe UI', Arial, sans-serif",
+                resize: "vertical",
+                boxSizing: "border-box",
+              }}
+            />
+
+            {/* Image attachments */}
+            <div style={{
+              display: "flex", justifyContent: "space-between",
+              alignItems: "center",
+            }}>
+              <span style={{ fontSize: 12, color: "rgba(255,255,255,0.7)", fontWeight: 700 }}>
+                Картинки ({active.images.length})
+              </span>
+              <label style={{ ...notePrimaryBtn(), display: "inline-flex", alignItems: "center", gap: 6 }}>
+                📎 Прикрепить
+                <input
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  style={{ display: "none" }}
+                  onChange={e => {
+                    handleAttach(e.target.files);
+                    e.target.value = "";
+                  }}
+                />
+              </label>
+            </div>
+
+            {active.images.length === 0 ? (
+              <div style={{
+                padding: 18, textAlign: "center",
+                color: "rgba(255,255,255,0.5)", fontSize: 12,
+                border: "1px dashed rgba(255,255,255,0.15)",
+                borderRadius: 10,
+              }}>
+                Пока нет вложений. До {formatBytes(DEV_NOTE_IMAGE_MAX_BYTES)} на картинку.
+              </div>
+            ) : (
+              <div style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
+                gap: 10,
+              }}>
+                {active.images.map(img => (
+                  <div key={img.id} style={{
+                    position: "relative",
+                    background: "rgba(0,0,0,0.45)",
+                    border: "1px solid rgba(255,255,255,0.10)",
+                    borderRadius: 10,
+                    padding: 6,
+                    display: "flex", flexDirection: "column", gap: 6,
+                  }}>
+                    <div style={{ position: "relative", width: "100%", aspectRatio: "1 / 1", overflow: "hidden", borderRadius: 6, background: "#000" }}>
+                      <img
+                        src={img.url ?? img.dataUrl}
+                        alt={img.name}
+                        style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }}
+                      />
+                    </div>
+                    <div style={{ fontSize: 10, color: "rgba(255,255,255,0.85)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={img.name}>
+                      {img.name}
+                    </div>
+                    <div style={{ fontSize: 9, color: "rgba(255,255,255,0.5)" }}>
+                      {img.size > 0 ? formatBytes(img.size) : "встроенное"}
+                    </div>
+                    <div style={{ display: "flex", gap: 4 }}>
+                      <button
+                        onClick={() => handleDownloadImage(img)}
+                        style={{ flex: 1, ...miniBtn() }}
+                        title="Скачать"
+                      >⬇ Скачать</button>
+                      <button
+                        onClick={() => handleDeleteImage(img.id)}
+                        style={{
+                          ...miniBtn(),
+                          ["--ui-shear-text" as string]: "#FF8A80",
+                          ["--ui-shear-border" as string]: "rgba(255,112,112,0.55)",
+                        }}
+                        title="Удалить"
+                      >🗑</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div style={{ fontSize: 10, color: "rgba(255,255,255,0.45)", marginTop: 4, textAlign: "right" }}>
+              Создана {formatDate(active.createdAt)} · Обновлена {formatDate(active.updatedAt)}
+            </div>
+          </>
+        )}
+        {(err || info) && (
+          <div style={{
+            marginTop: 4,
+            color: err ? "#FF7070" : "#76FF03",
+            fontSize: 12, fontWeight: 700, textAlign: "center",
+          }}>{err || info}</div>
+        )}
+      </div>
+    </div>
+    <AdminScheduleControls schedule={schedule} onChange={setSchedule} compact />
+    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+      <button onClick={saveNotesNow} style={notePrimaryBtn()}>
+        💾 Сохранить заметки{notesDirty ? " *" : ""}
+      </button>
+      {notesDirty && (
+        <span style={{ fontSize: 11, color: "#FFAB40", fontWeight: 800 }}>есть несохранённые изменения</span>
+      )}
+    </div>
+    </div>
+  );
+}
+
+function notePrimaryBtn(): React.CSSProperties {
+  return {
+    ["--ui-shear-fill" as string]: "linear-gradient(135deg, #FFD54F, #FF8A00)",
+    ["--ui-shear-border" as string]: "rgba(255,213,79,0.65)",
+    ["--ui-shear-text" as string]: textOnSolidFill("#FFD54F"),
+    ["--ui-shear-text-shadow" as string]: textShadowOnSolidFill(),
+    ["--ui-shear-blur" as string]: "none",
+    padding: "7px 12px",
+    fontSize: 12, fontWeight: 900, letterSpacing: 1,
+    cursor: "pointer",
+  };
+}
+
+function ghostBtn(): React.CSSProperties {
+  return {
+    ["--ui-shear-fill" as string]: "rgba(255,255,255,0.08)",
+    ["--ui-shear-border" as string]: "rgba(255,255,255,0.22)",
+    ["--ui-shear-text" as string]: "#ffffff",
+    ["--ui-shear-blur" as string]: "blur(8px)",
+    padding: "7px 10px",
+    fontSize: 12, fontWeight: 700,
+    cursor: "pointer",
+  };
+}
+
+function miniBtn(): React.CSSProperties {
+  return {
+    ["--ui-shear-fill" as string]: "rgba(255,255,255,0.08)",
+    ["--ui-shear-border" as string]: "rgba(255,255,255,0.22)",
+    ["--ui-shear-text" as string]: "#ffffff",
+    ["--ui-shear-blur" as string]: "blur(8px)",
+    padding: "4px 6px",
+    fontSize: 10, fontWeight: 700,
+    cursor: "pointer",
+  };
+}
+
+function formatDate(ts: number): string {
+  const d = new Date(ts);
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -138,6 +657,8 @@ function DealsEditor() {
   const [editing, setEditing] = useState<DealTemplate | null>(null);
   const [today, setToday] = useState(() => getTodaysDeals());
   const [forced, setForced] = useState<string | null>(getForcedDealId());
+  const [dealMsg, setDealMsg] = useState("");
+  const { schedule, setSchedule, resetSchedule } = useAdminScheduleState();
   const history = useMemo(() => getDealsHistory(), [today.length]);
 
   const refresh = () => {
@@ -146,18 +667,45 @@ function DealsEditor() {
     setForced(getForcedDealId());
   };
 
+  const flashDeal = (msg: string) => {
+    setDealMsg(msg);
+    setTimeout(() => setDealMsg(""), 2500);
+  };
+
   const handleRegen = () => {
-    setToday(regenerateTodayDeals());
+    const r = commitAdminAction({
+      domain: "deals_regenerate",
+      label: "Перегенерация сегодняшних акций",
+      schedule,
+      payload: {},
+    });
+    if (r.immediate) setToday(regenerateTodayDeals());
+    flashDeal(r.message);
+    resetSchedule();
   };
 
   const handleSave = (t: DealTemplate) => {
-    upsertDealTemplate(t);
+    const r = commitAdminAction({
+      domain: "deals_upsert",
+      label: `Акция: ${t.title}`,
+      schedule,
+      payload: t,
+    });
+    if (r.immediate) upsertDealTemplate(t);
     setEditing(null);
     refresh();
+    flashDeal(r.message);
+    resetSchedule();
   };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      {dealMsg && (
+        <div style={{ padding: 10, borderRadius: 8, background: "rgba(118,255,3,0.12)", color: "#B2FF59", fontSize: 12, fontWeight: 700 }}>
+          {dealMsg}
+        </div>
+      )}
+      <AdminScheduleControls schedule={schedule} onChange={setSchedule} compact />
       {/* Today's deals strip */}
       <Section title="СЕГОДНЯШНИЕ АКЦИИ" subtitle={`${today.length} активных`}>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
@@ -165,7 +713,17 @@ function DealsEditor() {
             🎲 Перегенерировать сейчас
           </button>
           <button
-            onClick={() => { setForcedDeal(null); refresh(); }}
+            onClick={() => {
+              const r = commitAdminAction({
+                domain: "deals_forced",
+                label: "Сброс пина акции",
+                schedule,
+                payload: { dealId: null },
+              });
+              if (r.immediate) setForcedDeal(null);
+              refresh();
+              flashDeal(r.message);
+            }}
             style={primaryBtn("#FF7043")}
             disabled={!forced}
           >Сбросить пин</button>
@@ -186,7 +744,7 @@ function DealsEditor() {
                 {d.title}
               </div>
               <div style={{ fontSize: 10, color: "rgba(255,255,255,0.55)", marginTop: 4 }}>
-                {d.priceAmount} {d.priceCurrency === "coins" ? "монет" : "кристаллов"}
+                {d.priceAmount} {dealCurrencyLabel(d.priceCurrency)}
               </div>
               <div style={{ fontSize: 10, color: "rgba(255,255,255,0.4)" }}>
                 {d.items.length} предмет(ов)
@@ -228,17 +786,33 @@ function DealsEditor() {
                 fontSize: 11, color: "white", marginTop: 6,
                 display: "flex", justifyContent: "space-between",
               }}>
-                <span>Цена: {p.priceAmount} {p.priceCurrency === "coins" ? "🪙" : "💎"}</span>
+                <span>Цена: {p.priceAmount} {dealCurrencyEmoji(p.priceCurrency)}</span>
                 <span style={{ color: "rgba(255,255,255,0.5)" }}>w={p.weight}</span>
               </div>
               <div style={{ display: "flex", gap: 4, marginTop: 8 }}>
                 <button onClick={() => setEditing(p)} style={smallBtn("#40C4FF")}>Изм.</button>
-                <button onClick={() => { setForcedDeal(p.id); refresh(); }} style={smallBtn("#FFD54F")}>📌 Пин</button>
                 <button onClick={() => {
-                  if (confirm(`Удалить «${p.title}»?`)) {
-                    removeDealTemplate(p.id);
-                    refresh();
-                  }
+                  const r = commitAdminAction({
+                    domain: "deals_forced",
+                    label: `Пин акции: ${p.title}`,
+                    schedule,
+                    payload: { dealId: p.id },
+                  });
+                  if (r.immediate) setForcedDeal(p.id);
+                  refresh();
+                  flashDeal(r.message);
+                }} style={smallBtn("#FFD54F")}>📌 Пин</button>
+                <button onClick={() => {
+                  if (!confirm(`Удалить «${p.title}»?`)) return;
+                  const r = commitAdminAction({
+                    domain: "deals_remove",
+                    label: `Удаление акции: ${p.title}`,
+                    schedule,
+                    payload: { id: p.id },
+                  });
+                  if (r.immediate) removeDealTemplate(p.id);
+                  refresh();
+                  flashDeal(r.message);
                 }} style={smallBtn("#FF7070")}>×</button>
               </div>
             </div>
@@ -277,12 +851,24 @@ function DealsEditor() {
   );
 }
 
+function dealCurrencyLabel(cur: Currency): string {
+  if (cur === "coins") return "монет";
+  if (cur === "gems") return "кристаллов";
+  return "₽";
+}
+
+function dealCurrencyEmoji(cur: Currency): string {
+  if (cur === "coins") return "🪙";
+  if (cur === "gems") return "💎";
+  return "₽";
+}
+
 function blankTemplate(): DealTemplate {
   return {
     id: `custom_${Date.now().toString(36)}`,
     title: "Новая акция",
     items: [{ kind: "coins", amount: 100 }],
-    priceCurrency: "coins",
+    priceCurrency: "gems",
     priceAmount: 50,
     weight: 5,
     category: "discount",
@@ -297,6 +883,8 @@ function describeDealItem(it: DealItem): string {
     case "powerPoints":      return `${it.amount} ОС`;
     case "chest":            return `${CHESTS[it.rarity].shortName} ×${it.count}`;
     case "pet":              return `Пит. «${PETS.find(p => p.id === it.petId)?.name ?? it.petId}»`;
+    case "pin":              return `Пин «${getCollectiblePin(it.pinId)?.label ?? it.pinId}»`;
+    case "profileIcon":      return PROFILE_ICON_DISPLAY_LABEL;
     case "upgradeDiscount":  return `купон −${it.percent}% ×${it.uses}`;
   }
 }
@@ -316,6 +904,7 @@ function DealEditorModal({
     setDraft({ ...draft, items });
   };
   const addItem = () => {
+    if (draft.items.length >= 6) return;
     setDraft({ ...draft, items: [...draft.items, { kind: "coins", amount: 100 }] });
   };
   const removeItem = (i: number) => {
@@ -329,6 +918,8 @@ function DealEditorModal({
       case "powerPoints":     next = { kind, amount: 30 }; break;
       case "chest":           next = { kind, rarity: "common", count: 1 }; break;
       case "pet":             next = { kind, petId: PETS[0].id }; break;
+      case "pin":             next = { kind, pinId: listGiftPinOptions()[0]?.id ?? "g_coin_stack" }; break;
+      case "profileIcon":     next = { kind, iconId: listGiftProfileIconOptions()[0]?.id ?? "gen:001" }; break;
       case "upgradeDiscount": next = { kind, percent: 10, uses: 1 }; break;
     }
     const items = [...draft.items];
@@ -362,8 +953,13 @@ function DealEditorModal({
           >
             <option value="coins">🪙 Монеты</option>
             <option value="gems">💎 Кристаллы</option>
+            <option value="rub">₽ Рубли (премиум)</option>
           </select>
         </Field>
+      </div>
+      <div style={{ fontSize: 10, color: "rgba(255,255,255,0.5)", marginBottom: 10, lineHeight: 1.4 }}>
+        При сохранении цена пересчитается: есть монеты в награде → 💎; есть кристаллы → ₽;
+        цена в 💎 → кристаллов в награде быть не может. В акции 1–6 предметов.
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
         <Field label="Базовая цена (зачёркнутая)">
@@ -422,6 +1018,8 @@ function DealEditorModal({
               <option value="powerPoints">Очки силы</option>
               <option value="chest">Сундук</option>
               <option value="pet">Питомец</option>
+              <option value="pin">Коллекционный пин</option>
+              <option value="profileIcon">Иконка профиля</option>
               <option value="upgradeDiscount">Купон апгрейда</option>
             </select>
             <ItemInputs item={it} onChange={patch => updateItem(i, patch)} />
@@ -474,6 +1072,20 @@ function ItemInputs({ item, onChange }: { item: DealItem; onChange: (patch: Part
       </select>
     );
   }
+  if (item.kind === "pin") {
+    return (
+      <select value={item.pinId} onChange={e => onChange({ pinId: e.target.value } as any)} style={inputStyle()}>
+        {listGiftPinOptions().map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
+      </select>
+    );
+  }
+  if (item.kind === "profileIcon") {
+    return (
+      <select value={item.iconId} onChange={e => onChange({ iconId: e.target.value } as any)} style={inputStyle()}>
+        {listGiftProfileIconOptions().map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
+      </select>
+    );
+  }
   if (item.kind === "upgradeDiscount") {
     return (
       <>
@@ -499,6 +1111,7 @@ function NewsEditor() {
   const [showCats, setShowCats] = useState(false);
   const [importTxt, setImportTxt] = useState("");
   const [msg, setMsg] = useState("");
+  const { schedule, setSchedule, resetSchedule } = useAdminScheduleState();
 
   const refresh = () => {
     setItems(getNews());
@@ -514,10 +1127,20 @@ function NewsEditor() {
 
   const handleImport = () => {
     try {
-      const r = importNewsJson(importTxt, "merge");
-      setMsg(`Импортировано: ${r.items} новостей, ${r.categories} категорий`);
+      const r = commitAdminAction({
+        domain: "news_import",
+        label: "Импорт новостей JSON",
+        schedule,
+        payload: { json: importTxt, mode: "merge" as const },
+      });
+      if (r.immediate) {
+        setMsg("Импорт выполнен");
+      } else {
+        setMsg(r.message);
+      }
       setImportTxt("");
       refresh();
+      resetSchedule();
     } catch (e: any) {
       setMsg(`Ошибка: ${e.message ?? e}`);
     }
@@ -526,6 +1149,7 @@ function NewsEditor() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      <AdminScheduleControls schedule={schedule} onChange={setSchedule} compact />
       <Section title="НОВОСТИ" subtitle={`${items.length} опубликовано`}>
         {msg && (
           <div style={{
@@ -570,7 +1194,15 @@ function NewsEditor() {
                   disabled={i === items.length - 1} style={smallBtn("#888")}>↓</button>
                 <button onClick={() => setEditing(n)} style={smallBtn("#40C4FF")}>Изм.</button>
                 <button onClick={() => {
-                  if (confirm(`Удалить «${n.title}»?`)) { deleteNews(n.id); refresh(); }
+                  if (!confirm(`Удалить «${n.title}»?`)) return;
+                  const r = commitAdminAction({
+                    domain: "news_delete",
+                    label: `Удаление новости: ${n.title}`,
+                    schedule,
+                    payload: { id: n.id },
+                  });
+                  refresh();
+                  setMsg(r.message);
                 }} style={smallBtn("#FF7070")}>×</button>
               </div>
             );
@@ -602,13 +1234,17 @@ function NewsEditor() {
           cats={cats}
           onClose={() => setEditing(null)}
           onSave={(n) => {
-            if (items.some(x => x.id === n.id)) {
-              updateNews(n.id, n);
-            } else {
-              addNews(n);
-            }
+            const isUpdate = items.some(x => x.id === n.id);
+            const r = commitAdminAction({
+              domain: "news_save",
+              label: isUpdate ? `Новость: ${n.title}` : `Новая новость: ${n.title}`,
+              schedule,
+              payload: { isUpdate, item: n },
+            });
             setEditing(null);
             refresh();
+            setMsg(r.message);
+            resetSchedule();
           }}
         />
       )}
@@ -802,12 +1438,315 @@ function CategoryManager({
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// PLAYER INBOX — categorized feedback + replies
+// ─────────────────────────────────────────────────────────────────────────
+function PlayerInboxEditor() {
+  const [filter, setFilter] = useState<FeedbackCategory | "all">("all");
+  const [list, setList] = useState<FeedbackThread[]>(() => getFeedbackThreads());
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [reply, setReply] = useState("");
+  const [status, setStatus] = useState("");
+  const { schedule, setSchedule, resetSchedule } = useAdminScheduleState();
+
+  const filtered = useMemo(
+    () => getPlayerFeedbackByCategory(filter),
+    [filter, list],
+  );
+
+  const selected = useMemo(
+    () => filtered.find(f => f.id === selectedId) ?? filtered[0] ?? null,
+    [filtered, selectedId],
+  );
+
+  const refresh = () => {
+    const next = getFeedbackThreads();
+    setList(next);
+    if (selectedId && !next.some(f => f.id === selectedId)) {
+      setSelectedId(next[0]?.id ?? null);
+    }
+  };
+
+  const openItem = (f: FeedbackThread) => {
+    setSelectedId(f.id);
+    setReply("");
+    if (!f.readByDev) {
+      markFeedbackRead(f.id);
+      refresh();
+    }
+  };
+
+  const sendReply = () => {
+    if (!selected) return;
+    const r = commitAdminAction({
+      domain: "feedback_reply",
+      label: `Ответ игроку: ${selected.username}`,
+      schedule,
+      payload: { threadId: selected.id, message: reply },
+    });
+    if (r.immediate) {
+      const res = replyToFeedback(selected.id, reply);
+      if (res.success) {
+        setStatus("✓ Ответ отправлен игроку");
+        setReply("");
+        refresh();
+      } else {
+        setStatus(`✗ ${res.error}`);
+      }
+    } else {
+      setStatus(`⏱ ${r.message}`);
+    }
+    resetSchedule();
+    setTimeout(() => setStatus(""), 3500);
+  };
+
+  const unread = list.filter(f => !f.readByDev).length;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <Section title={`ВХОДЯЩИЕ ОТ ИГРОКОВ (${unread} новых)`} subtitle="Письма по категориям из меню «Сообщения»">
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+          <CategoryChip active={filter === "all"} label="Все" color="#90A4AE" onClick={() => setFilter("all")} />
+          {FEEDBACK_CATEGORIES.map(c => (
+            <CategoryChip
+              key={c.id}
+              active={filter === c.id}
+              label={`${c.icon} ${c.label}`}
+              color={c.color}
+              count={list.filter(f => f.category === c.id && !f.readByDev).length}
+              onClick={() => setFilter(c.id)}
+            />
+          ))}
+          <button onClick={refresh} style={smallBtn("#40C4FF")}>↻</button>
+          {unread > 0 && (
+            <button onClick={() => { markAllFeedbackRead(); refresh(); }} style={smallBtn("#76FF03")}>Прочитать все</button>
+          )}
+        </div>
+
+        {filtered.length === 0 ? (
+          <div style={{ color: "rgba(255,255,255,0.45)", fontSize: 13, padding: 24, textAlign: "center" }}>
+            В этой категории пока нет писем
+          </div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1.3fr)", gap: 12, minHeight: 440 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 480, overflowY: "auto" }}>
+              {filtered.map(f => {
+                const cat = getFeedbackCategoryInfo(f.category);
+                const active = selected?.id === f.id;
+                return (
+                  <button
+                    key={f.id}
+                    type="button"
+                    onClick={() => openItem(f)}
+                    style={{
+                      textAlign: "left", padding: "10px 12px", borderRadius: 10, cursor: "pointer",
+                      background: active ? "rgba(33,150,243,0.15)" : f.readByDev ? "rgba(0,0,0,0.25)" : "rgba(33,150,243,0.08)",
+                      border: `1px solid ${active ? "rgba(100,181,246,0.55)" : f.readByDev ? "rgba(255,255,255,0.08)" : "rgba(100,181,246,0.35)"}`,
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                      <span style={{ fontSize: 11, fontWeight: 800, color: cat.color }}>{cat.icon} {cat.label}</span>
+                      {f.messages.some(m => m.from === "dev") && <span style={{ fontSize: 9, color: "#76FF03", fontWeight: 800 }}>💬</span>}
+                      {!f.readByDev && <span style={{ marginLeft: "auto", width: 7, height: 7, borderRadius: "50%", background: "#FF5252" }} />}
+                    </div>
+                    <div style={{ fontWeight: 800, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.subject}</div>
+                    <div style={{ fontSize: 10, color: "rgba(255,255,255,0.4)", marginTop: 2 }}>👤 {f.username} · {new Date(f.updatedAt).toLocaleString("ru-RU")}</div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div style={{
+              padding: 14, borderRadius: 12,
+              background: "rgba(0,0,0,0.35)", border: "1px solid rgba(255,255,255,0.1)",
+              display: "flex", flexDirection: "column", gap: 10,
+            }}>
+              {selected ? (
+                <>
+                  {(() => {
+                    const cat = getFeedbackCategoryInfo(selected.category);
+                    return (
+                      <div>
+                        <span style={{ fontSize: 11, fontWeight: 800, color: cat.color }}>{cat.icon} {cat.label}</span>
+                        <h3 style={{ margin: "8px 0 4px", fontSize: 17, fontWeight: 900 }}>{selected.subject}</h3>
+                        <div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)" }}>
+                          👤 {selected.username} · {new Date(selected.updatedAt).toLocaleString("ru-RU")}
+                        </div>
+                      </div>
+                    );
+                  })()}
+                  <div style={{ flex: 1, overflowY: "auto", maxHeight: 280, display: "flex", flexDirection: "column", gap: 8, padding: "4px 0" }}>
+                    {selected.messages.map(m => (
+                      <DevChatBubble key={m.id} message={m} />
+                    ))}
+                  </div>
+                  <div style={{ marginTop: 8, paddingTop: 12, borderTop: "1px solid rgba(255,255,255,0.1)" }}>
+                    <div style={{ fontSize: 11, fontWeight: 800, color: "#FFD54F", letterSpacing: 1, marginBottom: 8 }}>
+                      ОТВЕТ ИГРОКУ ({reply.length}/{MAX_DEV_REPLY})
+                    </div>
+                    <textarea
+                      value={reply}
+                      onChange={e => setReply(e.target.value.slice(0, MAX_DEV_REPLY))}
+                      rows={4}
+                      placeholder="Новое сообщение в диалог..."
+                      style={inputStyle()}
+                    />
+                    <AdminScheduleControls schedule={schedule} onChange={setSchedule} compact />
+                    <button onClick={sendReply} style={{ ...primaryBtn("#76FF03"), marginTop: 10, width: "100%" }}>
+                      ✉️ Отправить игроку
+                    </button>
+                    {status && (
+                      <div style={{ marginTop: 8, fontSize: 12, fontWeight: 700, color: status.startsWith("✓") ? "#76FF03" : "#FF7070" }}>
+                        {status}
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div style={{ color: "rgba(255,255,255,0.45)", textAlign: "center", padding: 40 }}>Выберите письмо слева</div>
+              )}
+            </div>
+          </div>
+        )}
+      </Section>
+    </div>
+  );
+}
+
+function DevChatBubble({ message }: { message: ThreadMessage }) {
+  const isDev = message.from === "dev";
+  return (
+    <div style={{ display: "flex", justifyContent: isDev ? "flex-end" : "flex-start" }}>
+      <div style={{
+        maxWidth: "90%", padding: "8px 10px", borderRadius: 10,
+        background: isDev ? "rgba(76,175,80,0.15)" : "rgba(33,150,243,0.15)",
+        border: `1px solid ${isDev ? "rgba(76,175,80,0.35)" : "rgba(100,181,246,0.35)"}`,
+      }}>
+        <div style={{ fontSize: 9, fontWeight: 800, color: isDev ? "#81C784" : "#90CAF9", marginBottom: 3 }}>
+          {isDev ? "Вы" : "Игрок"} · {new Date(message.sentAt).toLocaleString("ru-RU")}
+        </div>
+        <div style={{ fontSize: 12, lineHeight: 1.4, whiteSpace: "pre-wrap" }}>{message.text}</div>
+        {message.attachment?.kind === "image" && (
+          <img src={message.attachment.url} alt="" style={{ marginTop: 6, maxHeight: 100, maxWidth: "100%", borderRadius: 6 }} />
+        )}
+        {message.attachment?.kind === "link" && (
+          <a href={message.attachment.url} target="_blank" rel="noreferrer" style={{ color: "#64B5F6", fontSize: 11, display: "block", marginTop: 4, wordBreak: "break-all" }}>{message.attachment.url}</a>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CategoryChip({ active, label, color, count = 0, onClick }: {
+  active: boolean; label: string; color: string; count?: number; onClick: () => void;
+}) {
+  return (
+    <button type="button" onClick={onClick} style={{
+      padding: "6px 10px", borderRadius: 8, cursor: "pointer", fontSize: 10, fontWeight: 800,
+      border: `1px solid ${active ? color : "rgba(255,255,255,0.15)"}`,
+      background: active ? `${color}33` : "rgba(0,0,0,0.3)",
+      color: active ? "#fff" : "rgba(255,255,255,0.6)",
+    }}>
+      {label}{count > 0 ? ` (${count})` : ""}
+    </button>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// NOTIFICATIONS — system broadcast + dev broadcast log
+// ─────────────────────────────────────────────────────────────────────────
+function NotificationsEditor() {
+  const [log, setLog] = useState(() => getDevBroadcastLog());
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [link, setLink] = useState("");
+  const [status, setStatus] = useState("");
+  const { schedule, setSchedule, resetSchedule } = useAdminScheduleState();
+
+  const refresh = () => setLog(getDevBroadcastLog());
+
+  const sendSystem = () => {
+    const r = commitAdminAction({
+      domain: "notifications_broadcast",
+      label: `Уведомление: ${title || "без заголовка"}`,
+      schedule,
+      payload: { title, body, link: link.trim() || undefined },
+    });
+    if (r.immediate) {
+      const res = broadcastSystemNotification({
+        title,
+        body,
+        attachment: link.trim() ? { kind: "link", url: link.trim() } : undefined,
+      });
+      if (res.success) {
+        setStatus(`✓ Уведомление отправлено ${res.recipients} игрокам`);
+        setTitle("");
+        setBody("");
+        setLink("");
+        refresh();
+      } else {
+        setStatus(`✗ ${res.error}`);
+      }
+    } else {
+      setStatus(`⏱ ${r.message}`);
+    }
+    resetSchedule();
+    setTimeout(() => setStatus(""), 3500);
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
+      <AdminScheduleControls schedule={schedule} onChange={setSchedule} compact />
+      <Section title="СИСТЕМНОЕ УВЕДОМЛЕНИЕ" subtitle="Попадёт во входящие всех игроков">
+        <Field label="Заголовок">
+          <input value={title} onChange={e => setTitle(e.target.value)} placeholder="Важное обновление" style={inputStyle()} />
+        </Field>
+        <Field label={`Текст (${body.length}/${MAX_INBOX_MESSAGE})`}>
+          <textarea value={body} onChange={e => setBody(e.target.value.slice(0, MAX_INBOX_MESSAGE))} rows={4} placeholder="Текст уведомления..." style={inputStyle()} />
+        </Field>
+        <Field label="Ссылка (необязательно)">
+          <input value={link} onChange={e => setLink(e.target.value)} placeholder="https://..." style={inputStyle()} />
+        </Field>
+        <button onClick={sendSystem} style={{ ...primaryBtn("#40C4FF"), marginTop: 8 }}>📢 Разослать уведомление</button>
+        {status && <div style={{ marginTop: 8, fontSize: 12, fontWeight: 700, color: status.startsWith("✓") ? "#76FF03" : "#FF7070" }}>{status}</div>}
+      </Section>
+
+      <Section title="ЖУРНАЛ РАССЫЛОК" subtitle="Подарки и системные уведомления">
+        {log.length === 0 ? (
+          <div style={{ color: "rgba(255,255,255,0.45)", fontSize: 13 }}>Рассылок пока не было</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 280, overflowY: "auto" }}>
+            {log.map(entry => (
+              <div key={entry.id} style={{
+                padding: 10, borderRadius: 8,
+                background: "rgba(0,0,0,0.3)", border: "1px solid rgba(255,255,255,0.08)",
+              }}>
+                <div style={{ fontWeight: 800, fontSize: 12 }}>
+                  {entry.kind === "gift" ? "🎁" : "📢"} {entry.title} · {entry.recipients} игр.
+                </div>
+                <div style={{ fontSize: 10, color: "rgba(255,255,255,0.4)", marginTop: 2 }}>{new Date(entry.sentAt).toLocaleString("ru-RU")}</div>
+                {entry.message && <div style={{ fontSize: 12, marginTop: 6 }}>{entry.message}</div>}
+                {entry.itemsSummary && entry.itemsSummary.length > 0 && (
+                  <div style={{ fontSize: 11, color: "#FFD54F", marginTop: 4 }}>{entry.itemsSummary.join(" + ")}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </Section>
+    </div>
+  );
+}
+
+// Players tab → components/admin/AdminPlayersTab.tsx
+
+// ─────────────────────────────────────────────────────────────────────────
 // GIFT BROADCASTER
 // ─────────────────────────────────────────────────────────────────────────
 function GiftBroadcaster() {
   const [items, setItems] = useState<GiftItem[]>([{ kind: "coins", amount: 100 }]);
   const [message, setMessage] = useState("");
   const [sentMsg, setSentMsg] = useState("");
+  const { schedule, setSchedule, resetSchedule } = useAdminScheduleState();
 
   const updateItem = (i: number, next: GiftItem) => {
     const copy = [...items]; copy[i] = next; setItems(copy);
@@ -828,24 +1767,38 @@ function GiftBroadcaster() {
       case "chest":       next = { kind, rarity: "common", count: 1 }; break;
       case "pet":         next = { kind, petId: PETS[0].id }; break;
       case "brawler":     next = { kind, brawlerId: BRAWLERS[0].id }; break;
+      case "pin":         next = { kind, pinId: listGiftPinOptions()[0]?.id ?? "g_coin_stack" }; break;
+      case "profileIcon": next = { kind, iconId: listGiftProfileIconOptions()[0]?.id ?? "gen:001" }; break;
     }
     updateItem(i, next);
   };
 
   const send = () => {
-    const r = broadcastGift({ items, message });
-    if (r.success) {
-      setSentMsg(`✓ Отправлено ${r.recipients} игрокам`);
-      setItems([{ kind: "coins", amount: 100 }]);
-      setMessage("");
+    const r = commitAdminAction({
+      domain: "gifts_broadcast",
+      label: `Подарок: ${items.map(describeGiftItem).join(", ").slice(0, 60)}`,
+      schedule,
+      payload: { items, message },
+    });
+    if (r.immediate) {
+      const res = broadcastGift({ items, message });
+      if (res.success) {
+        setSentMsg(`✓ Отправлено ${res.recipients} игрокам`);
+        setItems([{ kind: "coins", amount: 100 }]);
+        setMessage("");
+      } else {
+        setSentMsg(`✗ ${res.error}`);
+      }
     } else {
-      setSentMsg(`✗ ${r.error}`);
+      setSentMsg(`⏱ ${r.message}`);
     }
+    resetSchedule();
     setTimeout(() => setSentMsg(""), 3500);
   };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      <AdminScheduleControls schedule={schedule} onChange={setSchedule} compact />
       <Section title="РАЗОСЛАТЬ ПОДАРОК ВСЕМ" subtitle="Каждому зарегистрированному игроку">
         <Field label={`Сообщение (${message.length}/${MAX_GIFT_MESSAGE})`}>
           <textarea
@@ -873,6 +1826,8 @@ function GiftBroadcaster() {
                 <option value="chest">Сундук</option>
                 <option value="pet">Питомец</option>
                 <option value="brawler">Боец</option>
+                <option value="pin">Коллекционный пин</option>
+                <option value="profileIcon">Иконка профиля</option>
               </select>
               <GiftItemInputs item={it} onChange={next => updateItem(i, next)} />
               <button onClick={() => removeItem(i)} style={smallBtn("#FF7070")} disabled={items.length === 1}>×</button>
@@ -905,12 +1860,12 @@ function GiftBroadcaster() {
           onClick={send}
           disabled={items.length === 0}
           style={{
-            marginTop: 14, width: "100%",
-            background: "linear-gradient(135deg, #FFD54F, #FF7043)",
-            border: "none", borderRadius: 12,
-            color: "#1B1B1B", fontWeight: 900, fontSize: 14, letterSpacing: 2,
-            padding: "12px 0", cursor: "pointer",
-            boxShadow: "0 4px 14px rgba(255,213,79,0.5)",
+            ...notePrimaryBtn(),
+            marginTop: 14,
+            width: "100%",
+            fontSize: 14,
+            letterSpacing: "0.12em",
+            padding: "12px 0",
           }}
         >🚀 РАЗОСЛАТЬ</button>
         {sentMsg && (
@@ -965,6 +1920,20 @@ function GiftItemInputs({ item, onChange }: { item: GiftItem; onChange: (next: G
       </select>
     );
   }
+  if (item.kind === "pin") {
+    return (
+      <select value={item.pinId} onChange={e => onChange({ kind: "pin", pinId: e.target.value })} style={inputStyle()}>
+        {listGiftPinOptions().map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
+      </select>
+    );
+  }
+  if (item.kind === "profileIcon") {
+    return (
+      <select value={item.iconId} onChange={e => onChange({ kind: "profileIcon", iconId: e.target.value })} style={inputStyle()}>
+        {listGiftProfileIconOptions().map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
+      </select>
+    );
+  }
   if (item.kind === "brawler") {
     return (
       <select value={item.brawlerId} onChange={e => onChange({ kind: "brawler", brawlerId: e.target.value })} style={inputStyle()}>
@@ -985,46 +1954,60 @@ function clampN(n: number, lo: number, hi: number): number {
 // ─────────────────────────────────────────────────────────────────────────
 function frame(): React.CSSProperties {
   return {
+    height: "100%",
     minHeight: "100%",
-    background: "linear-gradient(135deg, #18181b 0%, #27272a 50%, #1f2937 100%)",
+    width: "100%",
+    backgroundImage: `url("${(import.meta as any).env?.BASE_URL ?? "/"}admin-bg.png")`,
+    backgroundSize: "cover",
+    backgroundPosition: "center",
+    backgroundRepeat: "no-repeat",
+    backgroundColor: "#040712",
     color: "white", display: "flex", flexDirection: "column",
-    fontFamily: "'Segoe UI', Arial, sans-serif",
+    overflow: "hidden",
+    fontFamily: "var(--app-font-sans)",
+    position: "relative",
   };
 }
 function Header({ title, onBack }: { title: string; onBack: () => void }) {
   return (
     <div style={{
+      flexShrink: 0,
       display: "flex", alignItems: "center",
       padding: "14px 22px",
-      borderBottom: "1px solid rgba(255,213,79,0.20)",
-      background: "rgba(0,0,0,0.30)",
+      borderBottom: "1px solid rgba(105,240,174,0.20)",
+      background: "linear-gradient(180deg, rgba(0,0,0,0.55) 0%, rgba(0,0,0,0.25) 100%)",
+      backdropFilter: "blur(10px) saturate(1.2)",
+      WebkitBackdropFilter: "blur(10px) saturate(1.2)",
+      position: "relative", zIndex: 2,
     }}>
-      <button onClick={onBack} style={{
-        background: "rgba(255,213,79,0.10)",
-        border: "1px solid rgba(255,213,79,0.35)",
-        borderRadius: 10, padding: "7px 16px",
-        color: "#FFD54F", cursor: "pointer", fontSize: 13, fontWeight: 700,
-      }}>← Назад</button>
+      <button onClick={onBack} className="ui-back-btn">← Назад</button>
       <h2 style={{
         flex: 1, textAlign: "center", margin: 0,
-        fontSize: 20, fontWeight: 900, letterSpacing: 2,
+        fontSize: 20, fontWeight: 900, letterSpacing: "0.16em",
         color: "#FFD54F",
-        textShadow: "0 0 14px rgba(255,213,79,0.45)",
+        textShadow: "0 0 18px rgba(255,213,79,0.55), 0 2px 4px rgba(0,0,0,0.55)",
       }}>{title}</h2>
-      <div style={{ width: 90 }} />
+      <div style={{ width: 92 }} />
     </div>
   );
 }
 function tabBtn(active: boolean): React.CSSProperties {
   return {
     padding: "8px 22px",
-    background: active ? "rgba(255,213,79,0.18)" : "rgba(255,255,255,0.04)",
-    border: `1.5px solid ${active ? "#FFD54F" : "rgba(255,255,255,0.10)"}`,
-    borderRadius: 10,
-    color: active ? "#FFD54F" : "rgba(255,255,255,0.55)",
-    fontWeight: 800, fontSize: 12, letterSpacing: 1.5,
+    flexShrink: 0,
+    whiteSpace: "nowrap",
+    background: active
+      ? "linear-gradient(135deg, rgba(255,213,79,0.28), rgba(255,138,0,0.18))"
+      : "rgba(255,255,255,0.04)",
+    border: `1px solid ${active ? "var(--bd-gold)" : "var(--bd-1)"}`,
+    borderRadius: "var(--r-md)",
+    color: active ? "#ffe57f" : "var(--t-3)",
+    fontWeight: 800, fontSize: 12, letterSpacing: "0.14em",
     cursor: "pointer",
-    boxShadow: active ? "0 0 12px rgba(255,213,79,0.35)" : "none",
+    boxShadow: active ? "var(--sh-glow-gold), var(--sh-sm)" : "var(--sh-sm)",
+    backdropFilter: "blur(8px)",
+    WebkitBackdropFilter: "blur(8px)",
+    transition: "all var(--ease-mid)",
   };
 }
 function Section({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
@@ -1069,24 +2052,32 @@ function inputStyle(): React.CSSProperties {
   };
 }
 function primaryBtn(color: string): React.CSSProperties {
+  const isMuted = color === "#888";
   return {
-    background: `linear-gradient(135deg, ${color}, ${color}cc)`,
-    border: "none", borderRadius: 10,
-    color: color === "#888" ? "white" : "#1B1B1B",
+    ["--ui-shear-fill" as string]: isMuted
+      ? "linear-gradient(160deg, rgba(255,255,255,0.10), rgba(255,255,255,0.05))"
+      : `linear-gradient(135deg, ${color}, ${color}cc)`,
+    ["--ui-shear-border" as string]: isMuted ? "var(--bd-2)" : color,
+    ["--ui-shear-text" as string]: textOnSolidFill(color),
+    ["--ui-shear-text-shadow" as string]: isMuted ? undefined : textShadowOnSolidFill(),
+    ["--ui-shear-blur" as string]: "none",
+    ["--ui-shear-shadow" as string]: `0 3px 10px ${color}44`,
     padding: "8px 14px",
     fontSize: 12, fontWeight: 900, letterSpacing: 1,
     cursor: "pointer",
-    boxShadow: `0 3px 10px ${color}44`,
     display: "inline-flex", alignItems: "center", gap: 6,
   };
 }
 function smallBtn(color: string): React.CSSProperties {
   return {
-    background: `${color}26`,
-    border: `1px solid ${color}66`,
-    borderRadius: 6, padding: "4px 8px",
-    color, fontSize: 11, fontWeight: 800,
+    ["--ui-shear-fill" as string]: `${color}26`,
+    ["--ui-shear-border" as string]: `${color}88`,
+    ["--ui-shear-text" as string]: textOnTintedAccent(color),
+    ["--ui-shear-blur" as string]: "blur(8px)",
+    padding: "4px 8px",
+    fontSize: 11, fontWeight: 800,
     cursor: "pointer", whiteSpace: "nowrap",
+    textShadow: "0 1px 2px rgba(0,0,0,0.65)",
   };
 }
 function miniCard(color: string | undefined): React.CSSProperties {

@@ -1,5 +1,7 @@
 export const TILE_CELL_SIZE = 50;
 export const GRID_SIZE = 60;
+/** Mountain rim in live battles — keeps barrier art off the playable field. */
+export const BATTLE_MAP_RIM_CELLS = 4;
 
 export enum TileType {
   GRASS = 0,
@@ -15,6 +17,7 @@ export enum TileType {
   WOOD = 10,
   SAND_WALL = 11,
   PYRAMID = 12,
+  FLOWERBED = 13,
 }
 
 export interface TileProps {
@@ -34,17 +37,50 @@ export const TILE_PROPS: Record<number, TileProps> = {
   [TileType.WATER]:      { walkable: false, shootThrough: true,  destructible: false, soraDestructible: false, healRate: 0,   cover: false },
   [TileType.DECORATION]: { walkable: false, shootThrough: false, destructible: true,  soraDestructible: true,  healRate: 0,   cover: false },
   [TileType.FENCE]:      { walkable: false, shootThrough: true,  destructible: false, soraDestructible: false, healRate: 0,   cover: false },
-  [TileType.HEAL]:       { walkable: false, shootThrough: true,  destructible: false, soraDestructible: false, healRate: 500, cover: false },
+  [TileType.HEAL]:       { walkable: false, shootThrough: false, destructible: false, soraDestructible: false, healRate: 500, cover: false },
   [TileType.TREE]:       { walkable: false, shootThrough: false, destructible: false, soraDestructible: false, healRate: 0,   cover: false },
   [TileType.CACTUS]:     { walkable: false, shootThrough: false, destructible: false, soraDestructible: false, healRate: 0,   cover: false },
   [TileType.WOOD]:       { walkable: false, shootThrough: false, destructible: false, soraDestructible: false, healRate: 0,   cover: false },
   [TileType.SAND_WALL]:  { walkable: false, shootThrough: false, destructible: false, soraDestructible: false, healRate: 0,   cover: false },
   [TileType.PYRAMID]:    { walkable: false, shootThrough: false, destructible: false, soraDestructible: false, healRate: 0,   cover: false },
+  [TileType.FLOWERBED]:  { walkable: false, shootThrough: true,  destructible: false, soraDestructible: false, healRate: 0,   cover: false },
 };
+
+export function getTileGridWorldSize(grid: TileGrid): { mapWidth: number; mapHeight: number } {
+  return {
+    mapWidth: grid.width * grid.cellSize,
+    mapHeight: grid.height * grid.cellSize,
+  };
+}
+
+/** Минимальная трава-сетка, если у режима нет tileGrid (3D-сцена всё равно поднимается). */
+export function createFallbackBattleTileGrid(mapWidthPx: number, mapHeightPx: number): TileGrid {
+  const cw = Math.max(1, Math.ceil(mapWidthPx / TILE_CELL_SIZE));
+  const ch = Math.max(1, Math.ceil(mapHeightPx / TILE_CELL_SIZE));
+  const cells = new Uint8Array(cw * ch);
+  cells.fill(TileType.GRASS);
+  return {
+    cells,
+    destroyed: new Uint8Array(cw * ch),
+    width: cw,
+    height: ch,
+    cellSize: TILE_CELL_SIZE,
+  };
+}
 
 export interface TileGrid {
   cells: Uint8Array;
   destroyed: Uint8Array;
+  /** Incremented when a destructible tile is destroyed — cheap dirty flag for 3D rebuild. */
+  destroyRevision?: number;
+  /**
+   * Опциональный per-cell поворот для тайлов, у которых это имеет смысл.
+   *   • bones (5), fence (6): 0 = горизонталь, 1 = вертикаль
+   *   • wall (1), sand_wall (11): 0/1/2/3 → 0°/90°/180°/270° вокруг Y
+   * Не задано → все клетки считаются с rot=0.
+   * Используется в battle3DWorld для согласованного отображения с редактором.
+   */
+  rotations?: Uint8Array;
   width: number;
   height: number;
   cellSize: number;
@@ -60,6 +96,16 @@ export function getTile(grid: TileGrid, tx: number, ty: number): number {
 export function setTile(grid: TileGrid, tx: number, ty: number, type: TileType): void {
   if (tx < 0 || ty < 0 || tx >= grid.width || ty >= grid.height) return;
   grid.cells[ty * grid.width + tx] = type;
+}
+
+/** True when a non-grass tile shares an edge with grass (rim face bleeding into arena). */
+export function tileAdjacentToGrass(grid: TileGrid, tx: number, ty: number): boolean {
+  if (getTile(grid, tx, ty) === TileType.GRASS) return false;
+  if (getTile(grid, tx, ty - 1) === TileType.GRASS) return true;
+  if (getTile(grid, tx, ty + 1) === TileType.GRASS) return true;
+  if (getTile(grid, tx - 1, ty) === TileType.GRASS) return true;
+  if (getTile(grid, tx + 1, ty) === TileType.GRASS) return true;
+  return false;
 }
 
 /** Force solid mountain rim so camera at map edge never shows empty void (GLB wall art). */
@@ -80,6 +126,7 @@ export function destroyTile(grid: TileGrid, tx: number, ty: number): void {
   const props = TILE_PROPS[type];
   if (props?.destructible) {
     grid.destroyed[ty * grid.width + tx] = 1;
+    grid.destroyRevision = (grid.destroyRevision ?? 0) + 1;
   }
 }
 
@@ -89,6 +136,7 @@ export function soraDestroyTile(grid: TileGrid, tx: number, ty: number): void {
   const props = TILE_PROPS[type];
   if (props?.soraDestructible) {
     grid.destroyed[ty * grid.width + tx] = 1;
+    grid.destroyRevision = (grid.destroyRevision ?? 0) + 1;
   }
 }
 
@@ -98,9 +146,9 @@ export function soraDestroyTile(grid: TileGrid, tx: number, ty: number): void {
  * (fraction of cellSize). FENCE omitted — thin strip, full cell.
  */
 const TILE_COLLISION_SOUTH_INSET_FRAC: Partial<Record<number, number>> = {
-  [TileType.WALL]: 0.38,
-  [TileType.MOUNTAIN]: 0.38,
-  [TileType.SAND_WALL]: 0.38,
+  [TileType.WALL]: 0.30,
+  [TileType.MOUNTAIN]: 0.30,
+  [TileType.SAND_WALL]: 0.30,
   [TileType.WOOD]: 0.30,
   [TileType.DECORATION]: 0.22,
   [TileType.CACTUS]: 0.20,
@@ -108,17 +156,41 @@ const TILE_COLLISION_SOUTH_INSET_FRAC: Partial<Record<number, number>> = {
   [TileType.PYRAMID]: 0.22,
 };
 
+/**
+ * В 3D-режиме модели занимают всю ячейку без «пустого нижнего поля» (которое
+ * было у 2D ISO-спрайтов). Соответственно south-inset нужно выключить, иначе
+ * игрок может зайти в южную часть кубика «сквозь текстуру».
+ *
+ * Переключается из `battle3DWorld.initBattle3DForBattle` / `disposeBattle3D`.
+ */
+let tileCollisionFullCell = false;
+export function setTileCollisionFullCell(enabled: boolean): void {
+  tileCollisionFullCell = enabled;
+}
+
+export type TileGridCollisionOpts = {
+  /**
+   * Shift collision circle center along +world Y (down) from logical (x, y).
+   * Used for brawlers so the circle sits near the feet, not the sprite pivot.
+   */
+  circleWorldDy?: number;
+};
+
 export function collidesWithTileGrid(
   x: number, y: number, radius: number,
-  grid: TileGrid
+  grid: TileGrid,
+  opts?: TileGridCollisionOpts,
 ): { collides: boolean; nx: number; ny: number } {
-  const C = grid.cellSize;
-  const minTX = Math.max(0, Math.floor((x - radius) / C));
-  const maxTX = Math.min(grid.width - 1, Math.floor((x + radius) / C));
-  const minTY = Math.max(0, Math.floor((y - radius) / C));
-  const maxTY = Math.min(grid.height - 1, Math.floor((y + radius) / C));
+  const dy = opts?.circleWorldDy ?? 0;
+  let ccx = x;
+  let ccy = y + dy;
 
-  let nx = x, ny = y;
+  const C = grid.cellSize;
+  const minTX = Math.max(0, Math.floor((ccx - radius) / C));
+  const maxTX = Math.min(grid.width - 1, Math.floor((ccx + radius) / C));
+  const minTY = Math.max(0, Math.floor((ccy - radius) / C));
+  const maxTY = Math.min(grid.height - 1, Math.floor((ccy + radius) / C));
+
   let collides = false;
 
   for (let tx = minTX; tx <= maxTX; tx++) {
@@ -129,25 +201,25 @@ export function collidesWithTileGrid(
 
       const tileX = tx * C;
       const tileY = ty * C;
-      const insetFrac = TILE_COLLISION_SOUTH_INSET_FRAC[type] ?? 0;
+      const insetFrac = tileCollisionFullCell ? 0 : (TILE_COLLISION_SOUTH_INSET_FRAC[type] ?? 0);
       const southInset = insetFrac > 0 ? C * insetFrac : 0;
       const hSolid = C - southInset;
-      const nearX = Math.max(tileX, Math.min(nx, tileX + C));
-      const nearY = Math.max(tileY, Math.min(ny, tileY + hSolid));
-      const dx = nx - nearX;
-      const dy = ny - nearY;
-      const distSq = dx * dx + dy * dy;
+      const nearX = Math.max(tileX, Math.min(ccx, tileX + C));
+      const nearY = Math.max(tileY, Math.min(ccy, tileY + hSolid));
+      const dx = ccx - nearX;
+      const dyCol = ccy - nearY;
+      const distSq = dx * dx + dyCol * dyCol;
       if (distSq < radius * radius) {
         collides = true;
         const dist = Math.sqrt(distSq) || 0.01;
         const overlap = radius - dist;
-        nx += (dx / dist) * overlap;
-        ny += (dy / dist) * overlap;
+        ccx += (dx / dist) * overlap;
+        ccy += (dyCol / dist) * overlap;
       }
     }
   }
 
-  return { collides, nx, ny };
+  return { collides, nx: ccx, ny: ccy - dy };
 }
 
 export function projectileBlockedByTile(
@@ -161,6 +233,16 @@ export function projectileBlockedByTile(
   const props = TILE_PROPS[type];
   if (!props || props.shootThrough) return { blocked: false, tx, ty };
   return { blocked: true, tx, ty };
+}
+
+/** Тряска при попадании — все твёрдые деко, кроме кустов, костей, воды, заборов, клумб. */
+export function tileShouldShakeOnHit(type: number): boolean {
+  return type !== TileType.GRASS
+    && type !== TileType.BUSH
+    && type !== TileType.WATER
+    && type !== TileType.DECORATION
+    && type !== TileType.FENCE
+    && type !== TileType.FLOWERBED;
 }
 
 export function getTileHealRate(x: number, y: number, grid: TileGrid): number {
@@ -229,6 +311,7 @@ const FLAT_PICKUP_NEIGHBOR_BLOCK = new Set<number>([
   TileType.WALL,
   TileType.MOUNTAIN,
   TileType.WATER,
+  TileType.FLOWERBED,
   TileType.DECORATION,
   TileType.FENCE,
   TileType.HEAL,
@@ -305,8 +388,8 @@ export function generateShowdownTileGrid(seedVal = Date.now()): TileGrid {
 
   grid.cells.fill(TileType.GRASS);
 
-  // Thick mountain rim (was 3 cells) — hides void past arena + reads as rocky barrier.
-  const RIM = 10;
+  // Mountain rim — same width as published-map battles.
+  const RIM = BATTLE_MAP_RIM_CELLS;
   paintMountainBorderRing(grid, RIM);
   const INNER = RIM + 2;
 

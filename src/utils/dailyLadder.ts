@@ -4,6 +4,7 @@
 
 import type { ChestRarity } from "./chests";
 
+/** Пины и иконки в ежедневной лестнице не выдаются — только ресурсы, сундуки и XP пасса. */
 export type DailyRewardType = "coins" | "gems" | "powerPoints" | "chest" | "xp";
 
 export interface DailyReward {
@@ -40,6 +41,10 @@ function build(): DailyReward[] {
       const amount = 5 + Math.floor(day / 3) * 2;
       out.push({ day, type: "powerPoints", amount,
         label: `${amount} очков прокачки`, icon: "✨", color: "#CE93D8" });
+    } else if (day === 2 || day === 9 || day === 16 || day === 23) {
+      const amount = 8 + Math.floor(day / 3) * 2;
+      out.push({ day, type: "gems", amount,
+        label: `${amount} кристаллов`, icon: "💎", color: "#40C4FF" });
     } else if (day === 4 || day === 11 || day === 18 || day === 25) {
       const xp = 100 + day * 5;
       out.push({ day, type: "xp", amount: xp,

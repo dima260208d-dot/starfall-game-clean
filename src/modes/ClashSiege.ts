@@ -1,23 +1,45 @@
+import { translate as tr } from "../i18n";
 import { Brawler } from "../entities/Brawler";
 import { applyZafkielStarEffectsOnHit } from "../utils/zafkielStars";
+import { applyVerdelettaOnHit } from "../utils/verdelettaStars";
+import { applyLuminaOnHit } from "../utils/luminaStars";
+import { applyMirabelOnHit } from "../utils/mirabelMechanics";
+import { handleVerdelettaShadowProjectileHit } from "../utils/verdelettaShadows";
 import { Bot } from "../entities/Bot";
-import { BRAWLERS, getBrawlerById, pickBotStats } from "../entities/BrawlerData";
-import { createCrystalsMap, createTileGridMap, GameMap, renderMap, renderTileGrid } from "../game/MapRenderer";
-import { getPublishedMap, OV } from "../utils/mapEditorAPI";
-import { TileGrid, TILE_CELL_SIZE, GRID_SIZE, paintMountainBorderRing } from "../game/TileMap";
-import { Projectile, updateProjectiles, renderProjectiles } from "../entities/Projectile";
+import { BRAWLERS, getBrawlerById, isMeleeBrawler, pickBotStats } from "../entities/BrawlerData";
+import { createCrystalsMap, createTileGridMap, GameMap } from "../game/MapRenderer";
+import { OV } from "../utils/mapEditorAPI";
+import { getActiveMap } from "../utils/mapSchedule";
+import { TileGrid, TILE_CELL_SIZE, GRID_SIZE, paintMountainBorderRing, BATTLE_MAP_RIM_CELLS } from "../game/TileMap";
+import { Projectile, updateProjectiles, renderProjectiles, projectileSuperChargeOpts } from "../entities/Projectile";
 import { Camera } from "../game/Camera";
 import { InputHandler } from "../game/InputHandler";
 import { updateDamageNumbers, renderDamageNumbers, clearDamageNumbers, spawnDamageNumber } from "../utils/damageNumbers";
 import { updateEffects, renderEffects, clearEffects } from "../utils/effects";
-import { angleTo, autoAimAngle, autoAimTarget, distance, randomInt } from "../utils/helpers";
-import { recordGameResult, getCurrentUsername, getCurrentProfile } from "../utils/localStorageAPI";
-import { getPetById } from "../entities/PetData";
-import { resetMatchStats, getMatchStats } from "../utils/matchStats";
+import { angleTo, distance, randomInt } from "../utils/helpers";
+import { resolvePlayerAttackAngle, tickHeldPlayerAttack, wrapCallistaAttackAim, wrapCallistaSuperAim, inputUsesManualAttackAim } from "../utils/battleAttackAim";
+import { getCurrentUsername, getCurrentProfile, applyProfilePetToBrawler } from "../utils/localStorageAPI";
+import { applyPartySharedBattleResult } from "../utils/social/partyBattle";
+import { resetMatchStats, getMatchStats, participantFromBrawler } from "../utils/matchStats";
 import { renderPlayerHUD } from "./sharedHUD";
-import { getSafeCanvas } from "../utils/powerModelCache";
+import { getSafeCanvas, getSafeGLBTemplate } from "../utils/powerModelCache";
 import { fillBattleCanvasBg, renderBattleScreenFX } from "../game/battleScreenFX";
+import { isBattle3DActive } from "../game/battle3DWorld";
+import { botAIContext, snapBrawlerSpawn } from "../ai/aiBotObjectives";
 import { isDevBattleWorldFrozen } from "../game/battleDevPause";
+import { drawTallTilesYsortedWithBrawlers } from "../game/tileGridBrawlerDepthPass";
+import {
+  clearDevBattleMonsters,
+  getDevBattleMonsters,
+  resolveDevMonsterProjectileHits,
+  resolveDevMonsterBoltsOnBlues,
+  renderDevMonsterHud,
+  spawnDevBattleMonster,
+  updateDevBattleMonstersSiege,
+  findNearestDevMonster,
+  DEV_MONSTER_HIT_RADIUS,
+} from "../utils/devBattleMonsters";
+import { getSiegeMaxWaves } from "../utils/siegeProgress";
 
 interface CrystalParticle {
   x: number; y: number;
@@ -35,7 +57,6 @@ export class ClashSiege {
   map: GameMap;
   player: Brawler;
   allies: Bot[] = [];
-  enemies: Bot[] = [];
   projectiles: Projectile[] = [];
   crystalParticles: CrystalParticle[] = [];
   baseExploded = false;
@@ -49,11 +70,12 @@ export class ClashSiege {
   baseX = 1750;
   baseY = 1750;
 
+  siegeLevel = 1;
   wave = 1;
   maxWaves = 3;
   waveSpawnTimer = 3;
-  enemiesToSpawn = 3;
   waveCleared = false;
+  waveSpawned = false;
 
   over = false;
   won = false;
@@ -61,38 +83,50 @@ export class ClashSiege {
   spriteLoaded: boolean;
   private resultRecorded = false;
 
-  constructor(canvas: HTMLCanvasElement, playerBrawlerId: string, playerLevel: number, onAttack: () => void, onSuper: () => void, spriteLoaded: boolean) {
+  constructor(
+    canvas: HTMLCanvasElement,
+    playerBrawlerId: string,
+    playerLevel: number,
+    onAttack: () => void,
+    onSuper: () => void,
+    spriteLoaded: boolean,
+    siegeLevel = 1,
+  ) {
+    clearDevBattleMonsters();
+    this.siegeLevel = Math.max(1, Math.min(5, Math.floor(siegeLevel)));
+    this.maxWaves = getSiegeMaxWaves(this.siegeLevel);
+
     this.map = createCrystalsMap();
     this.spriteLoaded = spriteLoaded;
     const playerStats = getBrawlerById(playerBrawlerId) || BRAWLERS[0];
     this.player = new Brawler(playerStats, playerLevel, 1750, 1900, "blue", true);
-    this.player.setIdentity(getCurrentUsername() ?? "Игрок", false);
-    this.player.setEquippedPet(getPetById(getCurrentProfile()?.equippedPetId) ?? null);
+    this.player.setIdentity(getCurrentUsername() ?? tr("battle.player"), false);
+    applyProfilePetToBrawler(this.player);
     resetMatchStats();
-    // Spawn 3 allied bots to defend the base together with the player
-    const allyStats = BRAWLERS.filter(b => b.id !== playerBrawlerId);
+    const allyPicks = pickBotStats(playerBrawlerId, 3);
     const allyPos: Array<{ x: number; y: number }> = [
       { x: 1500, y: 1900 },
       { x: 2000, y: 1900 },
       { x: 1750, y: 2150 },
     ];
     for (let i = 0; i < 3; i++) {
-      const stats = allyStats[i % allyStats.length];
-      this.allies.push(new Bot(stats, Math.max(1, playerLevel - 1), allyPos[i].x, allyPos[i].y, "blue"));
+      this.allies.push(new Bot(allyPicks[i], Math.max(1, playerLevel - 1), allyPos[i].x, allyPos[i].y, "blue"));
     }
     this.camera = new Camera(CAM_W, CAM_H, this.map.width, this.map.height);
     this.input = new InputHandler(canvas, onAttack, onSuper);
 
-    // ── Load published map if one exists ──────────────────────────────────
-    const pubMap = getPublishedMap("siege");
+    const pubMap = getActiveMap("siege");
     if (pubMap && pubMap.cells && pubMap.cells.length === GRID_SIZE * GRID_SIZE) {
       const tileGrid: TileGrid = {
         cells: new Uint8Array(GRID_SIZE * GRID_SIZE),
         destroyed: new Uint8Array(GRID_SIZE * GRID_SIZE),
         width: GRID_SIZE, height: GRID_SIZE, cellSize: TILE_CELL_SIZE,
+        rotations: pubMap.rotations && pubMap.rotations.length === GRID_SIZE * GRID_SIZE
+          ? new Uint8Array(pubMap.rotations)
+          : undefined,
       };
       for (let i = 0; i < pubMap.cells.length; i++) tileGrid.cells[i] = pubMap.cells[i];
-      paintMountainBorderRing(tileGrid, 10);
+      paintMountainBorderRing(tileGrid, BATTLE_MAP_RIM_CELLS);
       this.map = createTileGridMap(tileGrid, pubMap.name);
       this.camera = new Camera(CAM_W, CAM_H, this.map.width, this.map.height);
       if (pubMap.overlays && pubMap.overlays.length === GRID_SIZE * GRID_SIZE) {
@@ -101,7 +135,7 @@ export class ClashSiege {
         for (let i = 0; i < ovs.length; i++) {
           const tx = i % GRID_SIZE, ty = Math.floor(i / GRID_SIZE);
           const wx = (tx + 0.5) * C, wy = (ty + 0.5) * C;
-          if (ovs[i] === OV.SPAWN_BLUE)  blueSpawns.push({x: wx, y: wy});
+          if (ovs[i] === OV.SPAWN_BLUE) blueSpawns.push({x: wx, y: wy});
           else if (ovs[i] === OV.BASE_BLUE) { this.baseX = wx; this.baseY = wy; }
         }
         blueSpawns = blueSpawns.sort(() => Math.random() - 0.5);
@@ -109,49 +143,119 @@ export class ClashSiege {
         if (blueSpawns[1]) { this.allies[0].x = blueSpawns[1].x; this.allies[0].y = blueSpawns[1].y; }
         if (blueSpawns[2]) { this.allies[1].x = blueSpawns[2].x; this.allies[1].y = blueSpawns[2].y; }
         if (blueSpawns[3]) { this.allies[2].x = blueSpawns[3].x; this.allies[2].y = blueSpawns[3].y; }
+        const grid = this.map.tileGrid;
+        snapBrawlerSpawn(this.player, grid);
+        for (const a of this.allies) snapBrawlerSpawn(a, grid);
       }
     }
   }
 
+  private livingMonsters() {
+    return getDevBattleMonsters().filter(m => m.alive);
+  }
+
+  private blues(): Brawler[] {
+    return [this.player, ...this.allies];
+  }
+
   handleAttack(): void {
     if (!this.player.canAttack()) return;
-    const mouseAngle = angleTo(this.player.x, this.player.y, this.input.state.mouseWorldX, this.input.state.mouseWorldY);
-    const angle = this.input.attackJoystick.active ? mouseAngle : autoAimAngle(this.player, this.enemies, mouseAngle);
-    this.player.angle = angle;
-    const isMelee = ["goro", "ronin", "taro"].includes(this.player.stats.id);
-    const all = [this.player, ...this.allies, ...this.enemies];
-    if (isMelee) this.player.meleeAttack(all);
-    else this.projectiles.push(...this.player.shoot(angle));
+    const monsters = this.livingMonsters();
+    const cam = { x: this.camera.x, y: this.camera.y, w: CAM_W, h: CAM_H, zoom: GAME_ZOOM };
+    const all = [this.player, ...this.allies];
+    const angle = resolvePlayerAttackAngle(
+      this.player,
+      [],
+      all,
+      this.input,
+      cam,
+      this.map.crates,
+    );
+    const callistaAim = wrapCallistaAttackAim(
+      this.player, angle, [], all, this.input, cam, this.map.crates,
+    );
+    this.player.angle = callistaAim.angle;
+    const isMelee = isMeleeBrawler(this.player.stats.id);
+    if (isMelee) {
+      this.player.meleeAttack(all, { crates: this.map.crates });
+    } else if (!inputUsesManualAttackAim(this.input) && monsters.length > 0) {
+      let nearest = monsters[0];
+      let best = distance(this.player.x, this.player.y, nearest.x, nearest.y);
+      for (const m of monsters.slice(1)) {
+        const d = distance(this.player.x, this.player.y, m.x, m.y);
+        if (d < best) { best = d; nearest = m; }
+      }
+      const aim = angleTo(this.player.x, this.player.y, nearest.x, nearest.y);
+      this.player.angle = aim;
+      this.projectiles.push(...this.player.shoot(aim, all, nearest.x, nearest.y, { crates: this.map.crates }));
+    } else {
+      this.projectiles.push(...this.player.shoot(callistaAim.angle, all, callistaAim.aimX, callistaAim.aimY, { crates: this.map.crates }));
+    }
   }
+
   handleSuper(): void {
     if (!this.player.canUseSuper()) return;
-    const autoTarget = this.input.superJoystick.active
-      ? null
-      : autoAimTarget(this.player, this.enemies, 1.0);
-    const aimX = autoTarget ? autoTarget.x : this.input.state.mouseWorldX;
-    const aimY = autoTarget ? autoTarget.y : this.input.state.mouseWorldY;
+    const all = [this.player, ...this.allies];
+    const cam = { x: this.camera.x, y: this.camera.y, w: CAM_W, h: CAM_H, zoom: GAME_ZOOM };
+    const callistaSuper = wrapCallistaSuperAim(this.player, [], all, this.input, cam, this.map.crates);
+    const aimX = callistaSuper ? callistaSuper.x : this.input.state.mouseWorldX;
+    const aimY = callistaSuper ? callistaSuper.y : this.input.state.mouseWorldY;
     const mouseAngle = angleTo(this.player.x, this.player.y, aimX, aimY);
-    this.player.angle = this.input.superJoystick.active
-      ? mouseAngle
-      : autoAimAngle(this.player, this.enemies, mouseAngle, 1.0);
-    this.player.activateSuper([this.player, ...this.allies, ...this.enemies], this.map, this.projectiles, aimX, aimY);
+    this.player.angle = callistaSuper
+      ? callistaSuper.angle
+      : (this.input.superJoystick.active ? mouseAngle : mouseAngle);
+    this.player.activateSuper(all, this.map, this.projectiles, aimX, aimY);
+  }
+
+  private static readonly ALLY_MONSTER_ENGAGE_RANGE = 1500;
+
+  private allyBasePatrol(slot: number): { x: number; y: number } {
+    return {
+      x: this.baseX + Math.cos(slot * 0.7) * (160 + (slot % 5) * 28),
+      y: this.baseY + Math.sin(slot * 0.9) * (130 + (slot % 4) * 32),
+    };
+  }
+
+  private tryAttackNearestMonster(unit: Brawler, all: Brawler[]): void {
+    const monsters = this.livingMonsters();
+    if (!monsters.length || !unit.canAttack()) return;
+    const bot = unit as Bot;
+    if (typeof bot.attackTimer === "number" && bot.attackTimer > 0) return;
+
+    const nearest = findNearestDevMonster(unit.x, unit.y, unit.stats.attackRange + DEV_MONSTER_HIT_RADIUS + unit.radius * 0.5);
+    if (!nearest) return;
+
+    const best = distance(unit.x, unit.y, nearest.x, nearest.y);
+    const reach = unit.stats.attackRange + DEV_MONSTER_HIT_RADIUS + unit.radius * 0.35;
+    if (best > reach) return;
+
+    const aim = angleTo(unit.x, unit.y, nearest.x, nearest.y);
+    unit.angle = aim;
+    if (isMeleeBrawler(unit.stats.id)) {
+      unit.meleeAttack(all, { crates: this.map.crates });
+    } else {
+      this.projectiles.push(...unit.shoot(aim, all, nearest.x, nearest.y, { crates: this.map.crates }));
+    }
+    if (typeof bot.attackTimer === "number") {
+      bot.attackTimer = unit.stats.attackCooldown * (0.7 + Math.random() * 0.25);
+    }
   }
 
   private spawnWave(): void {
-    const enemyCount = 2 + this.wave;
-    const enemyLevel = Math.min(10, this.wave * 2);
-    const allStats = BRAWLERS.filter(b => b.id !== this.player.stats.id);
+    const enemyCount = this.wave * 2;
+    const hp = 3600 + this.siegeLevel * 700;
+    const baseDamage = 340 + this.siegeLevel * 45;
+    const damage = Math.round(baseDamage * Math.pow(1.1, this.wave - 1));
     for (let i = 0; i < enemyCount; i++) {
-      const stats = allStats[randomInt(0, allStats.length - 1)];
       const angle = (i / enemyCount) * Math.PI * 2;
-      const r = 1400;
+      const r = 1200 + (i % 3) * 80;
       const ex = this.baseX + Math.cos(angle) * r;
       const ey = this.baseY + Math.sin(angle) * r;
       const ecx = Math.max(200, Math.min(this.map.width - 200, ex));
       const ecy = Math.max(200, Math.min(this.map.height - 200, ey));
-      this.enemies.push(new Bot(stats, enemyLevel, ecx, ecy, "red"));
+      spawnDevBattleMonster(ecx, ecy, undefined, { passive: false, hp, damage });
     }
-    this.enemiesToSpawn = enemyCount;
+    this.waveSpawned = true;
     this.waveCleared = false;
   }
 
@@ -167,18 +271,23 @@ export class ClashSiege {
 
     this.camera.follow(this.player.x, this.player.y);
     this.input.updateWorldMouse(this.camera.x, this.camera.y, this.player.x, this.player.y, GAME_ZOOM);
+    tickHeldPlayerAttack(this.input, this.player, () => this.handleAttack());
     this.player.angle = angleTo(this.player.x, this.player.y, this.input.state.mouseWorldX, this.input.state.mouseWorldY);
 
-    const all = [this.player, ...this.allies, ...this.enemies];
+    const all = [this.player, ...this.allies];
     this.player.update(dt, this.map);
 
-    // Spawn waves
-    if (this.waveCleared || this.enemies.length === 0) {
+    const aliveMonsters = this.livingMonsters();
+    if (this.waveCleared || (aliveMonsters.length === 0 && !this.waveSpawned)) {
       this.waveSpawnTimer -= sim;
       if (this.waveSpawnTimer <= 0) {
         if (this.wave > this.maxWaves) {
           this.over = true; this.won = true;
-          if (!this.resultRecorded) { const ms = getMatchStats(); recordGameResult({ won: true, mode: "siege", brawlerId: this.player.stats.id, place: 1, ...ms }); this.resultRecorded = true; }
+          if (!this.resultRecorded) {
+            const ms = getMatchStats();
+            applyPartySharedBattleResult({ won: true, mode: "siege", brawlerId: this.player.stats.id, place: 1, ...ms });
+            this.resultRecorded = true;
+          }
           return;
         }
         this.spawnWave();
@@ -187,58 +296,40 @@ export class ClashSiege {
     }
 
     if (!fr) {
-      // Allies defend the base — patrol around it and engage enemies that come close
       for (const ally of this.allies) {
         if (!ally.alive) continue;
-        // Pick the nearest enemy as a roaming target if any are reasonably close to base
-        let bestEnemy: Bot | null = null;
-        let bestDist = 99999;
-        for (const en of this.enemies) {
-          if (!en.alive) continue;
-          const d = distance(en.x, en.y, this.baseX, this.baseY);
-          if (d < 700 && d < bestDist) { bestDist = d; bestEnemy = en; }
-        }
-        if (bestEnemy) {
-          ally.forcedTarget = { x: bestEnemy.x, y: bestEnemy.y };
-        } else {
-          // Stay near base
-          ally.forcedTarget = { x: this.baseX + Math.cos(ally.id.charCodeAt(0)) * 200, y: this.baseY + Math.sin(ally.id.charCodeAt(0)) * 200 };
-        }
+        const slot = ally.id.charCodeAt(0) + ally.id.charCodeAt(ally.id.length - 1);
+        const nearestMonster = findNearestDevMonster(
+          ally.x, ally.y, ClashSiege.ALLY_MONSTER_ENGAGE_RANGE, ally.team,
+        );
+        const siegeMonsterTarget = nearestMonster
+          ? { x: nearestMonster.x, y: nearestMonster.y }
+          : null;
+        ally.forcedTarget = siegeMonsterTarget ?? this.allyBasePatrol(slot);
         ally.update(sim, this.map);
-        ally.updateAI(sim, all, this.map, this.projectiles);
+        ally.updateAI(sim, all, this.map, this.projectiles, this.map.tileGrid ?? undefined, botAIContext(this.map, "siege", {
+          isDefenderRole: true,
+          siegeMonsterTarget,
+        }));
+        this.tryAttackNearestMonster(ally, all);
       }
 
-      // Bots target nearby defenders if any are close, otherwise march on the base
-      const defenders: Brawler[] = [this.player, ...this.allies].filter(b => b.alive);
-      for (const bot of this.enemies) {
-        if (!bot.alive) continue;
-        let nearestDef: Brawler | null = null;
-        let nd = 99999;
-        for (const def of defenders) {
-          const d = distance(bot.x, bot.y, def.x, def.y);
-          if (d < nd) { nd = d; nearestDef = def; }
-        }
-        if (nearestDef && nd < 600) {
-          // Engage the defender (they will path toward it and attack via normal AI)
-          bot.forcedTarget = { x: nearestDef.x, y: nearestDef.y };
-        } else {
-          bot.forcedTarget = { x: this.baseX, y: this.baseY };
-        }
-        bot.update(sim, this.map);
-        bot.updateAI(sim, all, this.map, this.projectiles);
-
-        // Always damage the base when in melee range
-        const dBase = distance(bot.x, bot.y, this.baseX, this.baseY);
-        if (dBase < 110 && bot.attackTimer <= 0 && bot.canAttack()) {
-          const dmg = bot.scaledDamage * 0.4;
+      updateDevBattleMonstersSiege(
+        sim,
+        this.blues(),
+        this.projectiles,
+        this.map.width,
+        this.map.height,
+        this.baseX,
+        this.baseY,
+        (dmg) => {
           this.baseHp -= dmg;
           spawnDamageNumber(this.baseX, this.baseY - 50, Math.floor(dmg), "damage");
-          bot.attackTimer = bot.stats.attackCooldown;
-        }
-      }
+        },
+        this.map.tileGrid ?? undefined,
+      );
     }
 
-    // Respawn fallen allies after a delay so the team stays alive
     for (const ally of this.allies) {
       if (!ally.alive && !this.respawnTimers.has(ally.id)) {
         this.respawnTimers.set(ally.id, 6);
@@ -259,23 +350,21 @@ export class ClashSiege {
       }
     }
 
-    updateProjectiles(this.projectiles, sim, this.map);
+    updateEffects(sim, all, this.projectiles, this.map.tileGrid ?? undefined, { crates: this.map.crates });
+    updateProjectiles(this.projectiles, sim, this.map, undefined, { crates: this.map.crates });
     this.handleProjectileHits(all, fr);
     this.projectiles = this.projectiles.filter(p => p.active);
 
-    // Remove dead enemies, advance wave when all dead
-    const aliveEnemies = this.enemies.filter(e => e.alive);
-    if (aliveEnemies.length === 0 && !this.waveCleared && this.enemies.length > 0) {
+    if (this.waveSpawned && this.livingMonsters().length === 0) {
       this.waveCleared = true;
       this.wave++;
       this.waveSpawnTimer = 4;
-      this.enemies = [];
-      // Heal player a bit between waves
+      this.waveSpawned = false;
+      clearDevBattleMonsters();
       this.player.heal(this.player.maxHp * 0.3);
       this.baseHp = Math.min(this.baseMaxHp, this.baseHp + 300);
     }
 
-    // Player respawn (team mode): death does NOT end the match
     if (!this.player.alive) {
       if (this.playerRespawnTimer <= 0) {
         this.playerRespawnTimer = 5;
@@ -286,16 +375,18 @@ export class ClashSiege {
         }
       }
     }
-    // Loss only if the base falls
     if (this.baseHp <= 0 && !this.baseExploded) {
       this.baseExploded = true;
       this.spawnCrystalExplosion(this.baseX, this.baseY);
     }
     if (this.baseHp <= 0) {
       this.over = true; this.won = false;
-      if (!this.resultRecorded) { const ms = getMatchStats(); recordGameResult({ won: false, mode: "siege", brawlerId: this.player.stats.id, place: 2, ...ms }); this.resultRecorded = true; }
+      if (!this.resultRecorded) {
+        const ms = getMatchStats();
+        applyPartySharedBattleResult({ won: false, mode: "siege", brawlerId: this.player.stats.id, place: 2, ...ms });
+        this.resultRecorded = true;
+      }
     }
-    // Update crystal particles
     for (let i = this.crystalParticles.length - 1; i >= 0; i--) {
       const p = this.crystalParticles[i];
       p.x += p.vx * sim * 60;
@@ -306,7 +397,6 @@ export class ClashSiege {
       if (p.life <= 0) this.crystalParticles.splice(i, 1);
     }
     updateDamageNumbers(sim);
-    updateEffects(sim, [this.player, ...this.allies, ...this.enemies]);
   }
 
   private spawnCrystalExplosion(x: number, y: number): void {
@@ -329,6 +419,8 @@ export class ClashSiege {
   }
 
   private handleProjectileHits(all: Brawler[], fr: boolean): void {
+    resolveDevMonsterProjectileHits(this.projectiles, all);
+    resolveDevMonsterBoltsOnBlues(this.projectiles, this.blues(), fr, this.player.id);
     for (const proj of this.projectiles) {
       if (!proj.active) continue;
       if (fr && proj.ownerId !== this.player.id) continue;
@@ -340,10 +432,14 @@ export class ClashSiege {
         const d = distance(proj.x, proj.y, b.x, b.y);
         if (d < proj.radius + b.radius) {
           const attacker = all.find(bw => bw.id === proj.ownerId) || null;
-          b.takeDamage(proj.damage, attacker);
+          b.takeDamage(proj.damage, attacker, projectileSuperChargeOpts(proj, attacker));
           if (proj.slow) b.addStatus("slow", 1, 0.3);
           if (proj.poison) b.addStatus("poison", 3, 100);
           applyZafkielStarEffectsOnHit(attacker as any, b as any, proj, { width: this.map.width, height: this.map.height });
+          applyVerdelettaOnHit(attacker as any, b as any, proj, { width: this.map.width, height: this.map.height });
+          applyLuminaOnHit(attacker as any, b as any, proj, all);
+          applyMirabelOnHit(attacker as any, b as any, proj, all);
+          handleVerdelettaShadowProjectileHit(proj, b, all, this.map.width, this.map.height);
           proj.hitIds.add(b.id);
           if (!proj.piercing) { proj.active = false; break; }
         }
@@ -355,19 +451,30 @@ export class ClashSiege {
     fillBattleCanvasBg(ctx);
     ctx.save();
     ctx.scale(GAME_ZOOM, GAME_ZOOM);
-    renderMap(ctx, this.map, this.camera.x, this.camera.y, CAM_W, CAM_H, this.frame);
-    if (this.map.tileGrid) renderTileGrid(ctx, this.map.tileGrid, this.camera.x, this.camera.y, CAM_W, CAM_H, this.player.x, this.player.y, false);
-
-    // Render base as a vault safe
+    const all = [this.player, ...this.allies];
+    const _friendlies = [this.player, ...this.allies].filter(b => b.alive).map(b => ({ x: b.x, y: b.y }));
     if (this.baseHp > 0) {
       this.renderBase(ctx);
     }
     this.renderCrystalParticles(ctx);
 
-    const all = [this.player, ...this.allies, ...this.enemies];
-    const _friendlies = [this.player, ...this.allies].filter(b => b.alive).map(b => ({ x: b.x, y: b.y }));
-    for (const b of all) b.render(ctx, this.camera.x, this.camera.y, this.spriteLoaded, this.player.team, _friendlies);
-    if (this.map.tileGrid) renderTileGrid(ctx, this.map.tileGrid, this.camera.x, this.camera.y, CAM_W, CAM_H, this.player.x, this.player.y, true);
+    if (this.map.tileGrid) {
+      drawTallTilesYsortedWithBrawlers(
+        ctx,
+        this.map.tileGrid,
+        this.camera.x,
+        this.camera.y,
+        CAM_W,
+        CAM_H,
+        this.player.x,
+        this.player.y,
+        all,
+        { spriteLoaded: this.spriteLoaded, viewerTeam: this.player.team, friendlies: _friendlies },
+      );
+    } else {
+      for (const b of all) b.render(ctx, this.camera.x, this.camera.y, this.spriteLoaded, this.player.team, _friendlies);
+    }
+    renderDevMonsterHud(ctx, this.camera.x, this.camera.y, this.player.team);
     renderProjectiles(ctx, this.projectiles, this.camera.x, this.camera.y, this.frame);
     renderEffects(ctx, this.camera.x, this.camera.y, this.frame);
     renderDamageNumbers(ctx, this.camera.x, this.camera.y);
@@ -409,48 +516,47 @@ export class ClashSiege {
   }
 
   private renderBase(ctx: CanvasRenderingContext2D): void {
+    const use3d = isBattle3DActive();
+    const safe3dLive = use3d && !!getSafeGLBTemplate();
+    const draw2dSafeBody = !safe3dLive;
     const sx = this.baseX - this.camera.x;
     const sy = this.baseY - this.camera.y;
     const hpRatio = Math.max(0, this.baseHp / this.baseMaxHp);
-    const W = 120, H = 120;
-    const safeSprite = getSafeCanvas();
+    const W = 60, H = 60;
+    const safeSprite = draw2dSafeBody ? getSafeCanvas() : null;
 
     ctx.save();
 
-    // Drop shadow
-    ctx.fillStyle = "rgba(0,0,0,0.45)";
-    ctx.beginPath();
-    ctx.ellipse(sx + 6, sy + H / 2 + 12, 70, 12, 0, 0, Math.PI * 2);
-    ctx.fill();
+    if (draw2dSafeBody) {
+      ctx.fillStyle = "rgba(0,0,0,0.45)";
+      ctx.beginPath();
+      ctx.ellipse(sx + 3, sy + H / 2 + 6, 35, 6, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowColor = "#4CAF50";
+      ctx.shadowBlur = 28;
 
-    ctx.shadowColor = "#4CAF50";
-    ctx.shadowBlur = 28;
+      if (safeSprite) {
+        const D = W * 2.2;
+        ctx.globalAlpha = hpRatio < 0.25 ? 0.55 : 1;
+        ctx.drawImage(safeSprite, sx - D / 2, sy - D / 2, D, D);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = "rgba(50,180,80,0.18)";
+        ctx.fillRect(sx - D / 2, sy - D / 2, D, D);
+      } else {
+        ctx.shadowBlur = 0;
+        const bodyGrad = ctx.createLinearGradient(sx - W/2, sy - H/2, sx + W/2, sy + H/2);
+        bodyGrad.addColorStop(0, "#546E7A");
+        bodyGrad.addColorStop(1, "#263238");
+        ctx.fillStyle = bodyGrad;
+        ctx.fillRect(sx - W/2, sy - H/2, W, H);
+        ctx.fillStyle = "#FFD700";
+        ctx.font = `bold ${Math.round(W * 0.44)}px Arial`;
+        ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        ctx.fillText("🔒", sx, sy);
+      }
 
-    if (safeSprite) {
-      const D = W * 2.2;
-      ctx.globalAlpha = hpRatio < 0.25 ? 0.55 : 1;
-      ctx.drawImage(safeSprite, sx - D / 2, sy - D / 2, D, D);
-      ctx.globalAlpha = 1;
-      // Green allied tint
-      ctx.fillStyle = "rgba(50,180,80,0.18)";
-      ctx.fillRect(sx - D / 2, sy - D / 2, D, D);
-    } else {
-      // Canvas 2D fallback while GLB loads
       ctx.shadowBlur = 0;
-      const bodyGrad = ctx.createLinearGradient(sx - W/2, sy - H/2, sx + W/2, sy + H/2);
-      bodyGrad.addColorStop(0, "#546E7A");
-      bodyGrad.addColorStop(1, "#263238");
-      ctx.fillStyle = bodyGrad;
-      ctx.fillRect(sx - W/2, sy - H/2, W, H);
-      ctx.fillStyle = "#FFD700";
-      ctx.font = `bold ${Math.round(W * 0.44)}px Arial`;
-      ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillText("🔒", sx, sy);
     }
-
-    ctx.shadowBlur = 0;
-
-    // Damage cracks
     if (hpRatio < 0.6) {
       ctx.strokeStyle = "rgba(255,100,0,0.75)";
       ctx.lineWidth = 2;
@@ -468,7 +574,6 @@ export class ClashSiege {
       }
     }
 
-    // HP bar
     const barW = W * 1.25;
     ctx.fillStyle = "rgba(0,0,0,0.7)";
     ctx.fillRect(sx - barW / 2 - 1, sy - H / 2 - 20, barW + 2, 13);
@@ -477,7 +582,6 @@ export class ClashSiege {
     ctx.strokeStyle = "rgba(255,255,255,0.4)";
     ctx.lineWidth = 0.5;
     ctx.strokeRect(sx - barW / 2, sy - H / 2 - 19, barW, 11);
-    // HP percentage text (top style)
     const basePct = Math.round(hpRatio * 100);
     ctx.fillStyle = "#FFFFFF";
     ctx.font = "bold 11px Arial";
@@ -486,7 +590,6 @@ export class ClashSiege {
     ctx.shadowColor = "rgba(0,0,0,0.8)"; ctx.shadowBlur = 4;
     ctx.fillText(`${basePct}%`, sx, sy - H / 2 - 13);
     ctx.shadowBlur = 0;
-    // Exact HP on the safe itself
     ctx.fillStyle = "#FFFFFF";
     ctx.font = "bold 14px Arial";
     ctx.textAlign = "center";
@@ -495,7 +598,6 @@ export class ClashSiege {
     ctx.shadowBlur = 5;
     ctx.fillText(`${Math.max(0, Math.round(this.baseHp))} HP`, sx, sy + H * 0.34);
     ctx.shadowBlur = 0;
-
     ctx.restore();
   }
 
@@ -508,15 +610,15 @@ export class ClashSiege {
     ctx.font = "bold 18px Arial";
     ctx.textAlign = "center";
     const wDisp = Math.min(this.wave, this.maxWaves);
-    ctx.fillText(`Волна ${wDisp} / ${this.maxWaves}`, 600, 28);
+    ctx.fillText(tr("battle.wave", { current: wDisp, max: this.maxWaves }), 600, 28);
     ctx.fillStyle = "white";
     ctx.font = "bold 13px Arial";
-    const aliveCount = this.enemies.filter(e => e.alive).length;
+    const aliveCount = this.livingMonsters().length;
     if (aliveCount > 0) {
-      ctx.fillText(`Врагов: ${aliveCount}`, 600, 50);
+      ctx.fillText(tr("battle.enemiesLeft", { count: aliveCount }), 600, 50);
     } else if (this.wave <= this.maxWaves) {
       ctx.fillStyle = "#69F0AE";
-      ctx.fillText(`Следующая волна через ${Math.max(0, this.waveSpawnTimer).toFixed(1)}с`, 600, 50);
+      ctx.fillText(tr("battle.nextWaveIn", { seconds: Math.max(0, this.waveSpawnTimer).toFixed(1) }), 600, 50);
     }
 
     ctx.fillStyle = "rgba(50,180,80,0.55)";
@@ -526,7 +628,7 @@ export class ClashSiege {
     ctx.fillStyle = "#4CAF50";
     ctx.font = "bold 12px Arial";
     ctx.textAlign = "center";
-    ctx.fillText("БАЗА", 1120, 22);
+    ctx.fillText(tr("battle.base"), 1120, 22);
     const hpRatio = Math.max(0, this.baseHp / this.baseMaxHp);
     const hudBarColor = hpRatio > 0.5 ? "#4CAF50" : hpRatio > 0.25 ? "#FFB300" : "#F44336";
     ctx.fillStyle = "rgba(255,255,255,0.18)";
@@ -540,19 +642,29 @@ export class ClashSiege {
     ctx.font = "bold 12px Arial";
     ctx.textAlign = "center";
     ctx.fillText(`${Math.round(hpRatio * 100)}%`, 1120, 50);
+
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(8, 8, 120, 22);
+    ctx.fillStyle = "#90CAF9";
+    ctx.font = "bold 11px Arial";
+    ctx.textAlign = "left";
+    ctx.fillText(tr("siege.levelHud", { level: this.siegeLevel }), 14, 22);
     ctx.restore();
   }
 
   getParticipants(): import("../types/gameResult").GameParticipant[] {
     const fakeTrophies = (name: string) => 300 + ((name.charCodeAt(0) * 37 + (name.charCodeAt(1) || 5) * 13) % 1700);
     const profile = getCurrentProfile();
-    const uniqueEnemies = this.enemies.slice(0, 3);
     return [
-      { brawlerId: this.player.stats.id, displayName: this.player.displayName || "Игрок", team: "blue", isPlayer: true, level: this.player.level, trophies: profile?.trophies ?? 0 },
-      ...this.allies.map(b => ({ brawlerId: b.stats.id, displayName: b.displayName || "Бот", team: "blue", isPlayer: false, level: b.level, trophies: fakeTrophies(b.displayName || "B") })),
-      ...uniqueEnemies.map(b => ({ brawlerId: b.stats.id, displayName: b.displayName || "Бот", team: "red", isPlayer: false, level: b.level, trophies: fakeTrophies(b.displayName || "B") })),
+      participantFromBrawler(this.player, { team: "blue", isPlayer: true, trophies: profile?.trophies ?? 0, defaultName: tr("battle.player") }),
+      ...this.allies.map(b => participantFromBrawler(b, { team: "blue", isPlayer: false, trophies: fakeTrophies(b.displayName || "B"), defaultName: tr("battle.bot") })),
     ];
   }
 
-  destroy(): void { this.input.destroy(); clearDamageNumbers(); clearEffects(); }
+  destroy(): void {
+    this.input.destroy();
+    clearDamageNumbers();
+    clearEffects();
+    clearDevBattleMonsters();
+  }
 }

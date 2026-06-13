@@ -1,12 +1,11 @@
 /**
- * Chest3DViewer — small Three.js canvas displaying an idle-rotating 3D chest.
- * Used inline inside chest cards as a visual replacement for ChestVisual.
+ * Chest3DViewer — 3D chest preview via shared SpinningModel3D (one WebGL context).
+ * loadChestCached kept for ChestOpenAnimation full-screen viewer.
  */
-import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
 import { CHESTS, type ChestRarity } from "../utils/chests";
+import ChestVisual from "./ChestVisual";
 
 export const CHEST_MODELS: Record<ChestRarity, string> = {
   common:         "models/chest_common.glb",
@@ -27,6 +26,10 @@ interface CachedChest {
 }
 
 const chestGltfCache = new Map<string, Promise<CachedChest>>();
+
+export function invalidateChestGltfCache(): void {
+  chestGltfCache.clear();
+}
 
 export function loadChestCached(url: string): Promise<CachedChest> {
   const hit = chestGltfCache.get(url);
@@ -66,79 +69,5 @@ interface Props {
 }
 
 export default function Chest3DViewer({ rarity, size = 130 }: Props) {
-  const mountRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const mount = mountRef.current;
-    if (!mount) return;
-    const def = CHESTS[rarity];
-
-    let renderer: THREE.WebGLRenderer;
-    try {
-      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    } catch { return; }
-
-    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
-    renderer.setSize(size, size, false);
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.domElement.style.position = "absolute";
-    renderer.domElement.style.inset = "0";
-    renderer.domElement.style.width = "100%";
-    renderer.domElement.style.height = "100%";
-    mount.appendChild(renderer.domElement);
-
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
-    camera.position.set(0, 1.6, 5);
-    camera.lookAt(0, 1.1, 0);
-
-    scene.add(new THREE.AmbientLight(0xffffff, 1.0));
-    const key = new THREE.DirectionalLight(0xffffff, 1.2);
-    key.position.set(2, 4, 3);
-    scene.add(key);
-    const glow = new THREE.PointLight(new THREE.Color(def.color), 3, 8);
-    glow.position.set(0, 1.5, 2);
-    scene.add(glow);
-
-    const rootGroup = new THREE.Group();
-    scene.add(rootGroup);
-
-    let rafId = 0;
-    let lastTs = 0;
-    let cancelled = false;
-
-    const tick = (ts: number) => {
-      rafId = requestAnimationFrame(tick);
-      const dt = lastTs ? Math.min(0.05, (ts - lastTs) / 1000) : 0;
-      lastTs = ts;
-      rootGroup.rotation.y += dt * 0.65;
-      rootGroup.position.y = Math.sin(ts / 1200) * 0.08;
-      glow.intensity = 2.5 + Math.sin(ts / 700) * 0.8;
-      renderer.render(scene, camera);
-    };
-    rafId = requestAnimationFrame(tick);
-
-    const base = (import.meta as any).env?.BASE_URL ?? "/";
-    loadChestCached(`${base}${CHEST_MODELS[rarity]}`).then((cached) => {
-      if (cancelled) return;
-      const model = cloneSkinned(cached.scene) as THREE.Group;
-      model.scale.setScalar(cached.normScale);
-      model.position.set(cached.normOffX, cached.normOffY, cached.normOffZ);
-      rootGroup.add(model);
-    }).catch(() => {});
-
-    return () => {
-      cancelled = true;
-      cancelAnimationFrame(rafId);
-      if (renderer.domElement.parentNode === mount) mount.removeChild(renderer.domElement);
-      renderer.dispose();
-    };
-  }, [rarity, size]);
-
-  return (
-    <div
-      ref={mountRef}
-      style={{ position: "relative", width: size, height: size, flexShrink: 0 }}
-    />
-  );
+  return <ChestVisual rarity={rarity} size={size} animated />;
 }

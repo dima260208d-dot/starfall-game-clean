@@ -13,7 +13,6 @@ export interface ChestDef {
   secondaryColor: string;  // gradient secondary
   borderColor: string;
   description: string;
-  priceCoins: number;
   priceGems: number;       // optional alternate price (gems)
   drops: ChestDropDef;
   emoji: string;           // fallback / hero emoji
@@ -46,7 +45,6 @@ export const CHESTS: Record<ChestRarity, ChestDef> = {
     secondaryColor: "#616161",
     borderColor: "#BDBDBD",
     description: "Немного монет и пара очков прокачки.",
-    priceCoins: 150,
     priceGems: 8,
     emoji: "📦",
     drops: {
@@ -68,7 +66,6 @@ export const CHESTS: Record<ChestRarity, ChestDef> = {
     secondaryColor: "#0288D1",
     borderColor: "#81D4FA",
     description: "Гарантированы очки прокачки и шанс на кристаллы.",
-    priceCoins: 375,
     priceGems: 18,
     emoji: "🎁",
     drops: {
@@ -91,7 +88,6 @@ export const CHESTS: Record<ChestRarity, ChestDef> = {
     secondaryColor: "#7B1FA2",
     borderColor: "#CE93D8",
     description: "Хороший куш монет, очков прокачки и кристаллов.",
-    priceCoins: 900,
     priceGems: 38,
     emoji: "💎",
     drops: {
@@ -115,7 +111,6 @@ export const CHESTS: Record<ChestRarity, ChestDef> = {
     secondaryColor: "#E65100",
     borderColor: "#FFD54F",
     description: "Мощный набор: куча монет, очков и кристаллов.",
-    priceCoins: 1725,
     priceGems: 58,
     emoji: "🏆",
     drops: {
@@ -140,7 +135,6 @@ export const CHESTS: Record<ChestRarity, ChestDef> = {
     secondaryColor: "#7B2FBE",
     borderColor: "#FF80AB",
     description: "Очень редкий. Огромный куш всего!",
-    priceCoins: 4600,
     priceGems: 127,
     emoji: "🌌",
     drops: {
@@ -165,7 +159,6 @@ export const CHESTS: Record<ChestRarity, ChestDef> = {
     secondaryColor: "#BF360C",
     borderColor: "#FF9E80",
     description: "Гарантированный мега-куш кристаллов.",
-    priceCoins: 11500,
     priceGems: 288,
     emoji: "👑",
     drops: {
@@ -190,7 +183,6 @@ export const CHESTS: Record<ChestRarity, ChestDef> = {
     secondaryColor: "#7C4DFF",
     borderColor: "#FFD700",
     description: "Высшая редкость. Шанс получить ультралегендарного бойца!",
-    priceCoins: 20000,
     priceGems: 500,
     emoji: "✨",
     drops: {
@@ -212,37 +204,67 @@ export const CHEST_RARITY_ORDER: ChestRarity[] = [
   "common", "rare", "epic", "mega", "mythic", "legendary", "ultralegendary",
 ];
 
+/** Semi-transparent chest card tint (matches brawler rarity palette). */
+export const CHEST_CARD_TINT: Record<ChestRarity, string> = {
+  common:         "linear-gradient(160deg, rgba(158,158,158,0.40) 0%, rgba(8,4,24,0.88) 100%)",
+  rare:           "linear-gradient(160deg, rgba(46,125,50,0.45) 0%, rgba(8,4,24,0.88) 100%)",
+  epic:           "linear-gradient(160deg, rgba(106,27,154,0.45) 0%, rgba(8,4,24,0.88) 100%)",
+  mega:           "linear-gradient(160deg, rgba(239,108,0,0.45) 0%, rgba(8,4,24,0.88) 100%)",
+  mythic:         "linear-gradient(160deg, rgba(198,40,40,0.45) 0%, rgba(8,4,24,0.88) 100%)",
+  legendary:      "linear-gradient(160deg, rgba(249,168,37,0.45) 0%, rgba(8,4,24,0.88) 100%)",
+  ultralegendary: "linear-gradient(160deg, rgba(106,27,154,0.32) 0%, rgba(198,40,40,0.28) 38%, rgba(249,168,37,0.30) 55%, rgba(8,4,24,0.90) 100%)",
+};
+
 export interface ChestRoll {
-  type: "coins" | "gems" | "powerPoints" | "brawler" | "pet";
+  type: "coins" | "gems" | "powerPoints" | "brawler" | "pet" | "pin" | "profileIcon";
   amount: number;
   brawlerId?: string;       // when type === "brawler"
+  brawlerDuplicate?: boolean; // owned brawler → free star pick
   petId?: string;           // when type === "pet"
+  pinId?: string;           // when type === "pin"
+  profileIconId?: string;   // when type === "profileIcon"
 }
 
 function randInt(a: number, b: number): number {
   return Math.floor(a + Math.random() * (b - a + 1));
 }
 
-export function rollChestRewards(rarity: ChestRarity): ChestRoll[] {
-  const def = CHESTS[rarity];
-  const drops = def.drops;
+/** Chest loot: half coins, triple power points, gems ÷3 (per balance pass). */
+function scaleChestRollAmount(type: ChestRoll["type"], amount: number): number {
+  if (type === "coins") return Math.max(1, Math.floor(amount * 0.5));
+  if (type === "powerPoints") return amount * 2;
+  if (type === "gems") return Math.max(1, Math.floor(amount / 3));
+  return amount;
+}
+
+export function rollChestRewards(rarity: ChestRarity, dropsOverride?: ChestDropDef): ChestRoll[] {
+  const drops = dropsOverride ?? CHESTS[rarity].drops;
   const out: ChestRoll[] = [];
 
   for (let i = 0; i < drops.rolls; i++) {
     // Each roll: roll one type
     const rollType = Math.random();
     if (rollType < drops.gemsChance) {
-      out.push({ type: "gems", amount: randInt(drops.gemsRange[0], drops.gemsRange[1]) });
+      const gems = randInt(drops.gemsRange[0], drops.gemsRange[1]);
+      out.push({ type: "gems", amount: scaleChestRollAmount("gems", gems) });
     } else if (rollType < drops.gemsChance + drops.powerPointsChance) {
-      out.push({ type: "powerPoints", amount: randInt(drops.powerPointsRange[0], drops.powerPointsRange[1]) });
+      const pp = randInt(drops.powerPointsRange[0], drops.powerPointsRange[1]);
+      out.push({ type: "powerPoints", amount: scaleChestRollAmount("powerPoints", pp) });
     } else {
-      out.push({ type: "coins", amount: randInt(drops.coinsRange[0], drops.coinsRange[1]) });
+      const coins = randInt(drops.coinsRange[0], drops.coinsRange[1]);
+      out.push({ type: "coins", amount: scaleChestRollAmount("coins", coins) });
     }
   }
 
-  if (drops.bonusCoins)        out.push({ type: "coins",        amount: drops.bonusCoins });
-  if (drops.bonusGems)         out.push({ type: "gems",         amount: drops.bonusGems });
-  if (drops.bonusPowerPoints)  out.push({ type: "powerPoints",  amount: drops.bonusPowerPoints });
+  if (drops.bonusCoins) {
+    out.push({ type: "coins", amount: scaleChestRollAmount("coins", drops.bonusCoins) });
+  }
+  if (drops.bonusGems) {
+    out.push({ type: "gems", amount: scaleChestRollAmount("gems", drops.bonusGems) });
+  }
+  if (drops.bonusPowerPoints) {
+    out.push({ type: "powerPoints", amount: scaleChestRollAmount("powerPoints", drops.bonusPowerPoints) });
+  }
 
   return out;
 }

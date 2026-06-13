@@ -30,3 +30,23 @@ export function canvasCoverCssScale(canvas: HTMLCanvasElement): number {
   const rect = canvas.getBoundingClientRect();
   return Math.max(rect.width / canvas.width, rect.height / canvas.height);
 }
+
+/** Bitmap coords (0…width/height) → client CSS position (inverse of `clientToCanvasBitmapPx`). */
+export function bitmapPxToClient(
+  canvas: HTMLCanvasElement,
+  bx: number,
+  by: number,
+): { x: number; y: number } {
+  const rect = canvas.getBoundingClientRect();
+  const cw = canvas.width;
+  const ch = canvas.height;
+  const s = Math.max(rect.width / cw, rect.height / ch);
+  const dispW = cw * s;
+  const dispH = ch * s;
+  const offX = (rect.width - dispW) / 2;
+  const offY = (rect.height - dispH) / 2;
+  return {
+    x: rect.left + offX + bx * s,
+    y: rect.top + offY + by * s,
+  };
+}

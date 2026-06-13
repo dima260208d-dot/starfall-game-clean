@@ -1,20 +1,23 @@
 import { useEffect, useState } from "react";
 import type { BattleSnapshot } from "../ai/AstralAssistant";
-import { generateBattleTip } from "../ai/AstralAssistant";
+import { astralBattleTip } from "../ai/astralBrain";
+import { isLlmReady } from "../ai/astralLlm";
 import { getAstralSettings, isStarGuardianActive } from "../utils/subscription";
+import { useI18n } from "../i18n";
 
 interface Props {
-  /** A function that returns the live snapshot (or null while not playing). */
   getSnapshot: () => BattleSnapshot | null;
 }
 
 interface Tip { text: string; appearedAt: number }
 
 const TIP_HOLD_MS = 12000;
-const POLL_MS = 900;
-const COOLDOWN_BETWEEN_TIPS_MS = 6500;
+const POLL_MS = 1200;
+const COOLDOWN_RULE_MS = 6500;
+const COOLDOWN_LLM_MS = 9000;
 
 export default function AstralBattleTip({ getSnapshot }: Props) {
+  const { t } = useI18n();
   const [tip, setTip] = useState<Tip | null>(null);
   const [enabled, setEnabled] = useState(isStarGuardianActive() && getAstralSettings().battleTipsEnabled);
 
@@ -29,26 +32,31 @@ export default function AstralBattleTip({ getSnapshot }: Props) {
     if (!enabled) return;
     let lastEmitted = 0;
     let lastText = "";
+    let busy = false;
     const id = setInterval(() => {
+      if (busy) return;
       const now = performance.now();
-      if (now - lastEmitted < COOLDOWN_BETWEEN_TIPS_MS) return;
+      const llm = isLlmReady();
+      const gap = llm ? COOLDOWN_LLM_MS : COOLDOWN_RULE_MS;
+      if (now - lastEmitted < gap) return;
       const snap = getSnapshot();
       if (!snap) return;
-      const t = generateBattleTip(snap);
-      if (!t) return;
-      if (t === lastText) return;
-      lastEmitted = now;
-      lastText = t;
-      setTip({ text: t, appearedAt: Date.now() });
+      busy = true;
+      void astralBattleTip(snap).then(t => {
+        busy = false;
+        if (!t || t === lastText) return;
+        lastEmitted = now;
+        lastText = t;
+        setTip({ text: t, appearedAt: Date.now() });
+      });
     }, POLL_MS);
     return () => clearInterval(id);
   }, [enabled, getSnapshot]);
 
-  // Auto-dismiss after TIP_HOLD_MS
   useEffect(() => {
     if (!tip) return;
     const id = setTimeout(() => setTip(null), TIP_HOLD_MS);
-    return () => clearTimeout(id);
+    return () => clearInterval(id);
   }, [tip]);
 
   if (!enabled || !tip) return null;
@@ -67,7 +75,6 @@ export default function AstralBattleTip({ getSnapshot }: Props) {
         color: "white",
         padding: "8px 12px 8px 8px",
         display: "flex", alignItems: "center", gap: 10,
-        animation: "astralTipIn 240ms ease-out",
         fontFamily: "'Segoe UI', Arial, sans-serif",
         pointerEvents: "none",
       }}
@@ -79,15 +86,9 @@ export default function AstralBattleTip({ getSnapshot }: Props) {
         alignItems: "center", justifyContent: "center", fontSize: 20,
       }}>✨</div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 10, fontWeight: 800, color: "#FFD740", letterSpacing: 1 }}>АСТРАЛ</div>
+        <div style={{ fontSize: 10, fontWeight: 800, color: "#FFD740", letterSpacing: 1 }}>{t("astral.name")}</div>
         <div style={{ fontSize: 12.5, lineHeight: 1.35 }}>{tip.text}</div>
       </div>
-      <style>{`
-        @keyframes astralTipIn {
-          0%   { opacity: 0; transform: translateY(-8px) scale(0.96); }
-          100% { opacity: 1; transform: translateY(0)   scale(1); }
-        }
-      `}</style>
     </div>
   );
 }

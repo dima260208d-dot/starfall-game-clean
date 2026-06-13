@@ -1,42 +1,66 @@
 import { useEffect, useState } from "react";
 import {
   isStarGuardianActive, getStarGuardianDaysRemaining,
-  isMainDailyAvailable, claimMainDaily,
+  isMainDailyAvailable, claimMainDaily, getMsUntilMainDaily,
   isSecondaryDailyAvailable, getDailySecondaryOptions, claimSecondaryDaily,
-  isSpecialDailyAvailable, claimSpecialDaily,
-  consumePowerUpToken, getStarGuardian,
+  isSpecialDailyAvailable, claimSpecialDaily, getMsUntilSpecialDaily,
+  consumePowerUpToken, getStarGuardian, ensureDevPowerUpToken,
   MAIN_DAILY_COINS, MAIN_DAILY_GEMS, MAIN_DAILY_POWER,
   SPECIAL_REWARD_INTERVAL_DAYS,
   type SecondaryRewardOption,
 } from "../utils/subscription";
 import { getCurrentProfile } from "../utils/localStorageAPI";
-import { CoinBadge, GemBadge, PowerBadge, CoinIcon, GemIcon, PowerIcon } from "../components/GameIcons";
+import { formatGameDayCountdown, getMsUntilGameDayReset } from "../utils/gameDay";
+import { CoinIcon, GemIcon, PowerIcon } from "../components/GameIcons";
 import { BRAWLERS } from "../entities/BrawlerData";
+import { PageBody } from "../components/PageChrome";
+import { RARITY_AVATAR_BG } from "./CharacterSelect";
+import { useI18n, brawlerName } from "../i18n";
+import StarGuardianIcon from "../components/StarGuardianIcon";
+import RewardDropModal, { type RewardInfo } from "../components/RewardDropModal";
 
 interface Props { onBack: () => void }
 
 export default function StarGuardianRewardsPage({ onBack }: Props) {
+  const { t } = useI18n();
   const [, setRefreshTick] = useState(0);
   const refresh = () => setRefreshTick(x => x + 1);
 
   // Auto-refresh every 1 sec so timers/badges update.
   useEffect(() => {
-    const t = setInterval(refresh, 1000);
-    return () => clearInterval(t);
+    const id = setInterval(refresh, 1000);
+    return () => clearInterval(id);
   }, []);
 
-  // ── Auto-claim main daily on first visit ──
-  const [mainFlash, setMainFlash] = useState<string | null>(null);
   useEffect(() => {
-    if (isMainDailyAvailable()) {
-      const r = claimMainDaily();
-      if (r.claimed) {
-        setMainFlash(`+${r.coins} монет, +${r.gems} кристаллов, +${r.powerPoints} поинтов`);
-        setTimeout(() => setMainFlash(null), 5000);
-      }
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    ensureDevPowerUpToken();
+    refresh();
   }, []);
+
+  const [activeDrop, setActiveDrop] = useState<{ q: RewardInfo[]; i: number } | null>(null);
+
+  const startDrop = (q: RewardInfo[]) => setActiveDrop({ q, i: 0 });
+
+  const secondaryToReward = (opt: SecondaryRewardOption): RewardInfo => {
+    if (opt.type === "coins") {
+      return { type: "coins", amount: opt.amount, label: t("daily.reward.coins", { count: opt.amount }) };
+    }
+    if (opt.type === "gems") {
+      return { type: "gems", amount: opt.amount, label: t("daily.reward.gems", { count: opt.amount }) };
+    }
+    return { type: "powerPoints", amount: opt.amount, label: t("daily.reward.power", { count: opt.amount }) };
+  };
+
+  const handleMainDailyClaim = () => {
+    const r = claimMainDaily();
+    if (!r.claimed) return;
+    refresh();
+    startDrop([
+      { type: "coins", amount: r.coins, label: t("daily.reward.coins", { count: r.coins }) },
+      { type: "gems", amount: r.gems, label: t("daily.reward.gems", { count: r.gems }) },
+      { type: "powerPoints", amount: r.powerPoints, label: t("daily.reward.power", { count: r.powerPoints }) },
+    ]);
+  };
 
   const profile = getCurrentProfile();
   const sg = getStarGuardian();
@@ -48,13 +72,14 @@ export default function StarGuardianRewardsPage({ onBack }: Props) {
   const specialAvailable = isSpecialDailyAvailable();
   const tokens = sg.powerUpTokens;
 
-  const [chosen, setChosen] = useState<SecondaryRewardOption | null>(null);
+  const rewardUnit = (type: SecondaryRewardOption["type"]) =>
+    type === "coins" ? t("chest.roll.coins") : type === "gems" ? t("chest.roll.gems") : t("chest.roll.power");
+
   const handleSecondary = (i: 0 | 1 | 2) => {
     const r = claimSecondaryDaily(i);
     if (r.claimed && r.option) {
-      setChosen(r.option);
-      setTimeout(() => setChosen(null), 5000);
       refresh();
+      startDrop([secondaryToReward(r.option)]);
     }
   };
 
@@ -71,44 +96,56 @@ export default function StarGuardianRewardsPage({ onBack }: Props) {
       setTokenMsg(`❌ ${r.error}`);
     } else {
       const b = BRAWLERS.find(x => x.id === brawlerId);
-      setTokenMsg(`✅ ${b?.name ?? brawlerId} → уровень ${r.newLevel}`);
+      setTokenMsg(t("sg.rewards.tokenUpgraded", { name: b?.name ?? brawlerId, level: r.newLevel ?? 0 }));
       setPickingFor(false);
     }
     setTimeout(() => setTokenMsg(""), 4000);
     refresh();
   };
 
+  const artBase = (import.meta as any).env?.BASE_URL ?? "/";
+  const dropOpen = activeDrop && activeDrop.i < activeDrop.q.length;
+
   return (
-    <div style={{
-      minHeight: "100%",
-      background: "linear-gradient(160deg, #1A0033 0%, #2D0050 50%, #4A148C 100%)",
-      display: "flex", flexDirection: "column",
-      fontFamily: "'Segoe UI', Arial, sans-serif",
-      color: "white",
-    }}>
+    <>
+    <div
+      className="ui-page-bg"
+      style={{
+        height: "100%",
+        backgroundImage: `url("${(import.meta as any).env?.BASE_URL ?? "/"}constellation-bg.png")`,
+        backgroundSize: "cover",
+        backgroundPosition: "center",
+        display: "flex", flexDirection: "column",
+        overflow: "hidden",
+        fontFamily: "var(--app-font-sans)",
+        color: "var(--t-1)",
+      }}
+    >
       <div style={{
-        display: "flex", alignItems: "center",
-        padding: "16px 24px",
-        borderBottom: "1px solid rgba(255,255,255,0.08)",
+        flexShrink: 0,
+        display: "flex", alignItems: "center", gap: 12,
+        padding: "14px 22px",
+        borderBottom: "1px solid var(--bd-1)",
+        background: "linear-gradient(180deg, rgba(0,0,0,0.42) 0%, rgba(0,0,0,0.18) 100%)",
+        backdropFilter: "blur(10px) saturate(1.15)",
+        WebkitBackdropFilter: "blur(10px) saturate(1.15)",
       }}>
-        <button onClick={onBack} style={{
-          background: "rgba(255,255,255,0.07)",
-          border: "1px solid rgba(255,255,255,0.15)",
-          borderRadius: 10, padding: "7px 16px", color: "rgba(255,255,255,0.7)",
-          cursor: "pointer", fontSize: 13, fontWeight: 600,
-        }}>← Назад</button>
-        <h2 style={{
-          flex: 1, textAlign: "center", margin: 0, fontSize: 22, fontWeight: 800,
-          color: "#FFD740", letterSpacing: 1,
-        }}>⭐ STAR GUARDIAN</h2>
-        <div style={{ display: "flex", gap: 10, fontSize: 14 }}>
-          <CoinBadge value={profile?.coins ?? 0} />
-          <GemBadge value={profile?.gems ?? 0} />
-          <PowerBadge value={profile?.powerPoints ?? 0} />
+        <button onClick={onBack} className="ui-back-btn">{t("drawer.back")}</button>
+        <h2 className="ui-page-title" style={{
+          flex: 1, fontSize: 22, margin: 0, letterSpacing: "0.12em",
+          display: "flex", alignItems: "center", gap: 10,
+        }}>
+          <StarGuardianIcon size={36} />
+          <span>STAR GUARDIAN</span>
+        </h2>
+        <div className="ui-resource-bar">
+          <span className="ui-resource-pill ui-resource-pill--gold"><CoinIcon size={20} /> {(profile?.coins ?? 0).toLocaleString("ru-RU")}</span>
+          <span className="ui-resource-pill ui-resource-pill--cyan"><GemIcon size={20} /> {(profile?.gems ?? 0).toLocaleString("ru-RU")}</span>
+          <span className="ui-resource-pill ui-resource-pill--violet"><PowerIcon size={20} /> {(profile?.powerPoints ?? 0).toLocaleString("ru-RU")}</span>
         </div>
       </div>
 
-      <div style={{ padding: "24px", maxWidth: 880, margin: "0 auto", width: "100%" }}>
+      <PageBody style={{ padding: "24px", maxWidth: 880, margin: "0 auto", width: "100%" }}>
         {!active ? (
           <div style={{
             background: "rgba(255,87,34,0.18)",
@@ -116,10 +153,10 @@ export default function StarGuardianRewardsPage({ onBack }: Props) {
             borderRadius: 14, padding: 20, textAlign: "center",
           }}>
             <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 6, color: "#FF8A65" }}>
-              Подписка не активна
+              {t("sg.rewards.inactiveTitle")}
             </div>
             <div style={{ fontSize: 13, color: "rgba(255,255,255,0.85)" }}>
-              Открой магазин и оформи Star Guardian, чтобы получать ежедневные награды и пользоваться всеми функциями Астрала.
+              {t("sg.rewards.inactiveDesc")}
             </div>
           </div>
         ) : (
@@ -131,33 +168,39 @@ export default function StarGuardianRewardsPage({ onBack }: Props) {
               border: "1.5px solid rgba(255,215,64,0.5)",
               borderRadius: 12, padding: "10px 16px",
             }}>
-              <span style={{ fontSize: 13, color: "rgba(255,255,255,0.7)" }}>До конца подписки:</span>
-              <span style={{ fontSize: 18, fontWeight: 900, color: "#FFD740" }}>{daysLeft} дней</span>
+              <span style={{ fontSize: 13, color: "rgba(255,255,255,0.7)" }}>{t("sg.rewards.daysLeftLabel")}</span>
+              <span style={{ fontSize: 18, fontWeight: 900, color: "#FFD740" }}>{t("sg.rewards.daysLeft", { days: daysLeft })}</span>
             </div>
 
             {/* MAIN DAILY */}
-            <Card title="🎁 Главная награда дня" subtitle="Зачисляется автоматически каждый день">
+            <Card
+              title={t("sg.rewards.mainDailyTitle")}
+              subtitle={isMainDailyAvailable()
+                ? t("sg.rewards.mainCooldownReady")
+                : t("sg.rewards.mainCooldown", { time: formatGameDayCountdown(getMsUntilMainDaily()) })}
+            >
               <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
                 <RewardChip icon={<CoinIcon size={28} />} amount={MAIN_DAILY_COINS} />
                 <RewardChip icon={<GemIcon size={28} />} amount={MAIN_DAILY_GEMS} />
                 <RewardChip icon={<PowerIcon size={28} />} amount={MAIN_DAILY_POWER} />
                 <div style={{ flex: 1 }} />
                 {isMainDailyAvailable() ? (
-                  <button onClick={() => { claimMainDaily(); refresh(); }} style={primaryBtn}>
-                    Забрать
+                  <button type="button" className="no-ui-shear" onClick={handleMainDailyClaim} style={primaryBtn}>
+                    {t("common.claim")}
                   </button>
                 ) : (
-                  <span style={{ color: "#69F0AE", fontWeight: 700, fontSize: 13 }}>✓ Получено сегодня</span>
+                  <span style={{ color: "#69F0AE", fontWeight: 700, fontSize: 13 }}>
+                    {t("sg.rewards.claimedCooldown", { time: formatGameDayCountdown(getMsUntilMainDaily()) })}
+                  </span>
                 )}
               </div>
-              {mainFlash && <div style={{ marginTop: 10, color: "#69F0AE", fontWeight: 700 }}>+{mainFlash}</div>}
             </Card>
 
             {/* SECONDARY DAILY */}
-            <Card title="🎯 Дополнительная награда дня" subtitle="Выбери один из трёх вариантов">
+            <Card title={t("sg.rewards.secondaryTitle")} subtitle={t("sg.rewards.resetAt", { time: formatGameDayCountdown(getMsUntilGameDayReset()) })}>
               {!secondaryAvailable ? (
                 <div style={{ color: "#69F0AE", fontWeight: 700, fontSize: 14 }}>
-                  ✓ Уже выбрана сегодня. Возвращайся завтра!
+                  {t("sg.rewards.secondaryPickedToday")}
                 </div>
               ) : (
                 <div style={{
@@ -166,11 +209,11 @@ export default function StarGuardianRewardsPage({ onBack }: Props) {
                   gap: 12,
                 }}>
                   {secondaryOptions.map((opt, i) => (
-                    <button key={i} onClick={() => handleSecondary(i as 0 | 1 | 2)} style={{
-                      background: "linear-gradient(160deg, rgba(255,255,255,0.08), rgba(74,20,140,0.4))",
-                      border: "1.5px solid rgba(206,147,216,0.6)",
+                    <button key={i} type="button" className="no-ui-shear" onClick={() => handleSecondary(i as 0 | 1 | 2)} style={{
+                      background: "linear-gradient(160deg, rgba(255,255,255,0.10), rgba(74,20,140,0.55))",
+                      border: "1.5px solid rgba(206,147,216,0.65)",
                       borderRadius: 14, padding: 16,
-                      color: "white", cursor: "pointer",
+                      color: "#ffffff", cursor: "pointer",
                       display: "flex", flexDirection: "column", alignItems: "center", gap: 8,
                       transition: "transform 150ms",
                     }}
@@ -182,21 +225,16 @@ export default function StarGuardianRewardsPage({ onBack }: Props) {
                       {opt.type === "powerPoints" && <PowerIcon size={48} />}
                       <div style={{ fontSize: 18, fontWeight: 900, color: "#FFD740" }}>+{opt.amount}</div>
                       <div style={{ fontSize: 11, color: "rgba(255,255,255,0.6)" }}>
-                        {opt.type === "coins" ? "монет" : opt.type === "gems" ? "кристаллов" : "поинтов"}
+                        {rewardUnit(opt.type)}
                       </div>
                     </button>
                   ))}
                 </div>
               )}
-              {chosen && (
-                <div style={{ marginTop: 10, color: "#69F0AE", fontWeight: 700 }}>
-                  ✓ Получено: +{chosen.amount} {chosen.type === "coins" ? "монет" : chosen.type === "gems" ? "кристаллов" : "поинтов"}
-                </div>
-              )}
             </Card>
 
             {/* SPECIAL — every 3 days */}
-            <Card title="⚡ Сила прокачки" subtitle={`Раз в ${SPECIAL_REWARD_INTERVAL_DAYS} дня — токен моментальной прокачки бойца`}>
+            <Card title={t("sg.rewards.specialTitle")} subtitle={t("sg.rewards.specialSubtitle", { days: SPECIAL_REWARD_INTERVAL_DAYS })}>
               <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
                 <div style={{
                   width: 56, height: 56, borderRadius: 14,
@@ -206,26 +244,32 @@ export default function StarGuardianRewardsPage({ onBack }: Props) {
                   fontSize: 28, boxShadow: "0 0 18px rgba(255,215,64,0.5)",
                 }}>⚡</div>
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 800, fontSize: 14 }}>Токены прокачки: {tokens}</div>
+                  <div style={{ fontWeight: 800, fontSize: 14 }}>{t("sg.rewards.tokensCount", { count: tokens })}</div>
                   <div style={{ fontSize: 12, color: "rgba(255,255,255,0.6)" }}>
-                    1 токен = +1 уровень любому открытому бойцу (без расхода монет/поинтов).
+                    {t("sg.rewards.tokenDesc")}
                   </div>
                 </div>
                 {specialAvailable ? (
-                  <button onClick={handleSpecial} style={primaryBtn}>Забрать токен</button>
+                  <button type="button" className="no-ui-shear" onClick={handleSpecial} style={primaryBtn}>{t("sg.rewards.claimToken")}</button>
                 ) : (
-                  <span style={{ color: "rgba(255,255,255,0.5)", fontSize: 12 }}>Следующий через ~3 дня</span>
+                  <span style={{ color: "rgba(255,255,255,0.5)", fontSize: 12 }}>
+                    {t("sg.rewards.nextSpecial", { time: formatGameDayCountdown(getMsUntilSpecialDaily()) })}
+                  </span>
                 )}
                 {tokens > 0 && (
                   <button
+                    type="button"
+                    className="no-ui-shear"
                     onClick={() => setPickingFor(v => !v)}
                     style={{
-                      background: "rgba(206,147,216,0.2)",
-                      border: "1.5px solid #CE93D8",
+                      background: "linear-gradient(135deg, rgba(123,47,190,0.65), rgba(179,136,255,0.45))",
+                      border: "1.5px solid rgba(206,147,216,0.75)",
                       borderRadius: 10, padding: "8px 14px",
-                      color: "#CE93D8", cursor: "pointer",
+                      color: "#ffffff", cursor: "pointer",
                       fontWeight: 700, fontSize: 12,
-                    }}>{pickingFor ? "Отмена" : "Применить"}</button>
+                      textShadow: "0 1px 2px rgba(0,0,0,0.65)",
+                      boxShadow: "0 4px 14px rgba(123,47,190,0.35)",
+                    }}>{pickingFor ? t("common.cancel") : t("sg.rewards.apply")}</button>
                 )}
               </div>
               {tokenMsg && <div style={{ marginTop: 10, color: tokenMsg.startsWith("✅") ? "#69F0AE" : "#FF8A65", fontWeight: 700 }}>{tokenMsg}</div>}
@@ -233,24 +277,79 @@ export default function StarGuardianRewardsPage({ onBack }: Props) {
                 <div style={{
                   marginTop: 14,
                   display: "grid",
-                  gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))",
-                  gap: 8,
+                  gridTemplateColumns: "repeat(auto-fill, minmax(96px, 1fr))",
+                  gap: 10,
                 }}>
                   {profile.unlockedBrawlers.map(id => {
                     const b = BRAWLERS.find(x => x.id === id);
                     if (!b) return null;
                     const lvl = profile.brawlerLevels[id] || 1;
                     const maxed = lvl >= 11;
+                    const avatarBg = RARITY_AVATAR_BG[b.rarity]
+                      ?? `linear-gradient(180deg, ${b.color} 0%, rgba(0,0,0,0.6) 100%)`;
+                    const displayName = brawlerName(b.id, b.name);
                     return (
-                      <button key={id} disabled={maxed} onClick={() => handleSpendToken(id)} style={{
-                        background: maxed ? "rgba(0,0,0,0.3)" : `linear-gradient(160deg, ${b.color}33, rgba(0,0,0,0.4))`,
-                        border: `1.5px solid ${b.color}88`,
-                        borderRadius: 10, padding: "8px 6px",
-                        color: maxed ? "rgba(255,255,255,0.4)" : "white",
-                        cursor: maxed ? "not-allowed" : "pointer",
-                        fontWeight: 700, fontSize: 12,
-                      }}>
-                        {b.name}<br /><span style={{ color: maxed ? "rgba(255,255,255,0.4)" : "#FFD740", fontSize: 10 }}>ур. {lvl}{maxed ? " (макс)" : ""}</span>
+                      <button
+                        key={id}
+                        type="button"
+                        className="no-ui-shear"
+                        disabled={maxed}
+                        onClick={() => handleSpendToken(id)}
+                        style={{
+                          background: "transparent",
+                          border: "none",
+                          padding: 0,
+                          cursor: maxed ? "not-allowed" : "pointer",
+                          display: "flex",
+                          flexDirection: "column",
+                          alignItems: "center",
+                          gap: 6,
+                          opacity: maxed ? 0.45 : 1,
+                        }}
+                      >
+                        <div style={{
+                          width: "100%",
+                          aspectRatio: "1 / 1.12",
+                          borderRadius: 14,
+                          overflow: "hidden",
+                          border: `2px solid ${maxed ? "rgba(255,255,255,0.15)" : `${b.color}aa`}`,
+                          background: avatarBg,
+                          boxShadow: maxed ? "none" : `0 4px 14px ${b.color}44`,
+                          position: "relative",
+                        }}>
+                          <img
+                            src={`${artBase}brawlers/avatars/${b.id}.png`}
+                            alt={displayName}
+                            style={{
+                              position: "absolute",
+                              inset: 0,
+                              width: "100%",
+                              height: "100%",
+                              objectFit: "cover",
+                              objectPosition: "center top",
+                              display: "block",
+                              filter: maxed ? "grayscale(0.85)" : "none",
+                            }}
+                            onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+                          />
+                        </div>
+                        <span style={{
+                          color: maxed ? "rgba(255,255,255,0.4)" : "#ffffff",
+                          fontSize: 11,
+                          fontWeight: 800,
+                          lineHeight: 1.15,
+                          textAlign: "center",
+                          textShadow: "0 1px 3px rgba(0,0,0,0.85)",
+                        }}>
+                          {displayName}
+                        </span>
+                        <span style={{
+                          color: maxed ? "rgba(255,255,255,0.35)" : "rgba(255,255,255,0.65)",
+                          fontSize: 10,
+                          fontWeight: 700,
+                        }}>
+                          {t("sg.rewards.levelLine", { level: lvl, suffix: maxed ? t("sg.rewards.maxSuffix") : "" })}
+                        </span>
                       </button>
                     );
                   })}
@@ -263,12 +362,26 @@ export default function StarGuardianRewardsPage({ onBack }: Props) {
               background: "rgba(255,255,255,0.04)", borderRadius: 12,
               color: "rgba(255,255,255,0.6)",
             }}>
-              💫 Star Guardian также активирует все функции Астрала: автобой во всех режимах, ситуативные подсказки в бою, ежедневные напоминания и выполнение команд через чат («открой ящик», «прокачай Мию», «поставь Феникса»).
+              {t("sg.rewards.astralNote")}
             </div>
           </>
         )}
-      </div>
+      </PageBody>
     </div>
+    {dropOpen ? (
+      <RewardDropModal
+        reward={activeDrop.q[activeDrop.i]}
+        onDone={() => {
+          setActiveDrop((d) => {
+            if (!d) return null;
+            const next = d.i + 1;
+            if (next >= d.q.length) return null;
+            return { q: d.q, i: next };
+          });
+        }}
+      />
+    ) : null}
+    </>
   );
 }
 
@@ -300,8 +413,16 @@ function RewardChip({ icon, amount }: { icon: React.ReactNode; amount: number })
 }
 
 const primaryBtn: React.CSSProperties = {
-  background: "linear-gradient(135deg, #FFD740, #FFA000)",
-  border: "none", borderRadius: 10, padding: "10px 18px",
-  fontWeight: 800, color: "#3E2723", cursor: "pointer",
-  fontSize: 13, boxShadow: "0 4px 12px rgba(255,160,0,0.4)",
+  background: "linear-gradient(135deg, #FFE57F 0%, #FFD740 48%, #FF8A00 100%)",
+  border: "1px solid rgba(255,255,255,0.48)",
+  borderRadius: 10,
+  padding: "10px 20px",
+  fontWeight: 900,
+  color: "#ffffff",
+  cursor: "pointer",
+  fontSize: 13,
+  letterSpacing: "0.08em",
+  boxShadow: "0 6px 20px rgba(255,160,0,0.55), inset 0 1px 0 rgba(255,255,255,0.45)",
+  textShadow: "0 1px 3px rgba(0,0,0,0.85), 0 0 1px rgba(0,0,0,0.9)",
+  whiteSpace: "nowrap",
 };

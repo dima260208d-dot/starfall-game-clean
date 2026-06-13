@@ -1,4 +1,4 @@
-import { getCurrentProfile, updateProfile, addCoins, addGems } from "./localStorageAPI";
+import { getCurrentProfile, updateProfile, addCoins, addGems, recordPurchase } from "./localStorageAPI";
 
 // ──────────────────────────────────────────────────────────────────────────
 // MONETISATION CATALOG
@@ -17,12 +17,12 @@ export interface GemPack {
 
 /** ₽ → 💎 packs (non-first-purchase amounts; first purchase doubles base). */
 export const GEM_PACKS: GemPack[] = [
-  { id: "gp_79",   priceRub: 79,   gems: 100,  bonusGems: 0 },
-  { id: "gp_199",  priceRub: 199,  gems: 300,  bonusGems: 30,   highlight: "popular" },
-  { id: "gp_399",  priceRub: 399,  gems: 800,  bonusGems: 100 },
-  { id: "gp_799",  priceRub: 799,  gems: 1800, bonusGems: 300 },
-  { id: "gp_1499", priceRub: 1499, gems: 4000, bonusGems: 800,  highlight: "best" },
-  { id: "gp_2999", priceRub: 2999, gems: 9000, bonusGems: 2000 },
+  { id: "gp_79",   priceRub: 119,  gems: 100,  bonusGems: 0 },
+  { id: "gp_199",  priceRub: 299,  gems: 300,  bonusGems: 30,   highlight: "popular" },
+  { id: "gp_399",  priceRub: 599,  gems: 800,  bonusGems: 100 },
+  { id: "gp_799",  priceRub: 1199, gems: 1800, bonusGems: 300 },
+  { id: "gp_1499", priceRub: 2249, gems: 4000, bonusGems: 800,  highlight: "best" },
+  { id: "gp_2999", priceRub: 4499, gems: 9000, bonusGems: 2000 },
 ];
 
 export interface GemToCoinPack {
@@ -60,20 +60,20 @@ export interface RubToPowerPack { id: string; priceRub: number; powerPoints: num
 
 /** ₽ → ⚡ promo packs (occasional / new players). */
 export const RUB_TO_POWER_PACKS: RubToPowerPack[] = [
-  { id: "rp_99",   priceRub: 99,   powerPoints: 150  },
-  { id: "rp_299",  priceRub: 299,  powerPoints: 600  },
-  { id: "rp_599",  priceRub: 599,  powerPoints: 1500 },
-  { id: "rp_1199", priceRub: 1199, powerPoints: 4000 },
+  { id: "rp_99",   priceRub: 149,  powerPoints: 150  },
+  { id: "rp_299",  priceRub: 449,  powerPoints: 600  },
+  { id: "rp_599",  priceRub: 899,  powerPoints: 1500 },
+  { id: "rp_1199", priceRub: 1799, powerPoints: 4000 },
 ];
 
 export interface RubToCoinPack { id: string; priceRub: number; coins: number }
 
 /** ₽ → 🪙 promo packs. */
 export const RUB_TO_COIN_PACKS: RubToCoinPack[] = [
-  { id: "rc_149",  priceRub: 149,  coins: 2500  },
-  { id: "rc_449",  priceRub: 449,  coins: 9000  },
-  { id: "rc_999",  priceRub: 999,  coins: 25000 },
-  { id: "rc_1990", priceRub: 1990, coins: 60000 },
+  { id: "rc_149",  priceRub: 224,  coins: 2500  },
+  { id: "rc_449",  priceRub: 674,  coins: 9000  },
+  { id: "rc_999",  priceRub: 1499, coins: 25000 },
+  { id: "rc_1990", priceRub: 2985, coins: 60000 },
 ];
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -120,8 +120,14 @@ export function buyGemPack(packId: string): { success: boolean; error?: string; 
   const pack = GEM_PACKS.find(p => p.id === packId);
   if (!pack) return { success: false, error: "Пакет не найден" };
   const { totalGems, doubled } = previewGemPack(pack);
-  addGems(totalGems);
+  addGems(totalGems, { skipTreasury: true });
   if (doubled) setFlags({ firstGemPackUsed: true });
+  recordPurchase({
+    category: "donate_gems",
+    title: `Gem pack ${pack.gems}`,
+    priceRub: pack.priceRub,
+    rewardSummary: `${totalGems} gems${doubled ? " (×2)" : ""}`,
+  });
   return { success: true, gemsAdded: totalGems, doubled };
 }
 
@@ -134,6 +140,12 @@ export function buyCoinsForGems(packId: string): { success: boolean; error?: str
   if (profile.gems < pack.gems) return { success: false, error: `Нужно ${pack.gems} кристаллов` };
   addGems(-pack.gems);
   addCoins(pack.coins);
+  recordPurchase({
+    category: "gem_exchange",
+    title: "Gems → Coins",
+    gemsSpent: pack.gems,
+    rewardSummary: `${pack.coins} coins`,
+  });
   return { success: true, coinsAdded: pack.coins };
 }
 
@@ -146,6 +158,12 @@ export function buyPowerForGems(packId: string): { success: boolean; error?: str
   if (profile.gems < pack.gems) return { success: false, error: `Нужно ${pack.gems} кристаллов` };
   addGems(-pack.gems);
   updateProfile({ powerPoints: profile.powerPoints + pack.powerPoints });
+  recordPurchase({
+    category: "gem_exchange",
+    title: "Gems → Power",
+    gemsSpent: pack.gems,
+    rewardSummary: `${pack.powerPoints} PP`,
+  });
   return { success: true, powerAdded: pack.powerPoints };
 }
 
@@ -155,7 +173,13 @@ export function buyPowerForRub(packId: string): { success: boolean; error?: stri
   if (!pack) return { success: false, error: "Пакет не найден" };
   const profile = getCurrentProfile();
   if (!profile) return { success: false, error: "Нет профиля" };
-  updateProfile({ powerPoints: profile.powerPoints + pack.powerPoints });
+  updateProfile({ powerPoints: profile.powerPoints + pack.powerPoints }, { skipTreasury: true });
+  recordPurchase({
+    category: "donate_power",
+    title: "Power pack",
+    priceRub: pack.priceRub,
+    rewardSummary: `${pack.powerPoints} PP`,
+  });
   return { success: true, powerAdded: pack.powerPoints };
 }
 
@@ -163,6 +187,12 @@ export function buyPowerForRub(packId: string): { success: boolean; error?: stri
 export function buyCoinsForRub(packId: string): { success: boolean; error?: string; coinsAdded?: number } {
   const pack = RUB_TO_COIN_PACKS.find(p => p.id === packId);
   if (!pack) return { success: false, error: "Пакет не найден" };
-  addCoins(pack.coins);
+  addCoins(pack.coins, { skipTreasury: true });
+  recordPurchase({
+    category: "donate_coins",
+    title: "Coin pack",
+    priceRub: pack.priceRub,
+    rewardSummary: `${pack.coins} coins`,
+  });
   return { success: true, coinsAdded: pack.coins };
 }

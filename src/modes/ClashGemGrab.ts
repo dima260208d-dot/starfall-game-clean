@@ -1,23 +1,33 @@
+import { translate as tr } from "../i18n";
 import { Brawler } from "../entities/Brawler";
 import { applyZafkielStarEffectsOnHit } from "../utils/zafkielStars";
+import { applyVerdelettaOnHit } from "../utils/verdelettaStars";
+import { applyLuminaOnHit } from "../utils/luminaStars";
+import { applyMirabelOnHit } from "../utils/mirabelMechanics";
+import { handleVerdelettaShadowProjectileHit } from "../utils/verdelettaShadows";
 import { Bot } from "../entities/Bot";
-import { BRAWLERS, getBrawlerById, pickBotStats } from "../entities/BrawlerData";
-import { createCrystalsMap, createTileGridMap, GameMap, collidesWithWalls, renderMap, renderTileGrid } from "../game/MapRenderer";
-import { getPublishedMap, OV } from "../utils/mapEditorAPI";
-import { TileGrid, TILE_CELL_SIZE, GRID_SIZE, paintMountainBorderRing } from "../game/TileMap";
-import { Projectile, updateProjectiles, renderProjectiles } from "../entities/Projectile";
+import { BRAWLERS, getBrawlerById, isMeleeBrawler, pickBotStats } from "../entities/BrawlerData";
+import { createCrystalsMap, createTileGridMap, GameMap, collidesWithWalls } from "../game/MapRenderer";
+import { OV } from "../utils/mapEditorAPI";
+import { getActiveMap } from "../utils/mapSchedule";
+import { TileGrid, TILE_CELL_SIZE, GRID_SIZE, paintMountainBorderRing, BATTLE_MAP_RIM_CELLS } from "../game/TileMap";
+import { Projectile, updateProjectiles, renderProjectiles, projectileSuperChargeOpts } from "../entities/Projectile";
 import { Camera } from "../game/Camera";
 import { InputHandler } from "../game/InputHandler";
 import { updateDamageNumbers, renderDamageNumbers, clearDamageNumbers } from "../utils/damageNumbers";
 import { updateEffects, renderEffects, clearEffects } from "../utils/effects";
 import { angleTo, autoAimAngle, autoAimTarget, distance, randomInt } from "../utils/helpers";
-import { recordGameResult, getCurrentUsername, getCurrentProfile } from "../utils/localStorageAPI";
-import { getPetById } from "../entities/PetData";
+import { resolvePlayerAttackAngle, tickHeldPlayerAttack, wrapCallistaAttackAim, wrapCallistaSuperAim } from "../utils/battleAttackAim";
+import { getCurrentUsername, getCurrentProfile, applyProfilePetToBrawler } from "../utils/localStorageAPI";
+import { applyPartySharedBattleResult, createPartyAllyBot, getPartyAllyEntries } from "../utils/social/partyBattle";
 import { getGemCanvas } from "../utils/powerModelCache";
-import { resetMatchStats, getMatchStats } from "../utils/matchStats";
+import { resetMatchStats, getMatchStats, participantFromBrawler } from "../utils/matchStats";
 import { renderPlayerHUD } from "./sharedHUD";
 import { fillBattleCanvasBg, renderBattleScreenFX } from "../game/battleScreenFX";
+import { getBattleGroundTilt } from "../game/battleVisualScale";
 import { isDevBattleWorldFrozen } from "../game/battleDevPause";
+import { drawTallTilesYsortedWithBrawlers } from "../game/tileGridBrawlerDepthPass";
+import { botAIContext, pickIndividualLooseGem } from "../ai/aiBotObjectives";
 
 interface Gem {
   x: number;
@@ -51,22 +61,33 @@ export class ClashGemGrab {
   frame = 0;
   spriteLoaded: boolean;
   private resultRecorded = false;
+  private headless = false;
   private gemCenter = { x: 1750, y: 1750 };
   private blueBase  = { x: 600,  y: 1750 };
   private redBase   = { x: 2900, y: 1750 };
 
-  constructor(canvas: HTMLCanvasElement, playerBrawlerId: string, playerLevel: number, onAttack: () => void, onSuper: () => void, spriteLoaded: boolean) {
+  constructor(canvas: HTMLCanvasElement, playerBrawlerId: string, playerLevel: number, onAttack: () => void, onSuper: () => void, spriteLoaded: boolean, headless = false) {
+    this.headless = headless;
     this.map = createCrystalsMap();
     this.spriteLoaded = spriteLoaded;
     const playerStats = getBrawlerById(playerBrawlerId) || BRAWLERS[0];
     this.player = new Brawler(playerStats, playerLevel, 600, 1750, "blue", true);
-    this.player.setIdentity(getCurrentUsername() ?? "Игрок", false);
-    this.player.setEquippedPet(getPetById(getCurrentProfile()?.equippedPetId) ?? null);
+    this.player.setIdentity(getCurrentUsername() ?? tr("battle.player"), false);
+    applyProfilePetToBrawler(this.player);
     resetMatchStats();
 
     const allStats = pickBotStats(playerBrawlerId, 5);
-    this.allies.push(new Bot(allStats[0], randomInt(1, 4), 600, 1300, "blue"));
-    this.allies.push(new Bot(allStats[1], randomInt(1, 4), 600, 2200, "blue"));
+    const partyAllies = headless ? [] : getPartyAllyEntries();
+    const allySpawns = [{ x: 600, y: 1300 }, { x: 600, y: 2200 }];
+    for (let i = 0; i < 2; i++) {
+      const entry = partyAllies[i];
+      const pos = allySpawns[i];
+      if (entry) {
+        this.allies.push(createPartyAllyBot(entry, pos.x, pos.y, "blue"));
+      } else {
+        this.allies.push(new Bot(allStats[i], randomInt(1, 4), pos.x, pos.y, "blue"));
+      }
+    }
     this.enemies.push(new Bot(allStats[2], randomInt(1, 5), 2900, 1300, "red"));
     this.enemies.push(new Bot(allStats[3], randomInt(1, 5), 2900, 1750, "red"));
     this.enemies.push(new Bot(allStats[4], randomInt(1, 5), 2900, 2200, "red"));
@@ -75,15 +96,20 @@ export class ClashGemGrab {
     this.input = new InputHandler(canvas, onAttack, onSuper);
 
     // ── Load published map if one exists ──────────────────────────────────
-    const pubMap = getPublishedMap("gemgrab");
+    const pubMap = getActiveMap("gemgrab");
     if (pubMap && pubMap.cells && pubMap.cells.length === GRID_SIZE * GRID_SIZE) {
       const tileGrid: TileGrid = {
         cells: new Uint8Array(GRID_SIZE * GRID_SIZE),
         destroyed: new Uint8Array(GRID_SIZE * GRID_SIZE),
         width: GRID_SIZE, height: GRID_SIZE, cellSize: TILE_CELL_SIZE,
+        // Поворот стен/заборов/костей пробрасываем из опубликованной карты
+        // в боевую сетку — battle3DWorld применит rot*90° к моделям.
+        rotations: pubMap.rotations && pubMap.rotations.length === GRID_SIZE * GRID_SIZE
+          ? new Uint8Array(pubMap.rotations)
+          : undefined,
       };
       for (let i = 0; i < pubMap.cells.length; i++) tileGrid.cells[i] = pubMap.cells[i];
-      paintMountainBorderRing(tileGrid, 10);
+      paintMountainBorderRing(tileGrid, BATTLE_MAP_RIM_CELLS);
       this.map = createTileGridMap(tileGrid, pubMap.name);
       this.camera = new Camera(CAM_W, CAM_H, this.map.width, this.map.height);
       if (pubMap.overlays && pubMap.overlays.length === GRID_SIZE * GRID_SIZE) {
@@ -118,26 +144,39 @@ export class ClashGemGrab {
 
   handleAttack(): void {
     if (!this.player.canAttack()) return;
-    const mouseAngle = angleTo(this.player.x, this.player.y, this.input.state.mouseWorldX, this.input.state.mouseWorldY);
-    const angle = this.input.attackJoystick.active ? mouseAngle : autoAimAngle(this.player, this.enemies, mouseAngle);
-    this.player.angle = angle;
-    const isMelee = ["goro", "ronin", "taro"].includes(this.player.stats.id);
+    const cam = { x: this.camera.x, y: this.camera.y, w: CAM_W, h: CAM_H, zoom: GAME_ZOOM };
+    const angle = resolvePlayerAttackAngle(
+      this.player,
+      this.enemies,
+      [this.player, ...this.allies, ...this.enemies],
+      this.input,
+      cam,
+      this.map.crates,
+    );
     const all = [this.player, ...this.allies, ...this.enemies];
-    if (isMelee) this.player.meleeAttack(all);
-    else this.projectiles.push(...this.player.shoot(angle));
+    const callistaAim = wrapCallistaAttackAim(
+      this.player, angle, this.enemies, all, this.input, cam, this.map.crates,
+    );
+    this.player.angle = callistaAim.angle;
+    const isMelee = isMeleeBrawler(this.player.stats.id);
+    if (isMelee) this.player.meleeAttack(all, { crates: this.map.crates });
+    else this.projectiles.push(...this.player.shoot(callistaAim.angle, all, callistaAim.aimX, callistaAim.aimY, { crates: this.map.crates }));
   }
   handleSuper(): void {
     if (!this.player.canUseSuper()) return;
-    const autoTarget = this.input.superJoystick.active
-      ? null
-      : autoAimTarget(this.player, this.enemies, 1.0);
-    const aimX = autoTarget ? autoTarget.x : this.input.state.mouseWorldX;
-    const aimY = autoTarget ? autoTarget.y : this.input.state.mouseWorldY;
+    const all = [this.player, ...this.allies, ...this.enemies];
+    const cam = { x: this.camera.x, y: this.camera.y, w: CAM_W, h: CAM_H, zoom: GAME_ZOOM };
+    const callistaSuper = wrapCallistaSuperAim(this.player, this.enemies, all, this.input, cam, this.map.crates);
+    const autoTarget = callistaSuper ? null : (
+      this.input.superJoystick.active ? null : autoAimTarget(this.player, this.enemies, 1.0)
+    );
+    const aimX = callistaSuper ? callistaSuper.x : (autoTarget ? autoTarget.x : this.input.state.mouseWorldX);
+    const aimY = callistaSuper ? callistaSuper.y : (autoTarget ? autoTarget.y : this.input.state.mouseWorldY);
     const mouseAngle = angleTo(this.player.x, this.player.y, aimX, aimY);
-    this.player.angle = this.input.superJoystick.active
-      ? mouseAngle
-      : autoAimAngle(this.player, this.enemies, mouseAngle, 1.0);
-    this.player.activateSuper([this.player, ...this.allies, ...this.enemies], this.map, this.projectiles, aimX, aimY);
+    this.player.angle = callistaSuper
+      ? callistaSuper.angle
+      : (this.input.superJoystick.active ? mouseAngle : autoAimAngle(this.player, this.enemies, mouseAngle, 1.0));
+    this.player.activateSuper(all, this.map, this.projectiles, aimX, aimY);
   }
 
   update(dt: number): void {
@@ -152,6 +191,7 @@ export class ClashGemGrab {
 
     this.camera.follow(this.player.x, this.player.y);
     this.input.updateWorldMouse(this.camera.x, this.camera.y, this.player.x, this.player.y, GAME_ZOOM);
+    tickHeldPlayerAttack(this.input, this.player, () => this.handleAttack());
     this.player.angle = angleTo(this.player.x, this.player.y, this.input.state.mouseWorldX, this.input.state.mouseWorldY);
 
     const all = [this.player, ...this.allies, ...this.enemies];
@@ -167,31 +207,30 @@ export class ClashGemGrab {
     }
 
     if (!fr) {
+      const blueClaims = new Set<string>();
+      const redClaims = new Set<string>();
       for (const bot of [...this.allies, ...this.enemies]) {
         if (!bot.alive) continue;
         const teamGems = bot.team === "blue" ? this.blueGems : this.redGems;
+        const claims = bot.team === "blue" ? blueClaims : redClaims;
         if (teamGems >= 10) {
-          // Hold position, retreat to safe area
           const safe = bot.team === "blue" ? this.blueBase : this.redBase;
           bot.forcedTarget = safe;
         } else {
           bot.forcedTarget = undefined;
-          let nearest: Gem | null = null;
-          let nd = 99999;
-          for (const g of this.gems) {
-            if (g.carrier) continue;
-            const d = distance(bot.x, bot.y, g.x, g.y);
-            if (d < nd) { nd = d; nearest = g; }
-          }
-          if (nearest) bot.crystalTarget = { x: nearest.x, y: nearest.y };
-          else bot.crystalTarget = undefined;
+          const gem = pickIndividualLooseGem(bot, this.gems, claims);
+          bot.crystalTarget = gem ? { x: gem.x, y: gem.y } : undefined;
         }
         bot.update(sim, this.map);
-        bot.updateAI(sim, all, this.map, this.projectiles);
+        bot.updateAI(sim, all, this.map, this.projectiles, this.map.tileGrid ?? undefined, botAIContext(this.map, "gemgrab", {
+          carryingGems: this.gems.filter(g => g.carrier?.id === bot.id).length,
+          teamGemScore: bot.team === "blue" ? this.blueGems : this.redGems,
+        }));
       }
     }
 
-    updateProjectiles(this.projectiles, sim, this.map);
+    updateEffects(sim, all, this.projectiles, this.map.tileGrid ?? undefined, { crates: this.map.crates });
+    updateProjectiles(this.projectiles, sim, this.map, undefined, { crates: this.map.crates });
     this.handleProjectileHits(all, fr);
     this.projectiles = this.projectiles.filter(p => p.active);
 
@@ -286,14 +325,13 @@ export class ClashGemGrab {
     }
     if (this.blueCountdown < 0 && this.blueGems >= 10) {
       this.over = true; this.won = true;
-      if (!this.resultRecorded) { const ms = getMatchStats(); recordGameResult({ won: true, mode: "gemgrab", brawlerId: this.player.stats.id, place: 1, ...ms }); this.resultRecorded = true; }
+      if (!this.headless && !this.resultRecorded) { const ms = getMatchStats(); applyPartySharedBattleResult({ won: true, mode: "gemgrab", brawlerId: this.player.stats.id, place: 1, ...ms }); this.resultRecorded = true; }
     }
     if (this.redCountdown < 0 && this.redGems >= 10) {
       this.over = true; this.won = false;
-      if (!this.resultRecorded) { const ms = getMatchStats(); recordGameResult({ won: false, mode: "gemgrab", brawlerId: this.player.stats.id, place: 2, ...ms }); this.resultRecorded = true; }
+      if (!this.headless && !this.resultRecorded) { const ms = getMatchStats(); applyPartySharedBattleResult({ won: false, mode: "gemgrab", brawlerId: this.player.stats.id, place: 2, ...ms }); this.resultRecorded = true; }
     }
     updateDamageNumbers(sim);
-    updateEffects(sim, [this.player, ...this.allies, ...this.enemies]);
   }
 
   private handleProjectileHits(all: Brawler[], fr: boolean): void {
@@ -308,10 +346,14 @@ export class ClashGemGrab {
         const d = distance(proj.x, proj.y, b.x, b.y);
         if (d < proj.radius + b.radius) {
           const attacker = all.find(bw => bw.id === proj.ownerId) || null;
-          b.takeDamage(proj.damage, attacker);
+          b.takeDamage(proj.damage, attacker, projectileSuperChargeOpts(proj, attacker));
           if (proj.slow) b.addStatus("slow", 1, 0.3);
           if (proj.poison) b.addStatus("poison", 3, 100);
           applyZafkielStarEffectsOnHit(attacker as any, b as any, proj, { width: this.map.width, height: this.map.height });
+          applyVerdelettaOnHit(attacker as any, b as any, proj, { width: this.map.width, height: this.map.height });
+          applyLuminaOnHit(attacker as any, b as any, proj, all);
+          applyMirabelOnHit(attacker as any, b as any, proj, all);
+          handleVerdelettaShadowProjectileHit(proj, b, all, this.map.width, this.map.height);
           proj.hitIds.add(b.id);
           if (!proj.piercing) { proj.active = false; break; }
         }
@@ -334,16 +376,15 @@ export class ClashGemGrab {
     fillBattleCanvasBg(ctx);
     ctx.save();
     ctx.scale(GAME_ZOOM, GAME_ZOOM);
-    renderMap(ctx, this.map, this.camera.x, this.camera.y, CAM_W, CAM_H, this.frame);
-    if (this.map.tileGrid) renderTileGrid(ctx, this.map.tileGrid, this.camera.x, this.camera.y, CAM_W, CAM_H, this.player.x, this.player.y, false);
     // Center vein indicator
     const csx = this.gemCenter.x - this.camera.x;
     const csy = this.gemCenter.y - this.camera.y;
+    const tilt = getBattleGroundTilt();
     ctx.save();
     ctx.globalAlpha = 0.2;
     ctx.fillStyle = "#CE93D8";
     ctx.beginPath();
-    ctx.arc(csx, csy, 250, 0, Math.PI * 2);
+    ctx.ellipse(csx, csy, 250, 250 * tilt, 0, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
     const gemCanvas = getGemCanvas();
@@ -412,43 +453,27 @@ export class ClashGemGrab {
     for (const b of all) {
       b.crystalCount = this.gems.filter(g => g.carrier?.id === b.id).length;
     }
-    for (const b of all) b.render(ctx, this.camera.x, this.camera.y, this.spriteLoaded, this.player.team, _friendlies);
-    if (this.map.tileGrid) renderTileGrid(ctx, this.map.tileGrid, this.camera.x, this.camera.y, CAM_W, CAM_H, this.player.x, this.player.y, true);
+    if (this.map.tileGrid) {
+      drawTallTilesYsortedWithBrawlers(
+        ctx,
+        this.map.tileGrid,
+        this.camera.x,
+        this.camera.y,
+        CAM_W,
+        CAM_H,
+        this.player.x,
+        this.player.y,
+        all,
+        { spriteLoaded: this.spriteLoaded, viewerTeam: this.player.team, friendlies: _friendlies },
+      );
+    } else {
+      for (const b of all) b.render(ctx, this.camera.x, this.camera.y, this.spriteLoaded, this.player.team, _friendlies);
+    }
 
     renderProjectiles(ctx, this.projectiles, this.camera.x, this.camera.y, this.frame);
     renderEffects(ctx, this.camera.x, this.camera.y, this.frame);
     renderDamageNumbers(ctx, this.camera.x, this.camera.y);
     ctx.restore(); // remove GAME_ZOOM
-
-    // Compact top countdown (under score), not fullscreen.
-    const cd = this.blueCountdown > 0 ? this.blueCountdown : (this.redCountdown > 0 ? this.redCountdown : 0);
-    if (cd > 0) {
-      const isBlue = this.blueCountdown > 0;
-      ctx.save();
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      const txt = Math.ceil(cd).toString();
-      const boxW = 260;
-      const boxH = 52;
-      const x = 600 - boxW / 2;
-      const y = 66;
-      ctx.fillStyle = isBlue ? "rgba(10,42,80,0.86)" : "rgba(80,18,18,0.86)";
-      ctx.strokeStyle = isBlue ? "rgba(64,196,255,0.75)" : "rgba(255,82,82,0.75)";
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.roundRect(x, y, boxW, boxH, 12);
-      ctx.fill();
-      ctx.stroke();
-      ctx.font = "bold 14px Arial";
-      ctx.fillStyle = "rgba(255,255,255,0.82)";
-      ctx.fillText(isBlue ? "УДЕРЖАНИЕ КРИСТАЛЛОВ" : "КРИСТАЛЛЫ У ВРАГА", 600, y + 16);
-      ctx.font = "bold 24px Arial";
-      ctx.shadowColor = isBlue ? "#40C4FF" : "#FF5252";
-      ctx.shadowBlur = 10;
-      ctx.fillStyle = isBlue ? "#40C4FF" : "#FF5252";
-      ctx.fillText(`${txt}с`, 600, y + 36);
-      ctx.restore();
-    }
 
     renderBattleScreenFX(ctx, 1200, 800, this.frame, this.player);
     this.renderHUD(ctx);
@@ -475,21 +500,17 @@ export class ClashGemGrab {
     ctx.fillText(`${this.redGems}`, scoreX + 230, 35);
     ctx.font = "11px Arial";
     ctx.fillStyle = "white";
-    ctx.fillText("СИНИЕ", scoreX + 60, 18);
-    ctx.fillText("КРАСНЫЕ", scoreX + 230, 18);
+    ctx.fillText(tr("battle.teamBlue"), scoreX + 60, 18);
+    ctx.fillText(tr("battle.teamRed"), scoreX + 230, 18);
 
     if (this.blueCountdown > 0) {
       ctx.fillStyle = "#40C4FF";
       ctx.font = "bold 14px Arial";
-      ctx.fillText(`Победа через: ${this.blueCountdown.toFixed(1)}с`, scoreX + scoreW / 2, 58);
+      ctx.fillText(tr("battle.victoryIn", { seconds: this.blueCountdown.toFixed(1) }), scoreX + scoreW / 2, 58);
     } else if (this.redCountdown > 0) {
       ctx.fillStyle = "#FF5252";
       ctx.font = "bold 14px Arial";
-      ctx.fillText(`Враги побеждают через: ${this.redCountdown.toFixed(1)}с`, scoreX + scoreW / 2, 58);
-    } else {
-      ctx.fillStyle = "rgba(255,255,255,0.7)";
-      ctx.font = "11px Arial";
-      ctx.fillText("Соберите 10 камней и удержите 15 сек!", scoreX + scoreW / 2, 58);
+      ctx.fillText(tr("battle.enemyVictoryIn", { seconds: this.redCountdown.toFixed(1) }), scoreX + scoreW / 2, 58);
     }
     ctx.restore();
   }
@@ -498,9 +519,9 @@ export class ClashGemGrab {
     const fakeTrophies = (name: string) => 300 + ((name.charCodeAt(0) * 37 + (name.charCodeAt(1) || 5) * 13) % 1700);
     const profile = getCurrentProfile();
     return [
-      { brawlerId: this.player.stats.id, displayName: this.player.displayName || "Игрок", team: "blue", isPlayer: true, level: this.player.level, trophies: profile?.trophies ?? 0 },
-      ...this.allies.map(b => ({ brawlerId: b.stats.id, displayName: b.displayName || "Бот", team: "blue", isPlayer: false, level: b.level, trophies: fakeTrophies(b.displayName || "B") })),
-      ...this.enemies.map(b => ({ brawlerId: b.stats.id, displayName: b.displayName || "Бот", team: "red", isPlayer: false, level: b.level, trophies: fakeTrophies(b.displayName || "B") })),
+      participantFromBrawler(this.player, { team: "blue", isPlayer: true, trophies: profile?.trophies ?? 0, defaultName: tr("battle.player") }),
+      ...this.allies.map(b => participantFromBrawler(b, { team: "blue", isPlayer: false, trophies: fakeTrophies(b.displayName || "B"), defaultName: tr("battle.bot") })),
+      ...this.enemies.map(b => participantFromBrawler(b, { team: "red", isPlayer: false, trophies: fakeTrophies(b.displayName || "B"), defaultName: tr("battle.bot") })),
     ];
   }
 

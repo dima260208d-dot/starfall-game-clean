@@ -1,68 +1,104 @@
 /**
- * Shared 3D spinning icon helpers used across all menu pages.
- * Coin/Gem/Power/Trophy use GLB models; Box uses a fallback image.
+ * Shared 3D spinning icon helpers used across all menu pages (singleton WebGL).
  */
 import SpinningModel3D from "./SpinningModel3D";
-
-const BASE = (import.meta as any).env?.BASE_URL ?? "/";
-
-export const ICONS = {
-  box:   `${BASE}images/icon-box.png`,
-};
+import GlowingStar from "./GlowingStar";
 
 interface IconProps {
   size?: number;
   style?: React.CSSProperties;
   alt?: string;
+  /** Меньше нагрузка: медленнее вращение (списки, дорожка славы). */
+  lite?: boolean;
+  /** Один кадр из GLB (без RAF) — для длинных списков; всё равно 3D, не 2D PNG. */
+  static?: boolean;
 }
 
-export function CoinIcon({ size = 18, style }: IconProps) {
+export function CoinIcon({ size = 18, style, lite, static: isStatic }: IconProps) {
   return (
     <SpinningModel3D
       modelPath="models/coin.glb"
-      size={Math.round(size * 1.3)}
+      size={Math.round(size * (lite ? 1.15 : 1.3))}
       color="#FFD700"
-      ambientMult={3.5}
-      dirMult={3.5}
+      ambientMult={lite ? 2.8 : 3.5}
+      dirMult={lite ? 2.8 : 3.5}
+      rotSpeed={isStatic ? 0 : lite ? 0.012 : 0.025}
+      frozen={!!isStatic}
       style={style}
     />
   );
 }
 
-export function GemIcon({ size = 18, style }: IconProps) {
+export function GemIcon({ size = 18, style, lite, static: isStatic }: IconProps) {
   return (
     <SpinningModel3D
       modelPath="models/gem.glb"
-      size={Math.round(size * 1.3)}
+      size={Math.round(size * (lite ? 1.15 : 1.3))}
       color="#40C4FF"
-      ambientMult={2.5}
-      dirMult={2.5}
+      ambientMult={lite ? 2.0 : 2.5}
+      dirMult={lite ? 2.0 : 2.5}
+      rotSpeed={isStatic ? 0 : lite ? 0.012 : 0.025}
+      frozen={!!isStatic}
       style={style}
     />
   );
 }
 
-export function PowerIcon({ size = 18, style }: IconProps) {
+export function PowerIcon({ size = 18, style, lite, static: isStatic }: IconProps) {
   return (
     <SpinningModel3D
       modelPath="models/powerpoint.glb"
-      size={Math.round(size * 1.3)}
+      size={Math.round(size * (lite ? 1.15 : 1.3))}
       color="#CE93D8"
-      ambientMult={3.0}
-      dirMult={3.0}
+      ambientMult={lite ? 2.4 : 3.0}
+      dirMult={lite ? 2.4 : 3.0}
+      rotSpeed={isStatic ? 0 : lite ? 0.012 : 0.025}
+      frozen={!!isStatic}
       style={style}
     />
   );
 }
 
-export function TrophyIcon({ size = 18, style }: IconProps) {
+export function TrophyIcon({ size = 18, style, lite, static: isStatic }: IconProps) {
+  if (isStatic) {
+    return (
+      <span
+        aria-hidden
+        style={{
+          fontSize: Math.round(size * 0.95),
+          lineHeight: 1,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          filter: "drop-shadow(0 1px 3px rgba(255,213,79,0.55))",
+          ...style,
+        }}
+      >
+        🏆
+      </span>
+    );
+  }
   return (
     <SpinningModel3D
       modelPath="models/trophy.glb"
-      size={Math.round(size * 1.3)}
+      size={Math.round(size * (lite ? 1.15 : 1.3))}
       color="#FFD700"
-      ambientMult={3.5}
-      dirMult={3.5}
+      ambientMult={lite ? 2.8 : 3.5}
+      dirMult={lite ? 2.8 : 3.5}
+      rotSpeed={lite ? 0.012 : 0.025}
+      frozen={false}
+      style={style}
+    />
+  );
+}
+
+/** Опыт Star Pass — звезда (SVG), не 3D-мяч. */
+export function PassXpIcon({ size = 18, style, lite }: IconProps) {
+  return (
+    <GlowingStar
+      filled
+      glow={!lite}
+      size={size}
       style={style}
     />
   );
@@ -70,10 +106,13 @@ export function TrophyIcon({ size = 18, style }: IconProps) {
 
 export function BoxIcon({ size = 18, style }: IconProps) {
   return (
-    <img
-      src={ICONS.box}
-      alt="сундук"
-      style={{ width: size, height: size, objectFit: "contain", verticalAlign: "middle", display: "inline-block", ...style }}
+    <SpinningModel3D
+      modelPath="models/power_box.glb"
+      size={Math.round(size * 1.3)}
+      color="#CE93D8"
+      ambientMult={2.8}
+      dirMult={2.8}
+      style={style}
     />
   );
 }

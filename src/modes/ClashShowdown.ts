@@ -1,45 +1,65 @@
+import { translate as tr } from "../i18n";
 import { Brawler } from "../entities/Brawler";
 import { applyZafkielStarEffectsOnHit } from "../utils/zafkielStars";
+import { applyVerdelettaOnHit } from "../utils/verdelettaStars";
+import { applyLuminaOnHit } from "../utils/luminaStars";
+import { applyMirabelOnHit } from "../utils/mirabelMechanics";
+import { handleVerdelettaShadowProjectileHit } from "../utils/verdelettaShadows";
 import { Bot } from "../entities/Bot";
-import { BRAWLERS, getBrawlerById, getScaledStats, pickBotStats } from "../entities/BrawlerData";
+import { BRAWLERS, getBrawlerById, getScaledStats, isMeleeBrawler, pickBotStats } from "../entities/BrawlerData";
 import {
-  createShowdownMap, GameMap, renderTileGrid,
-  paintTileGridPass2Cell, tallTileDepthSortY,
+  createShowdownMap, GameMap,
   collectPowerCratesFromOverlays,
+  spawnRandomPowerCrates,
 } from "../game/MapRenderer";
-import { Projectile, updateProjectiles, renderProjectiles } from "../entities/Projectile";
+import { Projectile, updateProjectiles, renderProjectiles, projectileSuperChargeOpts } from "../entities/Projectile";
 import { Camera } from "../game/Camera";
 import { InputHandler } from "../game/InputHandler";
-import { updateDamageNumbers, renderDamageNumbers, clearDamageNumbers } from "../utils/damageNumbers";
-import { updateEffects, renderEffects, clearEffects } from "../utils/effects";
-import { renderMap } from "../game/MapRenderer";
+import { updateDamageNumbers, renderDamageNumbers, clearDamageNumbers, spawnDamageNumber } from "../utils/damageNumbers";
+import { updateEffects, renderEffects, clearEffects, triggerCrateHitShake } from "../utils/effects";
+import { getBattleGroundTilt } from "../game/battleVisualScale";
 import { angleTo, autoAimAngle, autoAimTarget, distance, randomInt } from "../utils/helpers";
-import { recordGameResult, getCurrentUsername, getCurrentProfile } from "../utils/localStorageAPI";
-import { getPetById } from "../entities/PetData";
-import { resetMatchStats, getMatchStats, addMatchStat } from "../utils/matchStats";
+import { resolvePlayerAttackAngle, tickHeldPlayerAttack, wrapCallistaAttackAim, wrapCallistaSuperAim } from "../utils/battleAttackAim";
+import { getCurrentUsername, getCurrentProfile, applyProfilePetToBrawler } from "../utils/localStorageAPI";
+import { applyPartySharedBattleResult, createPartyAllyBot, getPartyAllyEntries } from "../utils/social/partyBattle";
+import { resetMatchStats, getMatchStats, addMatchStat, participantFromBrawler } from "../utils/matchStats";
 import {
   TileGrid, TILE_CELL_SIZE, generateShowdownTileGrid,
-  collidesWithTileGrid, projectileBlockedByTile,
   getTileHealRate, isTileInBush,
-  destroyTile, nearestGrassTile, getTile,
+  nearestGrassTile,
   snapWorldPosToFlatPickupCenter,
+  paintMountainBorderRing,
+  BATTLE_MAP_RIM_CELLS,
 } from "../game/TileMap";
-import { TALL_TILE_TYPES } from "../utils/tileModelCache";
-import { getPublishedMap, OV } from "../utils/mapEditorAPI";
+import { OV } from "../utils/mapEditorAPI";
+import { getActiveMap } from "../utils/mapSchedule";
 import { isDevBattleWorldFrozen } from "../game/battleDevPause";
-import { getPowerJarCanvas } from "../utils/powerModelCache";
 import { fillBattleCanvasBg, renderBattleScreenFX } from "../game/battleScreenFX";
+import {
+  botAIContext, pickPowerOrCrateTarget, spreadGasFleeTarget,
+  assignBotLootObjective, isLootTargetStillValid,
+} from "../ai/aiBotObjectives";
+import { pickNearestVisibleEnemy } from "../ai/aiVisibility";
+import { drawTallTilesYsortedWithBrawlers } from "../game/tileGridBrawlerDepthPass";
+import { drawShowdownSmokeParticles, resetShowdownSmokeParticles } from "../utils/showdownSmokeParticles";
 
 export interface DropItem {
+  jarId: number;
   x: number;
   y: number;
   type: "health" | "coins" | "powerup";
   radius: number;
+  /** World origin for jar pop-out animation (defaults to x/y). */
+  spawnX?: number;
+  spawnY?: number;
 }
 
 export interface GasZone {
   centerX: number;
   centerY: number;
+  /** Half-extent квадратной safe-зоны. Газ — всё, что снаружи квадрата. */
+  safeHalfSize: number;
+  /** Радиус-эквивалент для AI/автопилотов (≈ диагональ/2 от квадрата). */
   safeRadius: number;
 }
 
@@ -88,11 +108,25 @@ export class ClashShowdown {
   private playerDropsSpawned = false;
   private totalParticipants = 10;
   private teamSize = 1;
+  readonly showdownFormat: ShowdownFormat;
   private teamSpawnCenters = new Map<string, { x: number; y: number }>();
   private respawnTimers = new Map<string, number>();
   private respawnPoints = new Map<string, { x: number; y: number }>();
+  private nextJarId = 1;
   allies: Brawler[] = [];
   enemies: Brawler[] = [];
+
+  private pushPowerJar(spawnX: number, spawnY: number, landX: number, landY: number, radius = 14): void {
+    this.drops.push({
+      jarId: this.nextJarId++,
+      x: landX,
+      y: landY,
+      spawnX,
+      spawnY,
+      type: "powerup",
+      radius,
+    });
+  }
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -104,6 +138,7 @@ export class ClashShowdown {
     spriteLoaded: boolean
   ) {
     this.teamSize = format === "trio" ? 3 : format === "duo" ? 2 : 1;
+    this.showdownFormat = format;
     this.totalParticipants = format === "trio" ? 12 : 10;
     this.tileGrid = generateShowdownTileGrid();
     this.map = createShowdownMap(this.tileGrid);
@@ -111,11 +146,12 @@ export class ClashShowdown {
     this.spriteLoaded = spriteLoaded;
 
     // ── Load published map if one exists ──────────────────────────────────
-    const pubMap = getPublishedMap("showdown");
+    const pubMap = getActiveMap("showdown");
     if (pubMap && pubMap.cells && pubMap.cells.length === 60 * 60) {
       for (let i = 0; i < pubMap.cells.length; i++) {
         this.tileGrid.cells[i] = pubMap.cells[i];
       }
+      paintMountainBorderRing(this.tileGrid, BATTLE_MAP_RIM_CELLS);
       this.map.name = pubMap.name;
     }
 
@@ -136,7 +172,11 @@ export class ClashShowdown {
 
       // ── Power boxes from overlays: snap to clear 3×3 grass (no overlap under bush/tall art) ──
       const fromEditor = collectPowerCratesFromOverlays(this.tileGrid, pubMap.overlays, OV.POWER_BOX);
-      if (fromEditor.length > 0) this.map.crates = fromEditor;
+      if (fromEditor.length > 0) {
+        this.map.crates = fromEditor;
+      } else {
+        this.map.crates = spawnRandomPowerCrates(this.tileGrid, pubMap.overlays, { min: 20, max: 30 });
+      }
     }
 
     const totalSlots = this.totalParticipants;
@@ -194,18 +234,26 @@ export class ClashShowdown {
     const playerTeamId = `team-${playerTeamIdx}`;
     const playerSpawn = allPositions[playerSlot];
     this.player = new Brawler(playerStats, playerLevel, playerSpawn.x, playerSpawn.y, playerTeamId, true);
-    this.player.setIdentity(getCurrentUsername() ?? "Игрок", false);
-    this.player.setEquippedPet(getPetById(getCurrentProfile()?.equippedPetId) ?? null);
+    this.player.setIdentity(getCurrentUsername() ?? tr("battle.player"), false);
+    applyProfilePetToBrawler(this.player);
     resetMatchStats();
 
     const botPicks = pickBotStats(playerBrawlerId, totalSlots - 1);
+    const partyAllies = getPartyAllyEntries();
+    let partyAllyIdx = 0;
     let botIdx = 0;
     for (let i = 0; i < totalSlots; i++) {
       if (i === playerSlot) continue;
-      const botStats = botPicks[botIdx];
-      const level = randomInt(1, 5);
       const pos = allPositions[i];
       const botTeamId = `team-${Math.floor(i / this.teamSize)}`;
+      if (botTeamId === playerTeamId && partyAllyIdx < partyAllies.length) {
+        const entry = partyAllies[partyAllyIdx++];
+        this.bots.push(createPartyAllyBot(entry, pos.x, pos.y, botTeamId));
+        botIdx++;
+        continue;
+      }
+      const botStats = botPicks[botIdx];
+      const level = randomInt(1, 5);
       this.bots.push(new Bot(botStats, level, pos.x, pos.y, botTeamId));
       botIdx++;
     }
@@ -213,7 +261,9 @@ export class ClashShowdown {
     this.gas = {
       centerX: 1500,
       centerY: 1500,
-      safeRadius: 2000,
+      // Map is 3000×3000 — start with the whole map safe (no gas at match start).
+      safeHalfSize: 1500,
+      safeRadius: 1500 * Math.SQRT2,
     };
 
     this.camera = new Camera(CAM_W, CAM_H, this.map.width, this.map.height);
@@ -222,30 +272,28 @@ export class ClashShowdown {
 
   handleAttack(): void {
     if (!this.player.canAttack()) return;
-    const mouseAngle = angleTo(this.player.x, this.player.y, this.input.state.mouseWorldX, this.input.state.mouseWorldY);
-    const angle = this.input.attackJoystick.active ? mouseAngle : autoAimAngle(this.player, this.bots, mouseAngle);
-    this.player.angle = angle;
+    const angle = resolvePlayerAttackAngle(
+      this.player,
+      this.bots,
+      [this.player, ...this.bots],
+      this.input,
+      { x: this.camera.x, y: this.camera.y, w: CAM_W, h: CAM_H, zoom: GAME_ZOOM },
+      this.map.crates,
+    );
+    const callistaAim = wrapCallistaAttackAim(
+      this.player, angle, this.bots, [this.player, ...this.bots], this.input,
+      { x: this.camera.x, y: this.camera.y, w: CAM_W, h: CAM_H, zoom: GAME_ZOOM },
+      this.map.crates,
+    );
+    this.player.angle = callistaAim.angle;
     
-    const isMelee = ["goro", "ronin", "taro"].includes(this.player.stats.id);
+    const isMelee = isMeleeBrawler(this.player.stats.id);
     if (isMelee) {
       const allBrawlers = [this.player, ...this.bots];
-      this.player.meleeAttack(allBrawlers);
-      // Melee brawlers also smash nearby power boxes
-      for (const crate of this.map.crates) {
-        if (crate.destroyed) continue;
-        const cx = crate.x + crate.w / 2;
-        const cy = crate.y + crate.h / 2;
-        if (distance(this.player.x, this.player.y, cx, cy) < this.player.radius + 35) {
-          crate.hp -= this.player.scaledDamage;
-          if (crate.hp <= 0) {
-            crate.destroyed = true;
-            const p = snapWorldPosToFlatPickupCenter(this.tileGrid, cx, cy);
-            this.drops.push({ x: p.x, y: p.y, type: "powerup", radius: 16 });
-          }
-        }
-      }
+      this.player.meleeAttack(allBrawlers, { crates: this.map.crates });
     } else {
-      const projs = this.player.shoot(angle);
+      const allBrawlers = [this.player, ...this.bots];
+      const projs = this.player.shoot(callistaAim.angle, allBrawlers, callistaAim.aimX, callistaAim.aimY, { crates: this.map.crates });
       this.projectiles.push(...projs);
     }
   }
@@ -253,15 +301,19 @@ export class ClashShowdown {
   handleSuper(): void {
     if (!this.player.canUseSuper()) return;
     const allBrawlers = [this.player, ...this.bots];
-    const autoTarget = this.input.superJoystick.active
-      ? null
-      : autoAimTarget(this.player, this.bots, 1.0);
-    const aimX = autoTarget ? autoTarget.x : this.input.state.mouseWorldX;
-    const aimY = autoTarget ? autoTarget.y : this.input.state.mouseWorldY;
+    const cam = { x: this.camera.x, y: this.camera.y, w: CAM_W, h: CAM_H, zoom: GAME_ZOOM };
+    const callistaSuper = wrapCallistaSuperAim(
+      this.player, this.bots, allBrawlers, this.input, cam, this.map.crates,
+    );
+    const autoTarget = callistaSuper ? null : (
+      this.input.superJoystick.active ? null : autoAimTarget(this.player, this.bots, 1.0)
+    );
+    const aimX = callistaSuper ? callistaSuper.x : (autoTarget ? autoTarget.x : this.input.state.mouseWorldX);
+    const aimY = callistaSuper ? callistaSuper.y : (autoTarget ? autoTarget.y : this.input.state.mouseWorldY);
     const mouseAngle = angleTo(this.player.x, this.player.y, aimX, aimY);
-    this.player.angle = this.input.superJoystick.active
-      ? mouseAngle
-      : autoAimAngle(this.player, this.bots, mouseAngle, 1.0);
+    this.player.angle = callistaSuper
+      ? callistaSuper.angle
+      : (this.input.superJoystick.active ? mouseAngle : autoAimAngle(this.player, this.bots, mouseAngle, 1.0));
     this.player.activateSuper(allBrawlers, this.map, this.projectiles, aimX, aimY);
   }
 
@@ -288,18 +340,14 @@ export class ClashShowdown {
       : [this.player, ...this.bots].find(b => b.alive && b.team === this.player.team) || this.player;
     this.camera.follow(focus.x, focus.y);
     this.input.updateWorldMouse(this.camera.x, this.camera.y, this.player.x, this.player.y, GAME_ZOOM);
-    
+    tickHeldPlayerAttack(this.input, this.player, () => this.handleAttack());
+
     const mouseAngle = angleTo(this.player.x, this.player.y, this.input.state.mouseWorldX, this.input.state.mouseWorldY);
     this.player.angle = mouseAngle;
     
     const allBrawlers = [this.player, ...this.bots];
     
     this.player.update(dt, this.map);
-    // Tile-based collision correction
-    {
-      const tc = collidesWithTileGrid(this.player.x, this.player.y, this.player.radius, this.tileGrid);
-      if (tc.collides) { this.player.x = tc.nx; this.player.y = tc.ny; }
-    }
     // Heal platform
     {
       const healRate = getTileHealRate(this.player.x, this.player.y, this.tileGrid);
@@ -311,67 +359,45 @@ export class ClashShowdown {
     // Bush detection via tile grid
     this.player.inBush = isTileInBush(this.player.x, this.player.y, this.tileGrid);
     
+    const lootReserved = new Set<string>();
     for (const bot of this.bots) {
       const wasAlive = bot.alive;
       if (bot.alive) {
-        // Gas-avoidance intelligence: flee inward if outside or near gas edge
-        const dToCenter = distance(bot.x, bot.y, this.gas.centerX, this.gas.centerY);
+        // Gas-avoidance intelligence (square zone): flee inward if outside or near edge.
+        const half = this.gas.safeHalfSize;
+        const dxC = bot.x - this.gas.centerX;
+        const dyC = bot.y - this.gas.centerY;
+        const cheb = Math.max(Math.abs(dxC), Math.abs(dyC));
         const safeBuffer = 200;
-        if (dToCenter > this.gas.safeRadius - safeBuffer) {
-          // Pick a point well inside the safe zone (not the exact center, spread bots out)
-          const targetR = Math.max(0, this.gas.safeRadius - safeBuffer - 100);
-          const angleFromCenter = Math.atan2(bot.y - this.gas.centerY, bot.x - this.gas.centerX);
-          bot.forcedTarget = {
-            x: this.gas.centerX + Math.cos(angleFromCenter) * targetR,
-            y: this.gas.centerY + Math.sin(angleFromCenter) * targetR,
+        if (cheb > half - safeBuffer) {
+          const inner = Math.max(60, half - safeBuffer - 100);
+          const raw = {
+            x: this.gas.centerX + Math.max(-inner, Math.min(inner, dxC)),
+            y: this.gas.centerY + Math.max(-inner, Math.min(inner, dyC)),
           };
+          bot.forcedTarget = spreadGasFleeTarget(bot, raw, { x: this.gas.centerX, y: this.gas.centerY });
+          bot.objectiveHoldSec = 0.9;
         } else {
-          // No gas threat — let the bot hunt power cubes when no enemy is in
-          // sight. Bots head toward the nearest dropped powerup or, failing
-          // that, the nearest unbroken crate (which yields cubes when smashed).
-          let nearestEnemyDist = 9999;
-          for (const other of allBrawlers) {
-            if (!other.alive || other === bot) continue;
-            const d = distance(bot.x, bot.y, other.x, other.y);
-            if (d < nearestEnemyDist) nearestEnemyDist = d;
-          }
-          // Only seek cubes when not already busy fighting nearby
-          if (nearestEnemyDist > 500) {
-            let bestX = 0, bestY = 0, bestD = 1200;
-            for (const drop of this.drops) {
-              if (drop.type !== "powerup") continue;
-              const d = distance(bot.x, bot.y, drop.x, drop.y);
-              if (d < bestD) { bestD = d; bestX = drop.x; bestY = drop.y; }
-            }
-            if (bestD === 1200) {
-              for (const crate of this.map.crates) {
-                if (crate.destroyed) continue;
-                const cx = crate.x + crate.w / 2;
-                const cy = crate.y + crate.h / 2;
-                const d = distance(bot.x, bot.y, cx, cy);
-                // Stop short of the crate so the bot has room to shoot it.
-                if (d < bestD) { bestD = d; bestX = cx; bestY = cy; }
-              }
-            }
-            if (bestD < 1200) {
-              bot.forcedTarget = { x: bestX, y: bestY };
-            } else if (bot.forcedTarget) {
-              bot.forcedTarget = undefined;
-            }
-          } else if (bot.forcedTarget) {
-            bot.forcedTarget = undefined;
-          }
+          const foes = allBrawlers.filter(b => b.alive && b.team !== bot.team);
+          const { nearestDist: nearestEnemyDist } = pickNearestVisibleEnemy(bot, foes, allBrawlers);
+          assignBotLootObjective(
+            bot,
+            () => pickPowerOrCrateTarget(bot, this.map, this.drops, bot.personality, nearestEnemyDist, lootReserved),
+            (t) => isLootTargetStillValid(t, this.map, this.drops),
+          );
         }
         bot.update(sim, this.map);
-        const bc = collidesWithTileGrid(bot.x, bot.y, bot.radius, this.tileGrid);
-        if (bc.collides) { bot.x = bc.nx; bot.y = bc.ny; }
         const bHeal = getTileHealRate(bot.x, bot.y, this.tileGrid);
         if (bHeal > 0) {
           const hr = healRateWithJarBonus(bHeal, bot.powerCubes);
           bot.hp = Math.min(bot.maxHp, bot.hp + hr * sim);
         }
         bot.inBush = isTileInBush(bot.x, bot.y, this.tileGrid);
-        bot.updateAI(sim, allBrawlers, this.map, this.projectiles, this.tileGrid);
+        bot.updateAI(sim, allBrawlers, this.map, this.projectiles, this.tileGrid, botAIContext(this.map, "showdown", { gas: this.gas, drops: this.drops }));
+        for (const pos of bot.smashNearbyCrates(this.map)) {
+          const p = snapWorldPosToFlatPickupCenter(this.tileGrid, pos.x, pos.y);
+          this.pushPowerJar(pos.x, pos.y, p.x, p.y, 16);
+        }
       }
       if (wasAlive && !bot.alive) {
         // handled in a centralized death pass later in the frame
@@ -381,8 +407,20 @@ export class ClashShowdown {
     const homingTargets = allBrawlers
       .filter(b => b.alive)
       .map(b => ({ id: b.id, x: b.x, y: b.y, team: b.team }));
-    updateProjectiles(this.projectiles, sim, this.map, homingTargets);
-    this.handleTileHits();
+    updateEffects(sim, [this.player, ...this.bots], this.projectiles, this.tileGrid, {
+      crates: this.map.crates,
+      onCrateDestroyed: (_crate, cx, cy) => {
+        const p = snapWorldPosToFlatPickupCenter(this.tileGrid, cx, cy);
+        this.pushPowerJar(cx, cy, p.x, p.y, 16);
+      },
+    });
+    updateProjectiles(this.projectiles, sim, this.map, homingTargets, {
+      crates: this.map.crates,
+      onCrateDestroyed: (_crate, cx, cy) => {
+        const p = snapWorldPosToFlatPickupCenter(this.tileGrid, cx, cy);
+        this.pushPowerJar(cx, cy, p.x, p.y, 16);
+      },
+    });
 
     this.handleProjectileHits(allBrawlers);
     this.projectiles = this.projectiles.filter(p => p.active);
@@ -390,8 +428,9 @@ export class ClashShowdown {
     // Kills are resolved in a single centralized pass below.
     
     // Continuous shrink at 70% of original speed, fixed center — never disappears
-    if (this.gas.safeRadius > 150) {
-      this.gas.safeRadius = Math.max(150, this.gas.safeRadius - 6.6 * sim);
+    if (this.gas.safeHalfSize > 110) {
+      this.gas.safeHalfSize = Math.max(110, this.gas.safeHalfSize - 4.7 * sim);
+      this.gas.safeRadius = this.gas.safeHalfSize * Math.SQRT2;
     }
 
     for (const b of allBrawlers) {
@@ -399,8 +438,11 @@ export class ClashShowdown {
         this.gasTimeInSmoke.delete(b.id);
         continue;
       }
-      const d = distance(b.x, b.y, this.gas.centerX, this.gas.centerY);
-      if (d > this.gas.safeRadius) {
+      const halfSz = this.gas.safeHalfSize;
+      const adx = Math.abs(b.x - this.gas.centerX);
+      const ady = Math.abs(b.y - this.gas.centerY);
+      const inGas = Math.max(adx, ady) > halfSz;
+      if (inGas) {
         const prev = this.gasTimeInSmoke.get(b.id) ?? 0;
         const t = prev + sim;
         this.gasTimeInSmoke.set(b.id, t);
@@ -411,14 +453,12 @@ export class ClashShowdown {
       }
     }
     
-    this.handleCrateHits(allBrawlers);
     this.handleDropPickups();
     this.updateRespawns(sim);
     this.allies = this.bots.filter(b => b.alive && b.team === this.player.team);
     this.enemies = this.bots.filter(b => b.alive && b.team !== this.player.team);
     
     updateDamageNumbers(sim);
-    updateEffects(sim, [this.player, ...this.bots]);
     for (const fighter of [this.player, ...this.bots]) {
       if (frameAliveBefore.has(fighter.id) && !fighter.alive) {
         this.onFighterDeath(fighter);
@@ -444,7 +484,7 @@ export class ClashShowdown {
           const rawX = this.player.x + Math.cos(a) * r;
           const rawY = this.player.y + Math.sin(a) * r;
           const p = snapWorldPosToFlatPickupCenter(this.tileGrid, rawX, rawY);
-          this.drops.push({ x: p.x, y: p.y, type: "powerup", radius: 14 });
+          this.pushPowerJar(this.player.x, this.player.y, p.x, p.y, 14);
         }
         this.playerDropsSpawned = true;
       }
@@ -454,7 +494,7 @@ export class ClashShowdown {
       this.won = isTopFour;
       if (!this.resultRecorded) {
         const ms = getMatchStats();
-        recordGameResult({ won: isTopFour, mode: "showdown", brawlerId: this.player.stats.id, place, totalPlayers: this.totalParticipants, ...ms });
+        applyPartySharedBattleResult({ won: isTopFour, mode: "showdown", brawlerId: this.player.stats.id, place, totalPlayers: this.totalParticipants, showdownFormat: this.showdownFormat, ...ms });
         this.resultRecorded = true;
       }
     }
@@ -464,19 +504,8 @@ export class ClashShowdown {
       this.won = true;
       if (!this.resultRecorded) {
         const ms = getMatchStats();
-        recordGameResult({ won: true, mode: "showdown", brawlerId: this.player.stats.id, place: 1, totalPlayers: this.totalParticipants, ...ms });
+        applyPartySharedBattleResult({ won: true, mode: "showdown", brawlerId: this.player.stats.id, place: 1, totalPlayers: this.totalParticipants, showdownFormat: this.showdownFormat, ...ms });
         this.resultRecorded = true;
-      }
-    }
-  }
-
-  private handleTileHits(): void {
-    for (const proj of this.projectiles) {
-      if (!proj.active) continue;
-      const { blocked, tx, ty } = projectileBlockedByTile(proj.x, proj.y, this.tileGrid);
-      if (blocked) {
-        destroyTile(this.tileGrid, tx, ty);
-        if (!proj.piercing) proj.active = false;
       }
     }
   }
@@ -495,7 +524,7 @@ export class ClashShowdown {
         const d = distance(proj.x, proj.y, b.x, b.y);
         if (d < proj.radius + b.radius) {
           const attacker = allBrawlers.find(bw => bw.id === proj.ownerId) || null;
-          b.takeDamage(proj.damage, attacker);
+          b.takeDamage(proj.damage, attacker, projectileSuperChargeOpts(proj, attacker));
           
           if (proj.slow) b.addStatus("slow", 1.5, 0.4);
           if (proj.poison) b.addStatus("poison", 3, 100);
@@ -508,6 +537,10 @@ export class ClashShowdown {
             b.y = Math.max(b.radius, Math.min(this.map.height - b.radius, pastPos.y));
           }
           applyZafkielStarEffectsOnHit(attacker as any, b as any, proj, { width: this.map.width, height: this.map.height });
+          applyVerdelettaOnHit(attacker as any, b as any, proj, { width: this.map.width, height: this.map.height });
+          applyLuminaOnHit(attacker as any, b as any, proj, allBrawlers);
+          applyMirabelOnHit(attacker as any, b as any, proj, allBrawlers);
+          handleVerdelettaShadowProjectileHit(proj, b, allBrawlers, this.map.width, this.map.height);
           
           proj.hitIds.add(b.id);
           
@@ -515,30 +548,6 @@ export class ClashShowdown {
             proj.active = false;
             break;
           }
-        }
-      }
-    }
-  }
-
-  private handleCrateHits(_allBrawlers: Brawler[]): void {
-    for (const proj of this.projectiles) {
-      if (!proj.active) continue;
-      for (const crate of this.map.crates) {
-        if (crate.destroyed) continue;
-        if (
-          proj.x > crate.x && proj.x < crate.x + crate.w &&
-          proj.y > crate.y && proj.y < crate.y + crate.h
-        ) {
-          crate.hp -= proj.damage;
-          if (!proj.piercing) proj.active = false;
-          if (crate.hp <= 0) {
-            crate.destroyed = true;
-            const cx = crate.x + crate.w / 2;
-            const cy = crate.y + crate.h / 2;
-            const p = snapWorldPosToFlatPickupCenter(this.tileGrid, cx, cy);
-            this.drops.push({ x: p.x, y: p.y, type: "powerup", radius: 16 });
-          }
-          break;
         }
       }
     }
@@ -586,7 +595,7 @@ export class ClashShowdown {
       const rawX = fighter.x + Math.cos(a) * r;
       const rawY = fighter.y + Math.sin(a) * r;
       const p = snapWorldPosToFlatPickupCenter(this.tileGrid, rawX, rawY);
-      this.drops.push({ x: p.x, y: p.y, type: "powerup", radius: 14 });
+      this.pushPowerJar(fighter.x, fighter.y, p.x, p.y, 14);
     }
     fighter.powerCubes = 0;
     const base = getScaledStats(fighter.stats, fighter.level);
@@ -644,153 +653,58 @@ export class ClashShowdown {
   render(ctx: CanvasRenderingContext2D): void {
     fillBattleCanvasBg(ctx);
 
-    // ── Scale everything up by GAME_ZOOM so tiles fill ~17 cells across the screen ──
     ctx.save();
     ctx.scale(GAME_ZOOM, GAME_ZOOM);
 
-    // ── 45° isometric view: compress Y axis by 0.65 for all world elements ──
-    const ISO = 0.65;
-    // Fit tile column height exactly into CAM_H so ISO layer fills the zoomed viewport
-    // (ceil + old shift left a band ~56px empty at top and clipped bottom → “white line” + black bar).
-    const tileCanvasH = Math.floor(CAM_H / ISO);
-    const ISO_SHIFT = CAM_H - ISO * tileCanvasH;
-
-    // ─── ISO layer: map tiles + drops + gas + projectiles + effects ───
-    ctx.save();
-    ctx.transform(1, 0, 0, ISO, 0, ISO_SHIFT);
-    // Clip world draw so gas / strokes cannot spill into letterboxed margins as bright artifacts.
-    {
-      const pad = this.tileGrid.cellSize * 2;
-      ctx.beginPath();
-      ctx.rect(-pad, -pad, CAM_W + pad * 2, tileCanvasH + pad * 2);
-      ctx.clip();
-    }
-
-    renderMap(ctx, this.map, this.camera.x, this.camera.y, CAM_W, tileCanvasH, this.frame);
-
-    renderTileGrid(ctx, this.tileGrid, this.camera.x, this.camera.y, CAM_W, tileCanvasH,
-      this.player.x, this.player.y, false, "deferTallNonBush");
-
-    const C = this.tileGrid.cellSize;
-    type DepthKind = "tile" | "brawler";
-    const depthItems: { kind: DepthKind; sortY: number; tx?: number; ty?: number; b?: Brawler }[] = [];
-    const EDGE_PAD = 6;
-    const startTX = Math.max(-EDGE_PAD, Math.floor(this.camera.x / C) - EDGE_PAD);
-    const endTX = Math.min(this.tileGrid.width - 1 + EDGE_PAD, Math.ceil((this.camera.x + CAM_W) / C) + EDGE_PAD);
-    const startTY = Math.max(-EDGE_PAD, Math.floor(this.camera.y / C) - 4 - EDGE_PAD);
-    const endTY = Math.min(this.tileGrid.height - 1 + EDGE_PAD, Math.ceil((this.camera.y + tileCanvasH) / C) + EDGE_PAD);
-    for (let tx = startTX; tx <= endTX; tx++) {
-      for (let ty = startTY; ty <= endTY; ty++) {
-        const t = getTile(this.tileGrid, tx, ty);
-        if (TALL_TILE_TYPES.has(t)) {
-          depthItems.push({ kind: "tile", sortY: tallTileDepthSortY(ty, C), tx, ty });
-        }
-      }
-    }
     const allFighters = [this.player, ...this.bots];
-    for (const b of allFighters) {
-      if (!b.alive) continue;
-      depthItems.push({ kind: "brawler", sortY: b.y + b.radius, b });
-    }
-    depthItems.sort((a, b) => {
-      if (a.sortY !== b.sortY) return a.sortY - b.sortY;
-      if (a.kind === b.kind) return 0;
-      return a.kind === "tile" ? -1 : 1;
-    });
-    const friendliesWorld = allFighters
-      .filter(br => br.alive && br.team === this.player.team)
-      .map(br => ({ x: br.x, y: br.y }));
-    for (const it of depthItems) {
-      if (it.kind === "tile" && it.tx !== undefined && it.ty !== undefined) {
-        paintTileGridPass2Cell(
-          ctx, this.tileGrid, it.tx, it.ty, this.camera.x, this.camera.y,
-          this.player.x, this.player.y, false, "tallNonBushOnly",
-        );
-      } else if (it.kind === "brawler" && it.b) {
-        it.b.render(ctx, this.camera.x, this.camera.y, this.spriteLoaded, this.player.team, friendliesWorld, undefined, "world");
-      }
-    }
-
-    this.renderDrops(ctx);
-    this.renderRespawnShields(ctx);
-    this.renderGas(ctx, ISO, tileCanvasH);
-    
-    renderProjectiles(ctx, this.projectiles, this.camera.x, this.camera.y, this.frame);
-    renderEffects(ctx, this.camera.x, this.camera.y, this.frame);
-
-    renderTileGrid(ctx, this.tileGrid, this.camera.x, this.camera.y, CAM_W, tileCanvasH,
-      this.player.x, this.player.y, true);
-
-    renderDamageNumbers(ctx, this.camera.x, this.camera.y);
-
-    ctx.restore(); // remove ISO, keep GAME_ZOOM
-
     const friendlies = allFighters
       .filter(b => b.alive && b.team === this.player.team)
       .map(b => ({ x: b.x, y: b.y }));
-    allFighters.sort((a, b) => a.y - b.y);
-    for (const b of allFighters) {
-      const projSY = (b.y - this.camera.y) * ISO + ISO_SHIFT;
-      b.render(ctx, this.camera.x, this.camera.y, this.spriteLoaded, this.player.team, friendlies, projSY, "hud");
-    }
 
-    ctx.restore(); // remove GAME_ZOOM
+    drawTallTilesYsortedWithBrawlers(
+      ctx,
+      this.tileGrid,
+      this.camera.x,
+      this.camera.y,
+      CAM_W,
+      CAM_H,
+      this.player.x,
+      this.player.y,
+      allFighters,
+      {
+        spriteLoaded: this.spriteLoaded,
+        viewerTeam: this.player.team,
+        friendlies,
+        beforeBushLayer: (c) => {
+          this.renderDrops(c);
+          this.renderRespawnShields(c);
+        },
+      },
+    );
+
+    renderProjectiles(ctx, this.projectiles, this.camera.x, this.camera.y, this.frame);
+    renderEffects(ctx, this.camera.x, this.camera.y, this.frame, this.player.team);
+    renderDamageNumbers(ctx, this.camera.x, this.camera.y);
+
+    // Газ-дым рисуем поверх всего боевого слоя — иначе тайлы/кусты его перекрывают.
+    this.renderGas(ctx, CAM_H);
+
+    ctx.restore();
 
     renderBattleScreenFX(ctx, 1200, 800, this.frame, this.player);
-    // ── HUD rendered flat at full screen resolution (no zoom) ──
     this.renderHUD(ctx);
   }
 
   private renderDrops(ctx: CanvasRenderingContext2D): void {
+    const tilt = getBattleGroundTilt();
     for (const drop of this.drops) {
       const sx = drop.x - this.camera.x;
       const sy = drop.y - this.camera.y;
 
       if (drop.type === "powerup") {
-        // Spinning power jar — use GLB-rendered sprite with rotation
-        const spin = (this.frame * 0.04) % (Math.PI * 2);
-        const R = drop.radius;
-        const jarSprite = getPowerJarCanvas();
-
-        ctx.save();
-        ctx.translate(sx, sy);
-        ctx.rotate(spin);
-        ctx.shadowColor = "#E040FB";
-        ctx.shadowBlur = 22;
-
-        if (jarSprite) {
-          const D = R * 3.0;
-          ctx.drawImage(jarSprite, -D / 2, -D / 2, D, D);
-        } else {
-          // Canvas fallback until GLB loads
-          const jW = R * 1.3, jH = R * 1.8;
-          const jX = -jW / 2, jY = -jH / 2;
-          const jGrad = ctx.createLinearGradient(jX, jY, jX + jW, jY + jH);
-          jGrad.addColorStop(0, "#CE93D8");
-          jGrad.addColorStop(0.35, "#9C27B0");
-          jGrad.addColorStop(1, "#4A148C");
-          ctx.fillStyle = jGrad;
-          ctx.beginPath();
-          ctx.roundRect(jX, jY, jW, jH, R * 0.35);
-          ctx.fill();
-          ctx.fillStyle = "#FFD700";
-          ctx.fillRect(-jW * 0.3, jY - R * 0.18, jW * 0.6, R * 0.22);
-        }
-
-        ctx.restore();
-
-        // Floating label above
-        ctx.save();
-        ctx.fillStyle = "#FFD700";
-        ctx.font = "bold 9px Arial";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.shadowColor = "#000";
-        ctx.shadowBlur = 3;
-        ctx.fillText("БАНКА", sx, sy - R * 1.6);
-        ctx.restore();
+        // Банка усиления — только 3D (battle3DWorld.syncPowerJars).
       } else {
-        // Health / coins — colored circles
+        // Health / coins — colored circles on the 3D floor plane
         const color = drop.type === "health" ? "#4CAF50" : "#FFD700";
         const glowColor = drop.type === "health" ? "#4CAF50" : "#FFD700";
         const label = drop.type === "health" ? "+" : "$";
@@ -800,11 +714,11 @@ export class ClashShowdown {
         ctx.shadowBlur = 12;
         ctx.fillStyle = color;
         ctx.beginPath();
-        ctx.arc(sx, sy, r0, 0, Math.PI * 2);
+        ctx.ellipse(sx, sy, r0, r0 * tilt, 0, 0, Math.PI * 2);
         ctx.fill();
         ctx.fillStyle = "rgba(255,255,255,0.25)";
         ctx.beginPath();
-        ctx.arc(sx - r0 * 0.28, sy - r0 * 0.28, r0 * 0.32, 0, Math.PI * 2);
+        ctx.ellipse(sx - r0 * 0.28, sy - r0 * 0.28, r0 * 0.32, r0 * 0.32 * tilt, 0, 0, Math.PI * 2);
         ctx.fill();
         ctx.shadowBlur = 0;
         ctx.fillStyle = "white";
@@ -820,6 +734,7 @@ export class ClashShowdown {
   private renderRespawnShields(ctx: CanvasRenderingContext2D): void {
     if (this.teamSize <= 1 || this.respawnPoints.size === 0) return;
     const PRESPAWN_ANIM = 1.1;
+    const tilt = getBattleGroundTilt();
     for (const [id, point] of this.respawnPoints.entries()) {
       const timer = this.respawnTimers.get(id);
       if (timer === undefined) continue;
@@ -831,38 +746,54 @@ export class ClashShowdown {
       ctx.globalAlpha = 0.18 + phase * 0.4;
       ctx.fillStyle = "rgba(80,180,255,0.25)";
       ctx.beginPath();
-      ctx.arc(sx, sy, radius, 0, Math.PI * 2);
+      ctx.ellipse(sx, sy, radius, radius * tilt, 0, 0, Math.PI * 2);
       ctx.fill();
       ctx.globalAlpha = 0.4 + phase * 0.5;
       ctx.strokeStyle = "#80D8FF";
       ctx.lineWidth = 2.2;
       ctx.beginPath();
-      ctx.arc(sx, sy, radius + 3, 0, Math.PI * 2);
+      ctx.ellipse(sx, sy, radius + 3, (radius + 3) * tilt, 0, 0, Math.PI * 2);
       ctx.stroke();
       ctx.restore();
     }
   }
 
-  private renderGas(ctx: CanvasRenderingContext2D, _iso: number, viewH: number): void {
+  private renderGas(ctx: CanvasRenderingContext2D, viewH: number): void {
     ctx.save();
     const gsx = this.gas.centerX - this.camera.x;
     const gsy = this.gas.centerY - this.camera.y;
-    // Mask to visible world slab (same height as tile pass) — avoids huge evenodd rect + stroke in empty margins.
+    const tilt = getBattleGroundTilt();
+    const half = this.gas.safeHalfSize;
+    const halfX = half;
+    const halfY = half * tilt;
     const worldH = viewH + 120;
 
+    // Газ-облако — только GDevelop-частицы, без старой эллиптической анимации.
+    // Тёмная подложка остаётся, чтобы зона газа читалась даже на ярком фоне.
     ctx.beginPath();
     ctx.rect(-120, -120, CAM_W + 240, worldH);
-    ctx.arc(gsx, gsy, this.gas.safeRadius, 0, Math.PI * 2, true);
-    ctx.fillStyle = "rgba(0, 200, 0, 0.13)";
+    ctx.rect(gsx - halfX, gsy - halfY, halfX * 2, halfY * 2);
+    ctx.fillStyle = "rgba(28, 24, 36, 0.55)";
     ctx.fill("evenodd");
-    
-    ctx.strokeStyle = "rgba(0, 255, 0, 0.5)";
+
+    // Граница safe-зоны (квадрат).
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.75)";
     ctx.lineWidth = 3;
-    ctx.setLineDash([10, 5]);
+    ctx.setLineDash([12, 6]);
     ctx.beginPath();
-    ctx.arc(gsx, gsy, this.gas.safeRadius, 0, Math.PI * 2);
+    ctx.rect(gsx - halfX, gsy - halfY, halfX * 2, halfY * 2);
     ctx.stroke();
     ctx.setLineDash([]);
+
+    drawShowdownSmokeParticles(ctx, {
+      cx: gsx,
+      cy: gsy,
+      halfX,
+      halfY,
+      viewW: CAM_W,
+      viewH: worldH,
+    });
+
     ctx.restore();
   }
 
@@ -887,15 +818,10 @@ export class ClashShowdown {
         ctx.fillStyle = b.isPlayer ? "#FFD740" : "#90CAF9";
         ctx.font = "bold 12px Arial";
         ctx.textAlign = "left";
-        ctx.fillText(`${b.displayName || (b.isPlayer ? "Вы" : "Союзник")}: возр. через ${remaining}s`, bx + 8, by + 21);
+        ctx.fillText(tr("battle.respawnInLong", { name: b.displayName || (b.isPlayer ? tr("battle.you") : tr("battle.ally")), seconds: remaining }), bx + 8, by + 21);
       });
     }
 
-    ctx.fillStyle = "rgba(255,255,255,0.7)";
-    ctx.font = "11px Arial";
-    ctx.textAlign = "center";
-    ctx.fillText("WASD: движение | ЛКМ: атака | ПКМ/E: супер", 600, 760);
-    
     ctx.restore();
   }
 
@@ -903,8 +829,8 @@ export class ClashShowdown {
     const fakeTrophies = (name: string) => 300 + ((name.charCodeAt(0) * 37 + (name.charCodeAt(1) || 5) * 13) % 1700);
     const profile = getCurrentProfile();
     return [
-      { brawlerId: this.player.stats.id, displayName: this.player.displayName || "Игрок", team: this.player.team, isPlayer: true, level: this.player.level, trophies: profile?.trophies ?? 0 },
-      ...this.bots.slice(0, this.totalParticipants - 1).map(b => ({ brawlerId: b.stats.id, displayName: b.displayName || "Бот", team: b.team, isPlayer: false, level: b.level, trophies: fakeTrophies(b.displayName || "B") })),
+      participantFromBrawler(this.player, { team: this.player.team, isPlayer: true, trophies: profile?.trophies ?? 0, defaultName: tr("battle.player") }),
+      ...this.bots.slice(0, this.totalParticipants - 1).map(b => participantFromBrawler(b, { team: b.team, isPlayer: false, trophies: fakeTrophies(b.displayName || "B"), defaultName: tr("battle.bot") })),
     ];
   }
 
@@ -912,5 +838,6 @@ export class ClashShowdown {
     this.input.destroy();
     clearDamageNumbers();
     clearEffects();
+    resetShowdownSmokeParticles();
   }
 }

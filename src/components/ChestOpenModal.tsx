@@ -1,12 +1,18 @@
 import { useState, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
+import { useI18n, brawlerName, petName } from "../i18n";
 import { CHESTS, type ChestRarity, type ChestRoll } from "../utils/chests";
 import { BRAWLERS } from "../entities/BrawlerData";
 import { getPetById } from "../entities/PetData";
 import ChestItemScene from "./ChestItemScene";
 import BrawlerRevealModal from "./BrawlerRevealModal";
 import PetRevealModal from "./PetRevealModal";
+import PinRevealModal from "./PinRevealModal";
+import ProfileIconChestReveal from "./ProfileIconChestReveal";
+import { getProfileIconShopThumb, profileIconRewardFrameStyle } from "../utils/profileIconUtils";
+import { PROFILE_ICON_BY_ID } from "../data/profileIcons";
 import PetSvg from "./PetSvg";
+import PinIcon from "./PinIcon";
 import { CoinIcon, GemIcon, PowerIcon } from "./GameIcons";
 
 interface Props {
@@ -15,7 +21,7 @@ interface Props {
   onClose: () => void;
 }
 
-type Phase = "dropping" | "brawler" | "pet" | "collecting" | "done";
+type Phase = "dropping" | "brawler" | "brawlerDup" | "pet" | "pin" | "profileIcon" | "collecting" | "done";
 
 // ── Keyframes ─────────────────────────────────────────────────────────────────
 const STYLES = `
@@ -85,6 +91,7 @@ const STYLES = `
 
 // ── Summary ───────────────────────────────────────────────────────────────────
 function Summary({ rolls, def, onClose }: { rolls: ChestRoll[]; def: ReturnType<typeof CHESTS[keyof typeof CHESTS]>; onClose: () => void }) {
+  const { t } = useI18n();
   const base = (import.meta as any).env?.BASE_URL ?? "/";
   const coins = rolls.filter(r => r.type === "coins").reduce((s, r) => s + r.amount, 0);
   const gems  = rolls.filter(r => r.type === "gems").reduce((s, r) => s + r.amount, 0);
@@ -93,18 +100,51 @@ function Summary({ rolls, def, onClose }: { rolls: ChestRoll[]; def: ReturnType<
   const brawler = brawlerRoll?.brawlerId ? BRAWLERS.find(b => b.id === brawlerRoll.brawlerId) : null;
   const petRoll = rolls.find(r => r.type === "pet");
   const pet = petRoll?.petId ? getPetById(petRoll.petId) : null;
+  const pinRoll = rolls.find(r => r.type === "pin");
+  const pinId = pinRoll?.pinId;
+  const iconRoll = rolls.find(r => r.type === "profileIcon");
+  const iconId = iconRoll?.profileIconId;
+  const iconDef = iconId ? PROFILE_ICON_BY_ID.get(iconId) : null;
+  const dupRoll = rolls.find(r => r.type === "brawler" && r.brawlerDuplicate);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 20, animation: "summaryIn 0.5s ease-out" }}>
       <div style={{ fontSize: 18, fontWeight: 900, color: def.color, letterSpacing: 4, textShadow: `0 0 20px ${def.color}` }}>
-        ИТОГО
+        {t("chest.summary.total")}
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12, justifyContent: "center" }}>
-        {coins > 0 && <SummaryCard icon={<CoinIcon size={32} />}  color="#FFD700" value={coins} label="МОНЕТ" />}
-        {gems > 0  && <SummaryCard icon={<GemIcon size={32} />}   color="#40C4FF" value={gems}  label="КРИСТАЛЛОВ" />}
-        {power > 0 && <SummaryCard icon={<PowerIcon size={32} />} color="#CE93D8" value={power} label="ОП" />}
-        {def.drops.xp > 0 && <SummaryCard icon={<span style={{ fontSize: 32 }}>⭐</span>} color="#FFD700" value={def.drops.xp} label="ОПЫТ PASS" />}
-        {brawler && (
+        {coins > 0 && <SummaryCard icon={<CoinIcon size={32} />}  color="#FFD700" value={coins} label={t("chest.summary.coins")} />}
+        {gems > 0  && <SummaryCard icon={<GemIcon size={32} />}   color="#40C4FF" value={gems}  label={t("chest.summary.gems")} />}
+        {power > 0 && <SummaryCard icon={<PowerIcon size={32} />} color="#CE93D8" value={power} label={t("chest.summary.power")} />}
+        {def.drops.xp > 0 && <SummaryCard icon={<span style={{ fontSize: 32 }}>⭐</span>} color="#FFD700" value={def.drops.xp} label={t("chest.summary.passXp")} />}
+        {dupRoll?.brawlerId && (
+          <div style={{
+            background: "linear-gradient(180deg, rgba(255,215,64,0.2) 0%, rgba(0,0,0,0.55) 100%)",
+            border: "2px solid #FFD54F", borderRadius: 16, padding: "14px 20px",
+            display: "flex", alignItems: "center", gap: 12,
+          }}>
+            <span style={{ fontSize: 40 }}>✨</span>
+            <div>
+              <div style={{ fontSize: 9, color: "#FFD54F", fontWeight: 900, letterSpacing: 2 }}>{t("chest.summary.duplicateStar")}</div>
+              <div style={{ fontSize: 16, fontWeight: 900, color: "#FFD54F" }}>
+                {BRAWLERS.find(b => b.id === dupRoll.brawlerId)?.name}
+              </div>
+            </div>
+          </div>
+        )}
+        {iconId && (
+          <div style={{
+            background: "rgba(0,0,0,0.55)", border: "2px solid #CE93D8",
+            borderRadius: 16, padding: "14px 20px", display: "flex", alignItems: "center", gap: 12,
+          }}>
+            <img src={getProfileIconShopThumb(iconId)} alt="" style={profileIconRewardFrameStyle(48)} />
+            <div>
+              <div style={{ fontSize: 9, color: "#CE93D8", fontWeight: 900, letterSpacing: 2 }}>{t("chest.summary.icon")}</div>
+              <div style={{ fontSize: 16, fontWeight: 900, color: "#E1BEE7" }}>{iconDef?.label}</div>
+            </div>
+          </div>
+        )}
+        {brawler && !dupRoll && (
           <div style={{
             background: `linear-gradient(180deg, ${brawler.color}22 0%, rgba(0,0,0,0.55) 100%)`,
             border: `2px solid ${brawler.color}`,
@@ -112,11 +152,11 @@ function Summary({ rolls, def, onClose }: { rolls: ChestRoll[]; def: ReturnType<
             display: "flex", alignItems: "center", gap: 12,
             boxShadow: `0 0 32px ${brawler.color}55`,
           }}>
-            <img src={`${base}brawlers/${brawler.id}_front.png`} alt={brawler.name}
+            <img src={`${base}brawlers/${brawler.id}_front.png`} alt={brawlerName(brawler.id, brawler.name)}
               style={{ width: 60, height: 60, objectFit: "contain", filter: `drop-shadow(0 0 8px ${brawler.color})` }} />
             <div>
-              <div style={{ fontSize: 9, color: brawler.color, fontWeight: 900, letterSpacing: 2, marginBottom: 4 }}>🎉 НОВЫЙ БОЕЦ</div>
-              <div style={{ fontSize: 18, fontWeight: 900, color: brawler.color }}>{brawler.name}</div>
+              <div style={{ fontSize: 9, color: brawler.color, fontWeight: 900, letterSpacing: 2, marginBottom: 4 }}>{t("chest.summary.newBrawler")}</div>
+              <div style={{ fontSize: 18, fontWeight: 900, color: brawler.color }}>{brawlerName(brawler.id, brawler.name)}</div>
               <div style={{ fontSize: 10, color: "rgba(255,255,255,0.5)", letterSpacing: 2 }}>{brawler.role.toUpperCase()}</div>
             </div>
           </div>
@@ -131,9 +171,23 @@ function Summary({ rolls, def, onClose }: { rolls: ChestRoll[]; def: ReturnType<
           }}>
             <PetSvg pet={pet} size={64} animated haloPulse={false} />
             <div>
-              <div style={{ fontSize: 9, color: pet.color, fontWeight: 900, letterSpacing: 2, marginBottom: 4 }}>🐾 НОВЫЙ ПИТОМЕЦ</div>
-              <div style={{ fontSize: 18, fontWeight: 900, color: pet.color }}>{pet.name}</div>
+              <div style={{ fontSize: 9, color: pet.color, fontWeight: 900, letterSpacing: 2, marginBottom: 4 }}>{t("chest.summary.newPet")}</div>
+              <div style={{ fontSize: 18, fontWeight: 900, color: pet.color }}>{petName(pet.id, pet.name)}</div>
               <div style={{ fontSize: 10, color: "rgba(255,255,255,0.5)", letterSpacing: 1 }}>{pet.effectLabel}</div>
+            </div>
+          </div>
+        )}
+        {pinId && (
+          <div style={{
+            background: "rgba(0,0,0,0.55)",
+            border: "2px solid #CE93D8",
+            borderRadius: 16, padding: "14px 20px",
+            display: "flex", alignItems: "center", gap: 12,
+            boxShadow: "0 0 32px rgba(206,147,216,0.45)",
+          }}>
+            <PinIcon pinId={pinId} size={64} glow animated />
+            <div>
+              <div style={{ fontSize: 12, color: "#CE93D8", fontWeight: 900, letterSpacing: 2 }}>{t("chest.summary.newPin")}</div>
             </div>
           </div>
         )}
@@ -149,7 +203,7 @@ function Summary({ rolls, def, onClose }: { rolls: ChestRoll[]; def: ReturnType<
           textTransform: "uppercase", animation: "floatUp 2s ease-in-out infinite",
         }}
       >
-        ОТЛИЧНО
+        {t("chest.summary.great")}
       </button>
     </div>
   );
@@ -190,12 +244,15 @@ function CollectOverlay({ rolls }: { rolls: ChestRoll[] }) {
   const particles: { id: number; type: FlyType; ox: number; oy: number; delay: number }[] = [];
   let id = 0;
   for (const r of rolls) {
-    if (r.type === "brawler" || r.type === "pet") continue;
+    if (
+      r.type === "brawler" || r.type === "pet" || r.type === "pin" || r.type === "profileIcon"
+      || (r.type !== "coins" && r.type !== "gems" && r.type !== "powerPoints")
+    ) continue;
     const count = Math.min((r.amount > 20 ? 10 : r.amount > 5 ? 6 : 3), 12);
     for (let i = 0; i < count; i++) {
       particles.push({
         id: id++,
-        type: r.type as FlyType,
+        type: r.type,
         ox: (Math.random() - 0.5) * 160,
         oy: (Math.random() - 0.5) * 100,
         delay: i * 55,
@@ -207,6 +264,7 @@ function CollectOverlay({ rolls }: { rolls: ChestRoll[] }) {
     <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
       {particles.map(p => {
         const m = FLY_FX[p.type];
+        if (!m) return null;
         return (
           <div key={p.id} style={{
             position: "absolute", left: "50%", top: "50%",
@@ -226,17 +284,27 @@ function CollectOverlay({ rolls }: { rolls: ChestRoll[] }) {
 }
 
 // ── Item type meta (for overlay text) ────────────────────────────────────────
-const TYPE_META: Record<string, { icon: string; color: string; label: string }> = {
-  coins:       { icon: "🪙", color: "#FFD700", label: "монет" },
-  gems:        { icon: "💎", color: "#40C4FF", label: "кристаллов" },
-  powerPoints: { icon: "⚡", color: "#CE93D8", label: "очков" },
-};
+function useTypeMeta() {
+  const { t } = useI18n();
+  return {
+    coins:       { icon: "🪙", color: "#FFD700", label: t("chest.roll.coins") },
+    gems:        { icon: "💎", color: "#40C4FF", label: t("chest.roll.gems") },
+    powerPoints: { icon: "⚡", color: "#CE93D8", label: t("chest.roll.power") },
+  } as Record<string, { icon: string; color: string; label: string }>;
+}
 
 // ── Main modal ────────────────────────────────────────────────────────────────
 export default function ChestOpenModal({ rarity, rolls, onClose }: Props) {
+  const { t } = useI18n();
+  const TYPE_META = useTypeMeta();
   const def = CHESTS[rarity];
-  const phaseFor = (r: ChestRoll | undefined): Phase =>
-    r?.type === "brawler" ? "brawler" : r?.type === "pet" ? "pet" : "dropping";
+  const phaseFor = (r: ChestRoll | undefined): Phase => {
+    if (r?.type === "brawler") return r.brawlerDuplicate ? "brawlerDup" : "brawler";
+    if (r?.type === "pet") return "pet";
+    if (r?.type === "pin") return "pin";
+    if (r?.type === "profileIcon") return "profileIcon";
+    return "dropping";
+  };
   const [phase, setPhase]             = useState<Phase>(phaseFor(rolls[0]));
   const [currentDrop, setCurrentDrop] = useState(0);
   const canTapRef = useRef(true);
@@ -247,7 +315,7 @@ export default function ChestOpenModal({ rarity, rolls, onClose }: Props) {
   // remaining = items still to show AFTER the current one
   const remaining = currentDrop >= 0 ? rolls.length - currentDrop - 1 : rolls.length;
   const nextRoll = rolls[currentDrop + 1] ?? null;
-  const nextIsSpecial = nextRoll?.type === "brawler" || nextRoll?.type === "pet";
+  const nextIsSpecial = nextRoll?.type === "brawler" || nextRoll?.type === "pet" || nextRoll?.type === "pin" || nextRoll?.type === "profileIcon";
 
   // ── Advance to next item ──────────────────────────────────────────────────
   const advance = useCallback(() => {
@@ -270,14 +338,17 @@ export default function ChestOpenModal({ rarity, rolls, onClose }: Props) {
   // ── Tap handler (brawler/pet phases own their taps via their own modals) ──
   const handleTap = useCallback(() => {
     if (phase === "done") { onClose(); return; }
-    if (phase === "brawler" || phase === "pet") return;
+    if (phase === "brawler" || phase === "brawlerDup" || phase === "pet" || phase === "pin" || phase === "profileIcon") return;
     if (phase === "dropping") advance();
   }, [phase, advance, onClose]);
 
   // ── Render ─────────────────────────────────────────────────────────────────
-  const isResourceDrop = phase === "dropping" && roll && roll.type !== "brawler" && roll.type !== "pet";
-  const isBrawlerDrop  = phase === "brawler"  && roll?.type === "brawler";
+  const isResourceDrop = phase === "dropping" && roll && roll.type !== "brawler" && roll.type !== "pet" && roll.type !== "pin" && roll.type !== "profileIcon";
+  const isBrawlerDrop  = phase === "brawler"  && roll?.type === "brawler" && !roll.brawlerDuplicate;
+  const isBrawlerDup   = phase === "brawlerDup" && roll?.type === "brawler" && roll.brawlerDuplicate;
   const isPetDrop      = phase === "pet"      && roll?.type === "pet";
+  const isPinDrop      = phase === "pin"      && roll?.type === "pin";
+  const isIconDrop     = phase === "profileIcon" && roll?.type === "profileIcon";
   const meta = roll ? TYPE_META[roll.type] : null;
 
   const modal = (
@@ -350,12 +421,29 @@ export default function ChestOpenModal({ rarity, rolls, onClose }: Props) {
         />
       )}
 
+      {isBrawlerDup && roll.brawlerId && (
+        <BrawlerRevealModal
+          brawlerId={roll.brawlerId}
+          duplicate
+          onDone={() => advance()}
+        />
+      )}
+
       {/* ── Pet reveal (separate full-screen portal) ── */}
       {isPetDrop && roll.petId && (
         <PetRevealModal
           petId={roll.petId}
           onDone={() => advance()}
         />
+      )}
+
+      
+      {isPinDrop && roll.pinId && (
+        <PinRevealModal pinId={roll.pinId} onDone={() => advance()} />
+      )}
+
+      {isIconDrop && roll.profileIconId && (
+        <ProfileIconChestReveal iconId={roll.profileIconId} onDone={() => advance()} />
       )}
 
       {/* ── Collecting overlay ── */}
@@ -409,7 +497,7 @@ export default function ChestOpenModal({ rarity, rolls, onClose }: Props) {
           animation: "tapHint 2.5s ease-in-out infinite",
           zIndex: 3, whiteSpace: "nowrap",
         }}>
-          Нажмите для продолжения
+          {t("chest.tapContinue")}
         </div>
       )}
     </div>

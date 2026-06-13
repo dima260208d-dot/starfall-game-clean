@@ -1,17 +1,21 @@
 import { useEffect, useRef } from "react";
-import type { GameMode } from "../App";
-import { getPublishedMap, type EditorMode } from "../utils/mapEditorAPI";
+import type { GameMode, ShowdownFormat } from "../App";
+import { getActiveMap, editorModeForGameMode } from "../utils/mapSchedule";
 import { drawStarStrikePreview } from "../utils/starStrikeMapPreview";
+import { usePlatformLayout } from "../platform";
+import { useI18n } from "../i18n";
+import { getDevBattleMonsters } from "../utils/devBattleMonsters";
 
-interface Brawler { x: number; y: number; alive: boolean; inBush?: boolean; stats?: { id?: string }; hp?: number; maxHp?: number; }
+interface Brawler { x: number; y: number; alive: boolean; team?: string; inBush?: boolean; stats?: { id?: string }; hp?: number; maxHp?: number; }
 interface GameInstance {
-  player: Brawler;
+  player: Brawler & { team?: string };
   bots?: Brawler[];
   allies?: Brawler[];
   enemies?: Brawler[];
-  map: { width: number; height: number };
+  map: { width: number; height: number; tileSize?: number };
   /** Живая сетка (тренировка и др.) — превью миникарты как в бою. */
   tileGrid?: { cells: Uint8Array; width: number; height: number };
+  map?: { tileGrid?: { cells: Uint8Array; width: number; height: number } };
   over: boolean;
   gas?: { radius?: number; cx?: number; cy?: number };
 }
@@ -19,13 +23,16 @@ interface GameInstance {
 interface Props {
   gameRef: React.RefObject<GameInstance | null>;
   mode: GameMode;
+  showdownFormat?: ShowdownFormat;
+  positionStyle?: React.CSSProperties;
+  embedded?: boolean;
 }
 
 const MAP_SIZE = 150;
 const BASE = (import.meta as any).env?.BASE_URL ?? "/";
 const THUMB_GS = 60;
 const TILE_THUMB_COLORS: Record<number, string> = {
-  0: "#5a8c44", 1: "#8B6060", 2: "#607060", 3: "#4CAF50",
+  0: "#75A743", 1: "#8B6060", 2: "#607060", 3: "#4CAF50",
   4: "#1565C0", 5: "#BDBDBD", 6: "#C8A45A", 7: "#C2185B",
   9: "#558B2F", 10: "#8D6E63", 11: "#78909C", 12: "#FDD835",
 };
@@ -43,7 +50,7 @@ function drawLiveTileGridThumb(
 ): void {
   const cellW = mapW / gw;
   const cellH = mapH / gh;
-  ctx.fillStyle = colors[0] ?? "#5a8c44";
+  ctx.fillStyle = colors[0] ?? "#75A743";
   ctx.fillRect(mapX, mapY, mapW, mapH);
   for (let y = 0; y < gh; y++) {
     for (let x = 0; x < gw; x++) {
@@ -68,9 +75,12 @@ const MODE_BG: Record<string, string> = {
   bossraid: `${BASE}images/mode-crystals.png`,
 };
 
-export default function MiniMap({ gameRef, mode }: Props) {
+export default function MiniMap({ gameRef, mode, showdownFormat = "solo", positionStyle, embedded = false }: Props) {
   const cvs = useRef<HTMLCanvasElement>(null);
   const bgRef = useRef<HTMLImageElement | null>(null);
+  const { battle, tier, width, shortSide } = usePlatformLayout();
+  const isDesktop = tier === "desktop" || (width >= 1024 && shortSide > 520);
+  const minimapScale = embedded || isDesktop ? 1 : battle.minimapScale;
 
   useEffect(() => {
     const img = new Image();
@@ -100,14 +110,17 @@ export default function MiniMap({ gameRef, mode }: Props) {
       const mapH = mh * scale;
       const mapX = (MAP_SIZE - mapW) / 2;
       const mapY = (MAP_SIZE - mapH) / 2;
-      const modeForPreview: EditorMode =
-        (mode === "training" || mode === "megashowdown" ? "showdown" : mode === "bossraid" ? "crystals" : mode) as EditorMode;
-      const pubMap = getPublishedMap(modeForPreview);
+      // У каждого режима — своя опубликованная карта (включая bossraid и
+      // bounty). Тренировка / мега-столкновение / crystals фолбэчатся на
+      // showdown, потому что у них нет своих редакторских карт.
+      const modeForPreview = editorModeForGameMode(mode)
+        ?? ((mode === "training" || mode === "megashowdown" || mode === "crystals")
+          ? "showdown"
+          : null);
+      const pubMap = modeForPreview ? getActiveMap(modeForPreview) : null;
       const bg = bgRef.current;
-      if (mode === "training" && game.tileGrid) {
-        const { cells, width: gw, height: gh } = game.tileGrid;
-        drawLiveTileGridThumb(ctx, cells, gw, gh, mapX, mapY, mapW, mapH, TILE_THUMB_COLORS);
-      } else if (pubMap) {
+      const liveGrid = game.tileGrid ?? game.map?.tileGrid;
+      if (pubMap) {
         const cellW = mapW / THUMB_GS;
         const cellH = mapH / THUMB_GS;
         ctx.fillStyle = TILE_THUMB_COLORS[0];
@@ -132,6 +145,9 @@ export default function MiniMap({ gameRef, mode }: Props) {
             }
           }
         }
+      } else if (liveGrid && (mode === "training" || mode === "monsterInvasion" || mode === "monsterhide" || mode === "teamHunt")) {
+        const { cells, width: gw, height: gh } = liveGrid;
+        drawLiveTileGridThumb(ctx, cells, gw, gh, mapX, mapY, mapW, mapH, TILE_THUMB_COLORS);
       } else if (mode === "starstrike") {
         ctx.fillStyle = TILE_THUMB_COLORS[0];
         ctx.fillRect(mapX, mapY, mapW, mapH);
@@ -171,15 +187,56 @@ export default function MiniMap({ gameRef, mode }: Props) {
       }
 
       // Collect all enemies
-      const enemies: Brawler[] = game.enemies
+      let enemies: Brawler[] = game.enemies
         ? game.enemies.filter(b => b.alive)
         : [...(game.bots ?? []), ...(game.enemies ?? [])].filter(b => b.alive);
 
+      if (mode === "siege" || mode === "training" || mode === "bossraid" || mode === "monsterInvasion" || mode === "teamHunt") {
+        const devDots = getDevBattleMonsters()
+          .filter(m => m.alive)
+          .map(m => ({ x: m.x, y: m.y, alive: true, team: "red", inBush: m.inBush ?? false } as Brawler));
+        if (mode === "bossraid") {
+          const bossDots = (game.enemies ?? []).filter(b => b.alive);
+          enemies = [...bossDots, ...devDots];
+        } else if (devDots.length > 0) {
+          enemies = devDots;
+        }
+      }
+
       const allies: Brawler[] = (game.allies ?? []).filter(b => b.alive);
 
-      // Draw enemies as red dots — hide if they are in a bush (same as in-game visibility)
+      // Те же правила «куст раскрывает врага» что и в 3D-сцене (battle3DWorld):
+      // союзник, сам стоящий в кусте, «подсвечивает» 8 соседних клеток. Враг
+      // в кусте виден на миникарте, только если он стоит в одной из этих
+      // подсвеченных клеток (Chebyshev ≤ 1 по тайлам).
+      const cellSize = game.map.tileSize ?? 50;
+      interface FriendlyTile { tx: number; ty: number; inBush: boolean; }
+      const friendliesInBush: FriendlyTile[] = [];
+      const considerFriendly = (b: Brawler | undefined): void => {
+        if (!b || !b.alive || !b.inBush) return;
+        friendliesInBush.push({
+          tx: Math.floor(b.x / cellSize),
+          ty: Math.floor(b.y / cellSize),
+          inBush: true,
+        });
+      };
+      considerFriendly(game.player);
+      for (const a of allies) considerFriendly(a);
+
+      const isEnemyRevealed = (b: Brawler): boolean => {
+        if (!b.inBush) return true;
+        const bTx = Math.floor(b.x / cellSize);
+        const bTy = Math.floor(b.y / cellSize);
+        for (const f of friendliesInBush) {
+          if (Math.abs(bTx - f.tx) <= 1 && Math.abs(bTy - f.ty) <= 1) return true;
+        }
+        return false;
+      };
+
+      // Draw enemies as red dots — hide if they are in a bush AND no friendly is
+      // standing in a bush within 1 tile (same rule as in 3D world).
       for (const b of enemies) {
-        if (b.inBush) continue;
+        if (!isEnemyRevealed(b)) continue;
         const ex = mapX + b.x * scale;
         const ey = mapY + b.y * scale;
         ctx.beginPath();
@@ -228,21 +285,25 @@ export default function MiniMap({ gameRef, mode }: Props) {
       ctx.lineWidth = 1;
       ctx.strokeRect(0.5, 0.5, MAP_SIZE - 1, MAP_SIZE - 1);
 
-    }, 66); // ~15fps
+    }, 100);
 
     return () => clearInterval(id);
   }, [gameRef, mode]);
 
   return (
     <div style={{
-      position: "absolute",
-      top: 12,
-      right: 12,
-      zIndex: 8,
+      position: embedded ? "relative" : "absolute",
+      top: embedded ? undefined : 12,
+      right: embedded ? undefined : 12,
+      zIndex: embedded ? undefined : 8,
       borderRadius: 12,
       overflow: "hidden",
       boxShadow: "0 0 20px rgba(0,0,0,0.7), 0 0 0 1.5px rgba(255,255,255,0.15)",
       userSelect: "none",
+      flexShrink: embedded ? 0 : undefined,
+      transform: minimapScale === 1 ? undefined : `scale(${minimapScale})`,
+      transformOrigin: "top right",
+      ...positionStyle,
     }}>
       <canvas
         ref={cvs}
@@ -250,30 +311,72 @@ export default function MiniMap({ gameRef, mode }: Props) {
         height={MAP_SIZE}
         style={{ display: "block" }}
       />
-      {mode !== "starstrike" && mode !== "training" && <EnemyCounter gameRef={gameRef} />}
+      {mode !== "starstrike" && mode !== "training" && (
+        <BattleCounter gameRef={gameRef} mode={mode} showdownFormat={showdownFormat} />
+      )}
     </div>
   );
 }
 
-function EnemyCounter({ gameRef }: { gameRef: React.RefObject<GameInstance | null> }) {
+function countAliveTeams(fighters: Brawler[]): number {
+  const teams = new Set<string>();
+  for (const f of fighters) {
+    if (f.alive && f.team) teams.add(f.team);
+  }
+  return teams.size;
+}
+
+function countAliveEnemies(fighters: Brawler[], playerTeam: string | undefined): number {
+  if (!playerTeam) {
+    return fighters.filter(f => f.alive).length;
+  }
+  return fighters.filter(f => f.alive && f.team !== playerTeam).length;
+}
+
+function BattleCounter({
+  gameRef,
+  mode,
+  showdownFormat,
+}: {
+  gameRef: React.RefObject<GameInstance | null>;
+  mode: GameMode;
+  showdownFormat: ShowdownFormat;
+}) {
+  const { t } = useI18n();
   const spanRef = useRef<HTMLSpanElement>(null);
+  const useTeamCount = mode === "showdown" && (showdownFormat === "duo" || showdownFormat === "trio");
 
   useEffect(() => {
     const id = setInterval(() => {
       const g = gameRef.current;
       if (!g || !spanRef.current) return;
-      const source = g.enemies ?? [...(g.bots ?? []), ...(g.enemies ?? [])];
-      const total = source.length;
-      const alive = source.filter(b => b.alive).length;
-      spanRef.current.textContent = `⚔ Враги: ${alive} / ${total}`;
+      const allFighters: Brawler[] = [g.player, ...(g.bots ?? [])];
+      let value: number;
+      if (useTeamCount) {
+        value = countAliveTeams(allFighters);
+      } else if (mode === "siege" || mode === "training" || mode === "bossraid" || mode === "monsterInvasion") {
+        const devCount = getDevBattleMonsters().filter(m => m.alive).length;
+        const bossCount = mode === "bossraid"
+          ? (g.enemies ?? []).filter(b => b.alive).length
+          : 0;
+        value = devCount + bossCount;
+      } else {
+        value = countAliveEnemies(
+          g.enemies?.length ? g.enemies : allFighters,
+          g.player.team,
+        );
+      }
+      spanRef.current.textContent = useTeamCount
+        ? t("minimap.teams", { count: value })
+        : t("minimap.enemies", { count: value });
     }, 250);
     return () => clearInterval(id);
-  }, [gameRef]);
+  }, [gameRef, useTeamCount, mode, t]);
 
   return (
     <div style={{
       background: "rgba(0,0,0,0.75)",
-      color: "#FF7777",
+      color: useTeamCount ? "#FFD54F" : "#FF7777",
       fontSize: 10,
       fontWeight: 800,
       textAlign: "center",
@@ -281,7 +384,7 @@ function EnemyCounter({ gameRef }: { gameRef: React.RefObject<GameInstance | nul
       letterSpacing: 0.5,
       borderTop: "1px solid rgba(255,255,255,0.1)",
     }}>
-      <span ref={spanRef}>⚔ Враги: —</span>
+      <span ref={spanRef}>{useTeamCount ? t("minimap.teamsDash") : t("minimap.enemiesDash")}</span>
     </div>
   );
 }

@@ -1,5 +1,8 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { BRAWLERS, BRAWLER_LORE, BRAWLER_GEM_COST, BRAWLER_RARITY_LABEL, getScaledStats } from "../entities/BrawlerData";
+import { forwardRef, useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { BRAWLERS, BRAWLER_RARITY_LABEL, getBrawlerById, getScaledStats } from "../entities/BrawlerData";
+import { getEffectiveBrawlerGemCost, getEffectiveBrawlerLore, getEffectiveConstellation, subscribeCharacterBalanceChanges } from "../utils/characterBalance";
+import { PREVIEW_BRAWLERS, isPreviewBrawler } from "../entities/PreviewBrawlers";
 import { CHESTS, CHEST_RARITY_ORDER } from "../utils/chests";
 import {
   getCurrentProfile,
@@ -14,25 +17,89 @@ import {
   markBrawlerSeen,
   getBrawlerStarsCount,
   getBrawlerStars,
+  getUnclaimedBrawlerRankCount,
+  getUnclaimedBrawlerMasteryCount,
+  setEquippedMasteryTitle,
 } from "../utils/localStorageAPI";
 import BrawlerViewer3D from "../components/BrawlerViewer3D";
 import BrawlerRankRewardsModal from "../components/BrawlerRankRewardsModal";
-import BrawlerRevealModal from "../components/BrawlerRevealModal";
+import BrawlerRankBar, { RankBadgeIcon } from "../components/BrawlerRankBar";
+import { computeBrawlerRankBarState, MENU_RANK_BADGE_SCALE, rankBadgePixelSize } from "../utils/brawlerRankUI";
+import WinStreakFlame from "../components/WinStreakFlame";
+import { getBrawlerWinStreak, isWinStreakVisible } from "../utils/winStreak";
+import PinSelectModal from "../components/PinSelectModal";
 import { CoinIcon, GemIcon, PowerIcon } from "../components/GameIcons";
-import { BRAWLER_CONSTELLATIONS } from "../utils/constellations";
 import BrawlerConstellationView from "../components/BrawlerConstellationView";
+import GlowingStar, { GlowingStarStyles } from "../components/GlowingStar";
+import { PageBody } from "../components/PageChrome";
+import {
+  useI18n,
+  brawlerLore,
+  brawlerDescription,
+  brawlerAttackDesc,
+  brawlerSuperDesc,
+  brawlerName,
+  brawlerRole,
+  brawlerAttackName,
+  brawlerSuperName,
+  brawlerRarityLabel,
+  starName,
+  starEffect,
+} from "../i18n";
+
+import { getBrawlerDisplayName } from "../utils/brawlerDisplay";
+
+// Per-rarity card background (the avatar tile) — matches Brawl Stars colour code:
+// Legendary = yellow, Ultralegendary = rainbow, Mythic = red, Mega = orange,
+// Epic = purple, Rare = green.
+export const RARITY_AVATAR_BG: Record<string, string> = {
+  rare:           "linear-gradient(180deg, #66BB6A 0%, #2E7D32 100%)",
+  epic:           "linear-gradient(180deg, #AB47BC 0%, #4A148C 100%)",
+  mega:           "linear-gradient(180deg, #FFA726 0%, #E65100 100%)",
+  mythic:         "linear-gradient(180deg, #EF5350 0%, #B71C1C 100%)",
+  legendary:      "linear-gradient(180deg, #FFEB3B 0%, #FBC02D 100%)",
+  ultralegendary: "linear-gradient(180deg, #FF1744 0%, #FFEA00 25%, #00E676 50%, #00B0FF 75%, #D500F9 100%)",
+};
+
+/** Name plate in character detail — rarity-colored like reference banners. */
+const RARITY_NAME_PLATE: Record<string, { background: string; border: string; rarityColor: string }> = {
+  rare: {
+    background: "linear-gradient(160deg, rgba(46,125,50,0.92) 0%, rgba(27,94,32,0.96) 100%)",
+    border: "2px solid #81C784",
+    rarityColor: "#C8E6C9",
+  },
+  epic: {
+    background: "linear-gradient(160deg, rgba(106,27,154,0.92) 0%, rgba(74,20,140,0.96) 100%)",
+    border: "2px solid #CE93D8",
+    rarityColor: "#E1BEE7",
+  },
+  mega: {
+    background: "linear-gradient(160deg, rgba(239,108,0,0.92) 0%, rgba(191,54,12,0.96) 100%)",
+    border: "2px solid #FFB74D",
+    rarityColor: "#FFE0B2",
+  },
+  mythic: {
+    background: "linear-gradient(160deg, rgba(198,40,40,0.92) 0%, rgba(136,14,14,0.96) 100%)",
+    border: "2px solid #EF9A9A",
+    rarityColor: "#FFCDD2",
+  },
+  legendary: {
+    background: "linear-gradient(160deg, rgba(255,235,59,0.94) 0%, rgba(251,192,45,0.98) 100%)",
+    border: "2px solid #FFEB3B",
+    rarityColor: "#FFFDE7",
+  },
+  ultralegendary: {
+    background: "linear-gradient(135deg, #1a0a2e 0%, #6a1b9a 22%, #c2185b 42%, #f9a825 58%, #00838f 74%, #4527a0 100%)",
+    border: "2px solid #E8C547",
+    rarityColor: "#FFE082",
+  },
+};
+
+const GRID_RANK_BADGE_SIZE = rankBadgePixelSize(MENU_RANK_BADGE_SCALE, "compact");
 
 export type BrawlerSortKey = "rarity" | "name" | "level" | "hp" | "damage" | "speed" | "range";
 
-const SORT_OPTIONS: { key: BrawlerSortKey; label: string }[] = [
-  { key: "rarity", label: "По редкости" },
-  { key: "name",   label: "По имени" },
-  { key: "level",  label: "По уровню" },
-  { key: "hp",     label: "По здоровью" },
-  { key: "damage", label: "По урону" },
-  { key: "speed",  label: "По скорости" },
-  { key: "range",  label: "По дальности" },
-];
+const SORT_KEYS: BrawlerSortKey[] = ["rarity", "name", "level", "hp", "damage", "speed", "range"];
 
 export function sortBrawlers(
   list: typeof BRAWLERS,
@@ -57,30 +124,59 @@ export function sortBrawlers(
   return arr;
 }
 
+/** Unlocked fighters first; locked + coming-soon preview roster at the bottom. */
+export function partitionCharacterRoster(
+  profile: { unlockedBrawlers: string[]; brawlerLevels: Record<string, number> },
+  sortKey: BrawlerSortKey,
+): { main: typeof BRAWLERS; locked: typeof BRAWLERS } {
+  const unlockedSet = new Set(profile.unlockedBrawlers);
+  const main = BRAWLERS.filter(b => unlockedSet.has(b.id));
+  const locked = [
+    ...BRAWLERS.filter(b => !unlockedSet.has(b.id)),
+    ...PREVIEW_BRAWLERS,
+  ];
+  return {
+    main: sortBrawlers(main, sortKey, profile.brawlerLevels),
+    locked: sortBrawlers(locked, sortKey, profile.brawlerLevels),
+  };
+}
+
 interface CharacterSelectProps {
   onPickAsActive: (brawlerId: string) => void;
   onTraining: (brawlerId: string) => void;
+  onOpenMastery: (brawlerId: string) => void;
+  onOpenComic: (brawlerId: string) => void;
   onBack: () => void;
 }
 
-export default function CharacterSelect({ onPickAsActive, onTraining, onBack }: CharacterSelectProps) {
+export default function CharacterSelect({ onPickAsActive, onTraining, onOpenMastery, onOpenComic, onBack }: CharacterSelectProps) {
   const [profile, setProfile] = useState(getCurrentProfile());
   const [openId, setOpenId] = useState<string | null>(null);
+  const [lastViewedId, setLastViewedId] = useState<string | null>(null);
+  const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null);
   const [sortKey, setSortKey] = useState<BrawlerSortKey>("rarity");
   const [rankModalBrawlerId, setRankModalBrawlerId] = useState<string | null>(null);
   const [purchasedBrawler, setPurchasedBrawler] = useState<string | null>(null);
+  const [, setBalanceVersion] = useState(0);
+  const scrollToCardRef = useRef<(id: string, behavior?: ScrollBehavior) => void>(() => {});
 
   useEffect(() => {
     const t = setInterval(() => setProfile(getCurrentProfile()), 500);
     return () => clearInterval(t);
   }, []);
 
+  useEffect(() => subscribeCharacterBalanceChanges(() => {
+    setBalanceVersion(v => v + 1);
+  }), []);
+
   if (!profile) return null;
 
   const newBrawlers = profile.newBrawlers || [];
-  const detailBrawler = openId ? BRAWLERS.find(b => b.id === openId) || null : null;
+  const detailBrawler = openId ? getBrawlerById(openId) ?? null : null;
 
-  const handleOpenDetail = (id: string) => {
+  const handleOpenDetail = (id: string, rect: DOMRect | null) => {
+    setLastViewedId(id);
+    setAnchorRect(rect);
     setOpenId(id);
     if (newBrawlers.includes(id)) {
       markBrawlerSeen(id);
@@ -88,22 +184,50 @@ export default function CharacterSelect({ onPickAsActive, onTraining, onBack }: 
     }
   };
 
+  const handleCloseDetail = () => {
+    setOpenId(null);
+    setAnchorRect(null);
+    const id = lastViewedId ?? openId;
+    if (id) {
+      requestAnimationFrame(() => {
+        scrollToCardRef.current(id, "smooth");
+      });
+    }
+  };
+
   return (
     <>
-      {detailBrawler ? (
+      <GlowingStarStyles />
+      <CharacterGrid
+        profile={profile}
+        sortKey={sortKey}
+        onChangeSort={setSortKey}
+        onBack={onBack}
+        onOpen={handleOpenDetail}
+        onOpenRankModal={(id) => setRankModalBrawlerId(id)}
+        newBrawlers={newBrawlers}
+        dimmed={!!openId}
+        initialScrollId={profile.selectedBrawlerId}
+        scrollToCardRef={scrollToCardRef}
+      />
+      {detailBrawler && (
         <CharacterDetail
           brawler={detailBrawler}
+          anchorRect={anchorRect}
           level={profile.brawlerLevels[detailBrawler.id] || 1}
           coins={profile.coins}
           gems={profile.gems}
           powerPoints={profile.powerPoints}
           isActive={profile.selectedBrawlerId === detailBrawler.id}
           isUnlocked={isBrawlerUnlocked(profile, detailBrawler.id)}
-          onClose={() => setOpenId(null)}
+          onClose={handleCloseDetail}
           onHome={onBack}
           onPickAsActive={() => { onPickAsActive(detailBrawler.id); }}
           onTraining={() => onTraining(detailBrawler.id)}
           onOpenRankModal={() => setRankModalBrawlerId(detailBrawler.id)}
+          onOpenMastery={() => onOpenMastery(detailBrawler.id)}
+          onOpenComic={() => onOpenComic(detailBrawler.id)}
+          rankModalOpen={!!rankModalBrawlerId}
           onUpgrade={() => {
             const r = upgradeBrawler(detailBrawler.id);
             if (r.success) setProfile(getCurrentProfile());
@@ -118,22 +242,13 @@ export default function CharacterSelect({ onPickAsActive, onTraining, onBack }: 
             return r;
           }}
         />
-      ) : (
-        <CharacterGrid
-          profile={profile}
-          sortKey={sortKey}
-          onChangeSort={setSortKey}
-          onBack={onBack}
-          onOpen={handleOpenDetail}
-          onOpenRankModal={(id) => setRankModalBrawlerId(id)}
-          newBrawlers={newBrawlers}
-        />
       )}
-      {rankModalBrawlerId && (
+      {rankModalBrawlerId && typeof document !== "undefined" && createPortal(
         <BrawlerRankRewardsModal
           brawlerId={rankModalBrawlerId}
           onClose={() => { setRankModalBrawlerId(null); setProfile(getCurrentProfile()); }}
-        />
+        />,
+        document.body,
       )}
       {purchasedBrawler && (
         <BrawlerRevealModal
@@ -154,224 +269,480 @@ interface CharacterGridProps {
   sortKey: BrawlerSortKey;
   onChangeSort: (key: BrawlerSortKey) => void;
   onBack: () => void;
-  onOpen: (id: string) => void;
+  onOpen: (id: string, rect: DOMRect | null) => void;
   onOpenRankModal: (id: string) => void;
   newBrawlers?: string[];
+  dimmed?: boolean;
+  initialScrollId?: string;
+  scrollToCardRef: React.MutableRefObject<(id: string, behavior?: ScrollBehavior) => void>;
 }
 
-function CharacterGrid({ profile, sortKey, onChangeSort, onBack, onOpen, onOpenRankModal, newBrawlers = [] }: CharacterGridProps) {
+function scrollCardIntoView(
+  container: HTMLElement,
+  card: HTMLElement,
+  behavior: ScrollBehavior = "smooth",
+) {
+  const cRect = container.getBoundingClientRect();
+  const eRect = card.getBoundingClientRect();
+  const targetTop =
+    eRect.top - cRect.top + container.scrollTop - (cRect.height - eRect.height) / 2;
+  container.scrollTo({ top: Math.max(0, targetTop), behavior });
+}
+
+function CharacterGrid({
+  profile, sortKey, onChangeSort, onBack, onOpen, onOpenRankModal, newBrawlers = [],
+  dimmed = false, initialScrollId, scrollToCardRef,
+}: CharacterGridProps) {
   if (!profile) return null;
   const base = (import.meta as any).env?.BASE_URL ?? "/";
-  const sorted = sortBrawlers(BRAWLERS, sortKey, profile.brawlerLevels);
-  const unlockedCount = BRAWLERS.filter(b => profile.unlockedBrawlers.includes(b.id)).length;
+  const { main, locked } = partitionCharacterRoster(profile, sortKey);
+  const rosterBrawlers = [...main, ...locked];
+  const unlockedCount = main.length;
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const didInitialScroll = useRef(false);
+
+  const scrollToId = useCallback((id: string, behavior: ScrollBehavior = "smooth") => {
+    const container = scrollRef.current;
+    const card = cardRefs.current.get(id);
+    if (!container || !card) return;
+    scrollCardIntoView(container, card, behavior);
+  }, []);
+
+  useEffect(() => {
+    scrollToCardRef.current = scrollToId;
+  }, [scrollToId, scrollToCardRef]);
+
+  useEffect(() => {
+    if (!initialScrollId || didInitialScroll.current) return;
+    const t = requestAnimationFrame(() => {
+      scrollToId(initialScrollId, "instant");
+      didInitialScroll.current = true;
+    });
+    return () => cancelAnimationFrame(t);
+  }, [initialScrollId, main, locked, scrollToId]);
+
+  const registerCard = useCallback((id: string, el: HTMLDivElement | null) => {
+    if (el) cardRefs.current.set(id, el);
+    else cardRefs.current.delete(id);
+  }, []);
+
+  const openFromCard = (id: string) => {
+    scrollToId(id, "instant");
+    requestAnimationFrame(() => {
+      const el = cardRefs.current.get(id);
+      onOpen(id, el?.getBoundingClientRect() ?? null);
+    });
+  };
+
+  const { t } = useI18n();
+
+  const renderGridCard = (b: typeof BRAWLERS[number]) => {
+    const isPreview = isPreviewBrawler(b.id);
+    const lv = profile.brawlerLevels[b.id] || 1;
+    const isActive = !isPreview && profile.selectedBrawlerId === b.id;
+    const unlocked = !isPreview && profile.unlockedBrawlers.includes(b.id);
+    const isNew = !isPreview && newBrawlers.includes(b.id);
+    const rarityColor = CHESTS[b.rarity].borderColor;
+    const bTrophies = unlocked ? getBrawlerTrophies(profile, b.id) : 0;
+    const bPeak = profile.brawlerTrophyPeak?.[b.id] ?? bTrophies;
+    const bRank = unlocked ? computeBrawlerRankBarState(bTrophies, bPeak).badgeRank : 0;
+    const stars = unlocked ? getBrawlerStarsCount(profile, b.id) : 0;
+    const bWinStreak = unlocked ? getBrawlerWinStreak(profile, b.id) : 0;
+    const borderColor = isNew
+      ? "#FF4500"
+      : unlocked
+        ? (isActive ? b.color : rarityColor)
+        : "rgba(255,255,255,0.18)";
+
+    return (
+      <BrawlerGridCard
+        key={b.id}
+        ref={(el) => registerCard(b.id, el)}
+        brawler={b}
+        base={base}
+        level={lv}
+        isActive={isActive}
+        unlocked={unlocked}
+        isPreview={isPreview}
+        isNew={isNew}
+        trophies={bTrophies}
+        rank={bRank}
+        stars={stars}
+        winStreak={bWinStreak}
+        rarityColor={rarityColor}
+        borderColor={borderColor}
+        onOpen={isPreview ? () => {} : () => openFromCard(b.id)}
+        onOpenRankModal={() => onOpenRankModal(b.id)}
+      />
+    );
+  };
 
   return (
-    <div style={{
-      minHeight: "100%",
-      background: "linear-gradient(135deg, #112747 0%, #1b3f6e 50%, #2b5a92 100%)",
-      fontFamily: "'Segoe UI', Arial, sans-serif",
-      color: "white",
-      padding: 20,
-    }}>
+    <div
+      className="ui-page-bg"
+      style={{
+        height: "100%",
+        backgroundImage:
+          "radial-gradient(ellipse at 50% 0%, rgba(123,47,190,0.35) 0%, transparent 55%), linear-gradient(180deg, #060119 0%, #0a062d 50%, #050015 100%)",
+        fontFamily: "var(--app-font-sans)",
+        color: "var(--t-1)",
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+        opacity: dimmed ? 0.35 : 1,
+        transition: "opacity 0.25s ease",
+        pointerEvents: dimmed ? "none" : "auto",
+      }}
+    >
       <div style={{
+        flexShrink: 0,
         display: "flex", alignItems: "center", justifyContent: "space-between",
-        padding: "10px 20px 16px",
-        borderBottom: "1px solid rgba(255,255,255,0.08)",
-        marginBottom: 18,
+        padding: "14px 20px 12px",
+        borderBottom: "1px solid var(--bd-1)",
+        gap: 12,
       }}>
-        <button onClick={onBack} style={pillBtn}>← Назад</button>
+        <button onClick={onBack} className="ui-back-btn">← {t("common.back")}</button>
         <div style={{ textAlign: "center" }}>
-          <h2 style={{
-            margin: 0, fontSize: 26, fontWeight: 900,
-            background: "linear-gradient(135deg, #CE93D8, #FFD700)",
-            WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
-            letterSpacing: 2,
-          }}>
-            ПЕРСОНАЖИ
+          <h2 className="ui-page-title" style={{ margin: 0, fontSize: 26, letterSpacing: "0.12em" }}>
+            {t("char.title")}
           </h2>
-          <div style={{ fontSize: 11, color: "rgba(255,255,255,0.5)", marginTop: 2, fontWeight: 700, letterSpacing: 2 }}>
-            ОТКРЫТО {unlockedCount} / {BRAWLERS.length}
+          <div className="ui-eyebrow" style={{ marginTop: 4 }}>
+            {t("char.unlocked", { count: String(unlockedCount), total: String(rosterBrawlers.length) })}
           </div>
         </div>
         <ResourcesBar coins={profile.coins} gems={profile.gems} powerPoints={profile.powerPoints} />
       </div>
 
-      <div style={{ maxWidth: 1100, margin: "0 auto 16px", display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8 }}>
-        <span style={{ fontSize: 12, color: "rgba(255,255,255,0.55)", fontWeight: 700, letterSpacing: 1 }}>СОРТИРОВКА:</span>
+      <div style={{
+        flexShrink: 0,
+        maxWidth: 1100, margin: "0 auto", width: "100%",
+        padding: "0 20px 12px",
+        display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8,
+      }}>
+        <span className="ui-eyebrow">{t("char.sort")}</span>
         <select
           value={sortKey}
           onChange={(e) => onChangeSort(e.target.value as BrawlerSortKey)}
-          style={{
-            background: "rgba(0,0,0,0.5)",
-            border: "1px solid rgba(255,255,255,0.18)",
-            borderRadius: 8, padding: "6px 10px",
-            color: "white", fontSize: 12, fontWeight: 700,
-            cursor: "pointer",
-          }}
+          className="ui-input"
+          style={{ width: "auto", padding: "6px 12px", fontSize: 12, fontWeight: 700 }}
         >
-          {SORT_OPTIONS.map(o => (
-            <option key={o.key} value={o.key} style={{ background: "#0a0040" }}>{o.label}</option>
+          {SORT_KEYS.map(key => (
+            <option key={key} value={key} style={{ background: "#0a0040" }}>{t(`char.sort.${key}`)}</option>
           ))}
         </select>
       </div>
 
-      <div style={{
-        maxWidth: 1100, margin: "0 auto",
-        display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 18,
-      }}>
-        {sorted.map((b) => {
-          const lv = profile.brawlerLevels[b.id] || 1;
-          const isActive = profile.selectedBrawlerId === b.id;
-          const unlocked = profile.unlockedBrawlers.includes(b.id);
-          const isNew = newBrawlers.includes(b.id);
-          const rarityColor = CHESTS[b.rarity].borderColor;
-          const bTrophies = unlocked ? getBrawlerTrophies(profile, b.id) : 0;
-          const bRank = unlocked ? getBrawlerRank(bTrophies) : 0;
-          const stars = unlocked ? getBrawlerStarsCount(profile, b.id) : 0;
-          const borderColor = isNew
-            ? "#FF4500"
-            : unlocked
-              ? (isActive ? b.color : rarityColor)
-              : "rgba(255,255,255,0.18)";
+      <PageBody ref={scrollRef} style={{ padding: "8px 20px 24px" }}>
+      <div style={{ maxWidth: 1100, margin: "0 auto" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 18 }}>
+          {main.map((b) => renderGridCard(b))}
+        </div>
 
-          return (
-            <div
-              key={b.id}
-              role="button"
-              tabIndex={0}
-              onClick={() => onOpen(b.id)}
-              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(b.id); } }}
-              style={{
-                background: `linear-gradient(180deg, ${rarityColor}22 0%, rgba(0,0,0,0.5) 80%)`,
-                border: `2px solid ${borderColor}`,
-                borderRadius: 18,
-                padding: "18px 14px",
-                cursor: "pointer",
-                color: "white",
-                textAlign: "center",
-                position: "relative",
-                transition: "transform 0.15s, box-shadow 0.15s",
-                boxShadow: isActive
-                  ? `0 0 25px ${b.color}aa`
-                  : unlocked ? `0 0 14px ${rarityColor}55` : "none",
-                opacity: unlocked ? 1 : 0.85,
-              }}
-              onMouseOver={(e) => { e.currentTarget.style.transform = "translateY(-4px)"; e.currentTarget.style.boxShadow = `0 6px 25px ${rarityColor}cc`; }}
-              onMouseOut={(e) => { e.currentTarget.style.transform = ""; e.currentTarget.style.boxShadow = isActive ? `0 0 25px ${b.color}aa` : (unlocked ? `0 0 14px ${rarityColor}55` : "none"); }}
-            >
-              {/* Rarity badge top-left */}
-              <div style={{
-                position: "absolute", top: 8, left: 10,
-                background: rarityColor, color: "white",
-                fontSize: 9, fontWeight: 900,
-                borderRadius: 6, padding: "2px 7px",
-                letterSpacing: 1,
-                textShadow: "0 1px 2px rgba(0,0,0,0.5)",
-              }}>{BRAWLER_RARITY_LABEL[b.rarity]}</div>
-
-              {isNew && (
-                <div style={{
-                  position: "absolute", top: 8, right: 10,
-                  background: "linear-gradient(135deg, #FF4500, #FF6B00)",
-                  color: "white",
-                  fontSize: 10, fontWeight: 900,
-                  borderRadius: 8, padding: "2px 8px",
-                  letterSpacing: 1,
-                  boxShadow: "0 0 12px rgba(255,69,0,0.8)",
-                  animation: "pulse 1.4s ease-in-out infinite",
-                }}>НОВОЕ</div>
-              )}
-
-              {isActive && !isNew && (
-                <div style={{
-                  position: "absolute", top: 8, right: 10,
-                  background: b.color, color: "white",
-                  fontSize: 10, fontWeight: 800,
-                  borderRadius: 8, padding: "2px 8px",
-                  letterSpacing: 1,
-                }}>ВЫБРАН</div>
-              )}
-
-              {unlocked && (
-                <button
-                  onClick={(e) => { e.stopPropagation(); onOpenRankModal(b.id); }}
-                  title="Награды за ранги"
-                  style={{
-                    position: "absolute", top: isActive ? 32 : 8, right: 10,
-                    background: "linear-gradient(135deg, #F9A825, #FFD700)",
-                    color: "#000",
-                    fontSize: 10, fontWeight: 900, letterSpacing: 0.5,
-                    borderRadius: 8, padding: "2px 8px",
-                    border: "1px solid rgba(0,0,0,0.4)",
-                    boxShadow: "0 2px 6px rgba(0,0,0,0.45)",
-                    cursor: "pointer",
-                    fontFamily: "inherit",
-                  }}
-                >РАНГ {bRank}/{MAX_BRAWLER_RANK}</button>
-              )}
-
-              <div style={{
-                width: 130, height: 130, margin: "0 auto",
-                marginTop: 6,
-                background: `radial-gradient(circle at 50% 60%, ${unlocked ? b.color : rarityColor}55, transparent 70%)`,
-                borderRadius: 14,
-                display: "flex", alignItems: "flex-end", justifyContent: "center",
-                position: "relative",
-              }}>
-                <img
-                  src={`${base}brawlers/${b.id}_front.png`}
-                  alt={b.name}
-                  style={{
-                    maxWidth: "100%", maxHeight: "100%",
-                    filter: unlocked
-                      ? `drop-shadow(0 4px 10px ${b.color})`
-                      : "grayscale(0.85) brightness(0.55) drop-shadow(0 4px 8px rgba(0,0,0,0.6))",
-                  }}
-                />
-                {!unlocked && (
-                  <div style={{
-                    position: "absolute", inset: 0,
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    fontSize: 50,
-                    textShadow: "0 2px 8px rgba(0,0,0,0.8)",
-                    pointerEvents: "none",
-                  }}>🔒</div>
-                )}
+        {locked.length > 0 && (
+          <>
+            <div style={{
+              margin: "28px 0 20px",
+              display: "flex",
+              alignItems: "center",
+              gap: 14,
+            }}>
+              <div style={{ flex: 1, height: 1, background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent)" }} />
+              <div className="ui-eyebrow" style={{ letterSpacing: "0.14em", whiteSpace: "nowrap" }}>
+                {t("char.sectionLockedSoon")}
               </div>
-              <div style={{
-                marginTop: 10, fontSize: 18, fontWeight: 800,
-                color: unlocked ? b.color : "rgba(255,255,255,0.7)",
-                letterSpacing: 1,
-              }}>
-                {b.name}
-              </div>
-              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.55)", marginTop: 2, fontWeight: 600, letterSpacing: 1 }}>
-                {b.role.toUpperCase()}
-              </div>
-              <div style={{
-                marginTop: 10,
-                display: "inline-block",
-                background: "rgba(0,0,0,0.5)",
-                border: `1px solid ${unlocked ? b.color : "rgba(255,255,255,0.2)"}`,
-                borderRadius: 8, padding: "3px 12px",
-                fontSize: 12, fontWeight: 800,
-                color: unlocked ? "#FFD700" : "rgba(255,255,255,0.5)",
-                letterSpacing: 1,
-              }}>
-                {unlocked ? `УР ${lv} • 🏆 ${bTrophies}` : `💎 ${BRAWLER_GEM_COST[b.rarity]}`}
-              </div>
-              {unlocked && (
-                <div style={{ marginTop: 6, fontSize: 11, fontWeight: 800, color: "#FFD740" }}>
-                  ✨ {stars}/6
-                </div>
-              )}
+              <div style={{ flex: 1, height: 1, background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent)" }} />
             </div>
-          );
-        })}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 18 }}>
+              {locked.map((b) => renderGridCard(b))}
+            </div>
+          </>
+        )}
       </div>
+      </PageBody>
     </div>
   );
 }
+
+// =========================================================================
+// Brawl Stars–style avatar card used in the character selection grid
+// =========================================================================
+
+function BrawlerCardStarSlot({ filled }: { filled: boolean }) {
+  return <GlowingStar filled={filled} size="100%" />;
+}
+
+interface BrawlerGridCardProps {
+  brawler: typeof BRAWLERS[number];
+  base: string;
+  level: number;
+  isActive: boolean;
+  unlocked: boolean;
+  isPreview?: boolean;
+  isNew: boolean;
+  trophies: number;
+  rank: number;
+  stars: number;
+  winStreak?: number;
+  rarityColor: string;
+  borderColor: string;
+  onOpen: () => void;
+  onOpenRankModal: () => void;
+}
+
+const BrawlerGridCard = forwardRef<HTMLDivElement, BrawlerGridCardProps>(function BrawlerGridCard({
+  brawler: b, base, level, isActive, unlocked, isPreview = false, isNew,
+  trophies, rank, stars, winStreak = 0, rarityColor, borderColor, onOpen, onOpenRankModal,
+}, ref) {
+  const { t } = useI18n();
+  const avatarBg = RARITY_AVATAR_BG[b.rarity] ?? `linear-gradient(180deg, ${b.color} 0%, rgba(0,0,0,0.6) 100%)`;
+  const russianName = getBrawlerDisplayName(b);
+  // The big star is shown for each of the 6 constellation slots; only owned ones glow.
+  const starSlots = [0, 1, 2, 3, 4, 5];
+
+  return (
+    <div
+      ref={ref}
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}
+      style={{
+        position: "relative",
+        width: "100%",
+        aspectRatio: "1 / 1.18",
+        borderRadius: 18,
+        overflow: "hidden",
+        border: `2.5px solid ${borderColor}`,
+        background: avatarBg,
+        cursor: isPreview ? "default" : "pointer",
+        boxShadow: isActive
+          ? `0 0 25px ${b.color}aa, 0 0 0 2px ${b.color} inset`
+          : unlocked ? `0 6px 20px ${rarityColor}55` : "0 4px 14px rgba(0,0,0,0.4)",
+        transition: "transform 0.15s, box-shadow 0.15s",
+        userSelect: "none",
+        opacity: isPreview ? 0.92 : 1,
+      }}
+      onMouseOver={(e) => { if (!isPreview) e.currentTarget.style.transform = "translateY(-4px)"; }}
+      onMouseOut={(e) => { if (!isPreview) e.currentTarget.style.transform = ""; }}
+    >
+      {/* Avatar artwork — Brawl Stars-style head & shoulders portrait */}
+      <img
+        src={`${base}brawlers/avatars/${b.id}.png`}
+        alt={getBrawlerDisplayName(b)}
+        style={{
+          position: "absolute",
+          inset: 0,
+          width: "100%",
+          height: "calc(100% - 56px)", // leave room for the gold bar
+          objectFit: "cover",
+          objectPosition: "center top",
+          display: "block",
+          filter: isPreview ? "none" : (unlocked ? "none" : "grayscale(0.9) brightness(0.5)"),
+        }}
+        onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+      />
+
+      {/* Preview / coming soon badge */}
+      {isPreview && (
+        <div style={{
+          position: "absolute", top: 8, right: 8,
+          background: "linear-gradient(135deg, #455A64, #263238)",
+          color: "white", fontSize: 10, fontWeight: 900,
+          borderRadius: 8, padding: "3px 8px",
+          letterSpacing: 1,
+          boxShadow: "0 2px 8px rgba(0,0,0,0.5)",
+        }}>СКОРО</div>
+      )}
+
+      {/* Locked overlay */}
+      {!unlocked && !isPreview && (
+        <div style={{
+          position: "absolute", inset: 0,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 58, textShadow: "0 4px 12px rgba(0,0,0,0.9)",
+          pointerEvents: "none",
+        }}>🔒</div>
+      )}
+
+      <style>{`
+        @keyframes brawlerPowerBurn {
+          0%, 100% {
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.5), 0 2px 5px rgba(0,0,0,0.45), 0 0 8px rgba(255,193,7,0.45);
+          }
+          50% {
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.65), 0 2px 6px rgba(0,0,0,0.5), 0 0 14px rgba(255,152,0,0.75), 0 0 22px rgba(255,193,7,0.35);
+          }
+        }
+      `}</style>
+
+      {/* TOP-LEFT: rank above trophies */}
+      <div style={{
+        position: "absolute", top: 8, left: 8,
+        display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 4,
+        pointerEvents: "none",
+      }}>
+        {unlocked && (
+          <button
+            type="button"
+            className="no-ui-shear"
+            onClick={(e) => { e.stopPropagation(); onOpenRankModal(); }}
+            title={t("char.rankRewards")}
+            style={{
+              pointerEvents: "auto",
+              position: "relative",
+              border: "none",
+              background: "transparent",
+              padding: 0,
+              cursor: "pointer",
+              fontFamily: "inherit",
+            }}
+          >
+            <RankBadgeIcon rank={rank} size={GRID_RANK_BADGE_SIZE} />
+            {(() => {
+              const n = getUnclaimedBrawlerRankCount(getCurrentProfile(), b.id);
+              if (n <= 0) return null;
+              return (
+                <span className="no-ui-shear" style={{
+                  position: "absolute", top: -4, right: -8,
+                  minWidth: 16, height: 16, borderRadius: 8,
+                  background: "#FF3D00", color: "#fff",
+                  fontSize: 9, fontWeight: 800,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  padding: "0 4px",
+                }}>{n}</span>
+              );
+            })()}
+          </button>
+        )}
+        {!isPreview && (
+        <div style={{
+          display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 3,
+        }}>
+          <div style={{
+            display: "inline-flex", alignItems: "center", gap: 4,
+            background: "rgba(0,0,0,0.62)",
+            backdropFilter: "blur(3px)",
+            WebkitBackdropFilter: "blur(3px)",
+            borderRadius: 999, padding: "3px 9px 3px 6px",
+            border: "1px solid rgba(255,255,255,0.18)",
+            boxShadow: "0 2px 6px rgba(0,0,0,0.45)",
+          }}>
+            <span style={{ fontSize: 14, lineHeight: 1, filter: "drop-shadow(0 1px 2px rgba(0,0,0,0.6))" }}>
+              {unlocked ? "🏆" : "💎"}
+            </span>
+            <span style={{
+              fontSize: 12, fontWeight: 900, color: unlocked ? "#FFD740" : "#80DEEA",
+              textShadow: "0 1px 2px rgba(0,0,0,0.8)",
+            }}>
+              {unlocked ? trophies : getEffectiveBrawlerGemCost(b.rarity)}
+            </span>
+          </div>
+          {unlocked && isWinStreakVisible(winStreak) && (
+            <WinStreakFlame streak={winStreak} size={28} />
+          )}
+        </div>
+        )}
+      </div>
+
+      {/* TOP-RIGHT: NEW / SELECTED badge */}
+      {isNew ? (
+        <div style={{
+          position: "absolute", top: 8, right: 8,
+          background: "linear-gradient(135deg, #FF4500, #FF6B00)",
+          color: "white", fontSize: 10, fontWeight: 900,
+          borderRadius: 8, padding: "3px 8px",
+          letterSpacing: 1,
+          boxShadow: "0 0 12px rgba(255,69,0,0.8)",
+          animation: "pulse 1.4s ease-in-out infinite",
+        }}>{t("common.new")}</div>
+      ) : isActive ? (
+        <div style={{
+          position: "absolute", top: 8, right: 8,
+          background: b.color, color: "white",
+          fontSize: 10, fontWeight: 900,
+          borderRadius: 8, padding: "3px 8px",
+          letterSpacing: 1,
+          boxShadow: `0 0 12px ${b.color}cc`,
+        }}>{t("char.selectedBadge")}</div>
+      ) : null}
+
+      {/* Russian name in the bottom-right of the avatar area (NOT obscuring the face) */}
+      <div style={{
+        position: "absolute",
+        right: 8,
+        bottom: 64, // sits just above the gold bar
+        maxWidth: "62%",
+        textAlign: "right",
+        padding: "4px 8px",
+        background: "linear-gradient(90deg, transparent 0%, rgba(0,0,0,0.55) 100%)",
+        borderRadius: 8,
+        fontSize: 16, fontWeight: 900,
+        letterSpacing: 0.5,
+        color: "white",
+        textShadow: "0 2px 4px rgba(0,0,0,0.95), 0 0 8px rgba(0,0,0,0.6)",
+        pointerEvents: "none",
+        lineHeight: 1.1,
+      }}>{russianName}</div>
+
+      {/* BOTTOM GOLD BAR: power level + constellation star slots */}
+      <div style={{
+        position: "absolute", left: 0, right: 0, bottom: 0,
+        height: 56,
+        background: "linear-gradient(180deg, #FFD54F 0%, #F9A825 55%, #C77800 100%)",
+        borderTop: "2px solid rgba(0,0,0,0.35)",
+        boxShadow: "inset 0 2px 0 rgba(255,255,255,0.35), inset 0 -3px 0 rgba(0,0,0,0.25)",
+        display: "flex", alignItems: "stretch",
+        padding: "0 6px 0 8px",
+        gap: 4,
+      }}>
+        <div
+          title={t("char.powerLevel")}
+          style={{
+            flexShrink: 0,
+            alignSelf: "center",
+            width: 40, height: 40, borderRadius: 999,
+            background: "radial-gradient(circle at 35% 28%, #FFFDE7 0%, #FFD54F 38%, #FF8F00 72%, #E65100 100%)",
+            border: "2px solid rgba(0,0,0,0.55)",
+            animation: unlocked ? "brawlerPowerBurn 1.8s ease-in-out infinite" : "none",
+            color: "#3E2723", fontWeight: 900, fontSize: 13,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            textShadow: "0 1px 0 rgba(255,255,255,0.55)",
+          }}
+        >
+          {unlocked ? level : "-"}
+        </div>
+
+        <div style={{
+          flex: 1,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "stretch",
+          gap: 2,
+          minWidth: 0,
+          padding: "4px 2px 4px 0",
+        }}>
+          {starSlots.map(i => (
+            <div
+              key={i}
+              style={{
+                flex: 1,
+                minWidth: 0,
+                height: "100%",
+                maxHeight: 46,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <BrawlerCardStarSlot filled={i < stars} />
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+});
 
 // =========================================================================
 // DETAIL VIEW
@@ -379,6 +750,7 @@ function CharacterGrid({ profile, sortKey, onChangeSort, onBack, onOpen, onOpenR
 
 interface CharacterDetailProps {
   brawler: typeof BRAWLERS[number];
+  anchorRect: DOMRect | null;
   level: number;
   coins: number;
   gems: number;
@@ -390,21 +762,29 @@ interface CharacterDetailProps {
   onPickAsActive: () => void;
   onTraining: () => void;
   onOpenRankModal: () => void;
+  onOpenMastery: () => void;
+  onOpenComic: () => void;
+  rankModalOpen?: boolean;
   onUpgrade: () => { success: boolean; error?: string };
   onUnlock: () => { success: boolean; error?: string };
 }
 
 function CharacterDetail({
   brawler, level, coins, gems, powerPoints, isActive, isUnlocked,
-  onClose, onHome, onPickAsActive, onTraining, onOpenRankModal, onUpgrade, onUnlock,
+  onClose, onHome, onPickAsActive, onTraining, onOpenRankModal, onOpenMastery, onOpenComic, rankModalOpen = false,
+  onUpgrade, onUnlock,
 }: CharacterDetailProps) {
-  const unlockCost = BRAWLER_GEM_COST[brawler.rarity];
+  const { t } = useI18n();
+  const vw = typeof window !== "undefined" ? window.innerWidth : 1200;
+  const vh = typeof window !== "undefined" ? window.innerHeight : 800;
+  const unlockCost = getEffectiveBrawlerGemCost(brawler.rarity);
   const canAffordUnlock = gems >= unlockCost;
   const rarityColor = CHESTS[brawler.rarity].borderColor;
-  const lore = BRAWLER_LORE[brawler.id] || brawler.description;
+  const namePlate = RARITY_NAME_PLATE[brawler.rarity] ?? RARITY_NAME_PLATE.rare;
+  const lore = brawlerLore(brawler.id, getEffectiveBrawlerLore(brawler.id) || brawler.description);
   const profile = getCurrentProfile();
   const detailTrophies = profile && isUnlocked ? getBrawlerTrophies(profile, brawler.id) : 0;
-  const detailRank = isUnlocked ? getBrawlerRank(detailTrophies) : 0;
+  const detailWinStreak = profile && isUnlocked ? getBrawlerWinStreak(profile, brawler.id) : 0;
   const scaled = getScaledStats(brawler, level);
   const isMax = level >= MAX_BRAWLER_LEVEL;
   const cost = upgradeBrawlerCost(level);
@@ -412,34 +792,63 @@ function CharacterDetail({
   const [msg, setMsg] = useState<string | null>(null);
   const [showStatsModal, setShowStatsModal] = useState(false);
   const [pickedStar, setPickedStar] = useState<number | null>(null);
+  const [showPinsModal, setShowPinsModal] = useState(false);
   const starsOwned = getBrawlerStars(profile, brawler.id);
 
   const handleUpgrade = () => {
-    if (!isUnlocked) { flash("Сначала разблокируйте бойца"); return; }
-    if (isMax) { flash("Максимальный уровень!"); return; }
-    if (!canAfford) { flash("Недостаточно ресурсов"); return; }
+    if (!isUnlocked) { flash(t("char.unlockFirst")); return; }
+    if (isMax) { flash(t("char.maxLevel")); return; }
+    if (!canAfford) { flash(t("char.notEnough")); return; }
     const r = onUpgrade();
-    flash(r.success ? "Боец прокачан!" : (r.error || "Ошибка"));
+    flash(r.success ? t("char.upgraded") : (r.error || t("common.error")));
   };
   const handleUnlock = () => {
-    if (!canAffordUnlock) { flash(`Нужно ${unlockCost} 💎`); return; }
+    if (!canAffordUnlock) { flash(t("char.needGems", { cost: String(unlockCost) })); return; }
     const r = onUnlock();
-    flash(r.success ? `${brawler.name} разблокирован!` : (r.error || "Ошибка"));
+    flash(r.success ? t("char.unlockedMsg", { name: brawlerName(brawler.id, brawler.name) }) : (r.error || t("common.error")));
   };
   function flash(text: string) {
     setMsg(text);
     setTimeout(() => setMsg(null), 1800);
   }
 
-  return (
-    <div style={{
-      minHeight: "100%",
-      background: `radial-gradient(ellipse at center, ${brawler.color}22 0%, #060025 60%, #03001a 100%)`,
-      fontFamily: "'Segoe UI', Arial, sans-serif",
-      color: "white",
-      position: "relative",
-      overflow: "hidden",
-    }}>
+  const base = (import.meta as any).env?.BASE_URL ?? "/";
+  const bgUrl = `${base}brawlers/backgrounds/${brawler.id}.png`;
+
+  const modal = (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 10000,
+        boxSizing: "border-box",
+      }}
+      onClick={onClose}
+    >
+      <div style={{
+        position: "absolute", inset: 0,
+        background: "rgba(3,0,26,0.55)",
+        backdropFilter: "blur(5px)",
+        WebkitBackdropFilter: "blur(5px)",
+      }} />
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          position: "relative",
+          width: "100%",
+          height: "100%",
+          backgroundImage: `url("${bgUrl}")`,
+          backgroundSize: "cover",
+          backgroundPosition: "center",
+          backgroundRepeat: "no-repeat",
+          backgroundColor: "#03001a",
+          fontFamily: "'Segoe UI', Arial, sans-serif",
+          color: "white",
+          borderRadius: 0,
+          overflow: "hidden",
+          boxShadow: `inset 0 0 0 2px ${brawler.color}66`,
+        }}
+      >
       <style>{`
         @keyframes floatY { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
       `}</style>
@@ -450,64 +859,41 @@ function CharacterDetail({
         display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8,
         maxWidth: 360,
       }}>
-        <button onClick={onClose} style={{ ...pillBtn, fontSize: 12 }}>← К списку</button>
+        <button onClick={onClose} style={{ ...pillBtn, fontSize: 12 }}>{t("char.backToList")}</button>
         <div style={{
-          background: `linear-gradient(135deg, ${brawler.color}, ${brawler.secondaryColor})`,
-          borderRadius: 14,
-          padding: "10px 18px",
-          boxShadow: `0 4px 20px ${brawler.color}88`,
+          background: namePlate.background,
+          border: namePlate.border,
+          padding: "10px 16px",
+          boxShadow: "0 4px 24px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.12)",
+          backdropFilter: "blur(6px)",
         }}>
-          <div style={{ fontSize: 26, fontWeight: 900, letterSpacing: 2, lineHeight: 1 }}>
-            {brawler.name.toUpperCase()}
+          <div style={{ fontSize: 24, fontWeight: 900, letterSpacing: 2, lineHeight: 1, color: "#fff" }}>
+            {brawlerName(brawler.id, brawler.name).toUpperCase()}
           </div>
-          <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: 3, opacity: 0.9, marginTop: 4 }}>
-            {brawler.role.toUpperCase()} • {isUnlocked ? `УР ${level}` : "ЗАБЛОКИРОВАН"}
+          <div style={{
+            fontSize: 11, fontWeight: 800, letterSpacing: 1.8, marginTop: 4,
+            color: namePlate.rarityColor,
+            textShadow: "0 1px 2px rgba(0,0,0,0.6)",
+          }}>
+            {brawlerRarityLabel(brawler.rarity, BRAWLER_RARITY_LABEL[brawler.rarity]).toUpperCase()}
           </div>
-        </div>
-
-        {/* Rarity badge */}
-        <div style={{
-          display: "inline-flex", alignItems: "center", gap: 6,
-          background: rarityColor, color: "white",
-          fontSize: 11, fontWeight: 900, letterSpacing: 2,
-          borderRadius: 10, padding: "5px 12px",
-          boxShadow: `0 2px 12px ${rarityColor}88`,
-          textShadow: "0 1px 2px rgba(0,0,0,0.5)",
-        }}>
-          ★ {BRAWLER_RARITY_LABEL[brawler.rarity]}
+          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 2.5, color: "rgba(255,255,255,0.92)", marginTop: 3 }}>
+            {brawlerRole(brawler.id, brawler.role).toUpperCase()}{!isUnlocked ? t("char.locked") : ""}
+          </div>
         </div>
 
         {isUnlocked && (
-          <button
-            onClick={onOpenRankModal}
-            title="Награды за ранги"
-            style={{
-              display: "inline-flex", alignItems: "center", gap: 10,
-              background: "rgba(0,0,0,0.55)",
-              border: "1px solid rgba(255,215,0,0.5)",
-              borderRadius: 12, padding: "8px 14px",
-              backdropFilter: "blur(8px)",
-              boxShadow: "0 0 16px rgba(255,215,0,0.25)",
-              cursor: "pointer", fontFamily: "inherit", color: "white",
-            }}
-          >
-            <span style={{
-              background: "linear-gradient(135deg, #F9A825, #FFD700)",
-              color: "#000",
-              fontSize: 11, fontWeight: 900, letterSpacing: 0.5,
-              borderRadius: 6, padding: "2px 8px",
-            }}>РАНГ {detailRank}/{MAX_BRAWLER_RANK}</span>
-            <span style={{
-              background: "linear-gradient(135deg, #311B92, #7B2FBE)",
-              color: "white",
-              fontSize: 11, fontWeight: 900, letterSpacing: 0.5,
-              borderRadius: 6, padding: "2px 8px",
-              border: "1px solid rgba(206,147,216,0.6)",
-            }}>⚡ СИЛА {level}</span>
-            <span style={{ color: "#FFD700", fontSize: 12, fontWeight: 800 }}>
-              🏆 {detailTrophies}
-            </span>
-          </button>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8 }}>
+            <BrawlerRankBar
+              brawlerId={brawler.id}
+              trophies={detailTrophies}
+              onClick={onOpenRankModal}
+              badgeScale={MENU_RANK_BADGE_SCALE}
+            />
+            {isWinStreakVisible(detailWinStreak) && (
+              <WinStreakFlame streak={detailWinStreak} size={40} />
+            )}
+          </div>
         )}
 
         {!isUnlocked && (
@@ -521,9 +907,9 @@ function CharacterDetail({
             maxWidth: 320,
           }}>
             <div style={{ fontSize: 10, color: rarityColor, fontWeight: 800, letterSpacing: 2, marginBottom: 6 }}>
-              🔒 КАК ОТКРЫТЬ
+              {t("char.howToUnlock")}
             </div>
-            Купите за 💎 {unlockCost} в магазине, выбейте из сундуков «{BRAWLER_RARITY_LABEL[brawler.rarity]}» или выше, либо тренируйтесь без выбора в активный слот.
+            {t("char.howToUnlockDesc", { cost: String(unlockCost), rarity: brawlerRarityLabel(brawler.rarity, BRAWLER_RARITY_LABEL[brawler.rarity]) })}
           </div>
         )}
 
@@ -538,10 +924,144 @@ function CharacterDetail({
           backdropFilter: "blur(8px)",
         }}>
           <div style={{ fontSize: 10, color: brawler.color, fontWeight: 800, letterSpacing: 2, marginBottom: 6 }}>
-            ИСТОРИЯ БОЙЦА
+            {t("char.history")}
           </div>
           {lore}
         </div>
+
+        {isUnlocked && (
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button
+              type="button"
+              onClick={onOpenMastery}
+              style={{
+                width: 60,
+                minWidth: 60,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "flex-end",
+                gap: 0,
+                padding: "0 2px 3px",
+                background: "linear-gradient(160deg, rgba(15,8,42,0.72), rgba(8,4,24,0.86))",
+                border: "1px solid rgba(186,104,255,0.45)",
+                borderRadius: 12,
+                cursor: "pointer",
+                boxShadow: "var(--sh-sm), inset 0 1px 0 rgba(255,255,255,0.06)",
+                position: "relative",
+                overflow: "visible",
+              }}
+            >
+              <div style={{
+                width: 60,
+                height: 52,
+                position: "relative",
+                flexShrink: 0,
+                overflow: "visible",
+              }}>
+                <img
+                  src={`${base}ui/nav-mastery.png`}
+                  alt=""
+                  className="ui-game-icon"
+                  style={{
+                    position: "absolute",
+                    left: "50%",
+                    bottom: -5,
+                    width: 64,
+                    height: 64,
+                    maxWidth: "none",
+                    transform: "translateX(-50%) scale(1.2)",
+                    transformOrigin: "50% 100%",
+                    pointerEvents: "none",
+                    zIndex: 2,
+                    filter: "drop-shadow(0 4px 12px rgba(186,104,255,0.75))",
+                  }}
+                />
+              </div>
+              <span style={{
+                fontSize: 8,
+                fontWeight: 900,
+                letterSpacing: 0.15,
+                color: "#fff",
+                whiteSpace: "nowrap",
+                lineHeight: 1.1,
+                textAlign: "center",
+                position: "relative",
+                zIndex: 1,
+                textShadow: "0 1px 2px rgba(0,0,0,0.85)",
+                WebkitFontSmoothing: "antialiased",
+              }}>
+                {t("nav.mastery")}
+              </span>
+              {profile && getUnclaimedBrawlerMasteryCount(profile, brawler.id) > 0 && (
+                <span style={{
+                  position: "absolute",
+                  top: 4,
+                  right: 4,
+                  minWidth: 16,
+                  height: 16,
+                  borderRadius: 8,
+                  background: "#FF1744",
+                  color: "#fff",
+                  fontSize: 9,
+                  fontWeight: 900,
+                  lineHeight: "16px",
+                  textAlign: "center",
+                }}>
+                  {getUnclaimedBrawlerMasteryCount(profile, brawler.id)}
+                </span>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={onOpenComic}
+              style={{
+                width: 60,
+                minWidth: 60,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "flex-end",
+                gap: 0,
+                padding: "0 2px 3px",
+                background: `linear-gradient(160deg, ${brawler.color}88, rgba(8,4,24,0.88))`,
+                border: `1px solid ${brawler.accentColor}88`,
+                borderRadius: 12,
+                cursor: "pointer",
+                boxShadow: `var(--sh-sm), 0 0 16px ${brawler.color}66, inset 0 1px 0 rgba(255,255,255,0.08)`,
+                position: "relative",
+                overflow: "hidden",
+              }}
+            >
+              <div style={{
+                width: 60,
+                height: 52,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 32,
+                textShadow: `0 4px 14px ${brawler.accentColor}`,
+              }}>
+                📖
+              </div>
+              <span style={{
+                fontSize: 8,
+                fontWeight: 900,
+                letterSpacing: 0.15,
+                color: "#fff",
+                whiteSpace: "nowrap",
+                lineHeight: 1.1,
+                textAlign: "center",
+                position: "relative",
+                zIndex: 1,
+                textShadow: "0 1px 2px rgba(0,0,0,0.85)",
+                WebkitFontSmoothing: "antialiased",
+              }}>
+                {t("nav.comic")}
+              </span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Top-right: resources + home button */}
@@ -555,7 +1075,7 @@ function CharacterDetail({
           background: "rgba(255,82,82,0.15)",
           border: "1px solid rgba(255,82,82,0.4)",
           color: "#FF8A80",
-        }}>🏠 Домой</button>
+        }}>{t("char.home")}</button>
       </div>
 
       {/* Center: brawler showcase */}
@@ -565,11 +1085,17 @@ function CharacterDetail({
         pointerEvents: "none",
       }}>
         <div style={{
-          width: 540, height: 540,
-          animation: "floatY 4s ease-in-out infinite",
+          width: Math.min(480, vw * 0.42),
+          height: Math.min(520, vh * 0.55),
+          animation: rankModalOpen ? undefined : "floatY 4s ease-in-out infinite",
           pointerEvents: "auto",
         }}>
-          <BrawlerViewer3D brawlerId={brawler.id} color={brawler.color} size={400} />
+          <BrawlerViewer3D
+            brawlerId={brawler.id}
+            color={brawler.color}
+            size={Math.min(380, vw * 0.34)}
+            paused={rankModalOpen}
+          />
         </div>
       </div>
 
@@ -581,24 +1107,26 @@ function CharacterDetail({
       }}>
         <button
           onClick={() => setShowStatsModal(true)}
+          className="ui-card is-interactive"
           style={{
-            background: "rgba(0,0,0,0.55)",
-            border: `1px solid ${brawler.color}55`,
-            borderRadius: 14, padding: "14px 16px",
-            backdropFilter: "blur(8px)",
-            color: "white", cursor: "pointer", textAlign: "left",
+            background: `linear-gradient(160deg, ${brawler.color}1f, rgba(8,4,24,0.78))`,
+            border: `1px solid ${brawler.color}66`,
+            borderRadius: "var(--r-lg)", padding: "14px 16px",
+            backdropFilter: "blur(12px) saturate(1.18)",
+            WebkitBackdropFilter: "blur(12px) saturate(1.18)",
+            color: "var(--t-1)", cursor: "pointer", textAlign: "left",
             fontFamily: "inherit",
-            transition: "transform 0.15s, box-shadow 0.15s, border-color 0.15s",
+            boxShadow: `var(--sh-sm), inset 0 1px 0 rgba(255,255,255,0.06)`,
           }}
           onMouseOver={(e) => {
             e.currentTarget.style.transform = "translateY(-2px)";
-            e.currentTarget.style.boxShadow = `0 6px 25px ${brawler.color}66`;
+            e.currentTarget.style.boxShadow = `0 8px 28px ${brawler.color}66, var(--sh-md), inset 0 1px 0 rgba(255,255,255,0.10)`;
             e.currentTarget.style.borderColor = brawler.color;
           }}
           onMouseOut={(e) => {
             e.currentTarget.style.transform = "";
-            e.currentTarget.style.boxShadow = "";
-            e.currentTarget.style.borderColor = `${brawler.color}55`;
+            e.currentTarget.style.boxShadow = `var(--sh-sm), inset 0 1px 0 rgba(255,255,255,0.06)`;
+            e.currentTarget.style.borderColor = `${brawler.color}66`;
           }}
         >
           <div style={{
@@ -606,61 +1134,59 @@ function CharacterDetail({
             marginBottom: 10,
           }}>
             <div style={{ fontSize: 11, color: brawler.color, fontWeight: 800, letterSpacing: 2 }}>
-              ХАРАКТЕРИСТИКИ
+              {t("char.stats")}
             </div>
             <div style={{ fontSize: 10, color: "rgba(255,255,255,0.5)", fontWeight: 700, letterSpacing: 1 }}>
-              ПОДРОБНЕЕ ▸
+              {t("char.details")}
             </div>
           </div>
-          <Stat label="ЗДОРОВЬЕ" value={scaled.hp.toString()} icon="❤️" color="#4CAF50" />
-          <Stat label="УРОН"     value={scaled.attackDamage.toString()} icon="⚔️" color="#FF5252" />
-          <Stat label="СКОРОСТЬ" value={brawler.speed.toFixed(1)} icon="👟" color="#40C4FF" />
-          <Stat label="ДАЛЬН-ТЬ" value={brawler.attackRange.toString()} icon="🎯" color="#CE93D8" />
-          <Stat label="РЕГЕН"    value={`${brawler.regenRate}/c`} icon="✨" color="#69F0AE" />
-          <Stat label="ЗАРЯДЫ"   value={brawler.attackCharges.toString()} icon="🔋" color="#FFD700" />
+          <Stat label={t("char.stat.hp")} value={scaled.hp.toString()} icon="❤️" color="#4CAF50" />
+          <Stat label={t("char.stat.damage")} value={scaled.attackDamage.toString()} icon="⚔️" color="#FF5252" />
+          <Stat label={t("char.stat.speed")} value={brawler.speed.toFixed(1)} icon="👟" color="#40C4FF" />
+          <Stat label={t("char.stat.range")} value={brawler.attackRange.toString()} icon="🎯" color="#CE93D8" />
+          <Stat label={t("char.stat.regen")} value={`${brawler.regenRate}/c`} icon="✨" color="#69F0AE" />
+          <Stat label={t("char.stat.charges")} value={brawler.attackCharges.toString()} icon="🔋" color="#FFD700" />
         </button>
 
         <button
           onClick={handleUpgrade}
           disabled={isMax || !isUnlocked}
+          className={`ui-btn ui-btn--block ${
+            !isUnlocked || isMax
+              ? "ui-btn--ghost"
+              : canAfford
+                ? "ui-btn--success"
+                : "ui-btn--danger"
+          }`}
           style={{
-            background: !isUnlocked
-              ? "rgba(255,255,255,0.05)"
-              : isMax
-                ? "rgba(255,255,255,0.06)"
-                : canAfford
-                  ? "linear-gradient(135deg, #2E7D32, #69F0AE)"
-                  : "rgba(255,82,82,0.15)",
-            border: !isUnlocked
-              ? "1px solid rgba(255,255,255,0.08)"
-              : isMax ? "1px solid rgba(255,255,255,0.1)" : `1px solid ${canAfford ? "#69F0AE" : "rgba(255,82,82,0.4)"}`,
-            borderRadius: 12, padding: "12px 14px",
-            color: !isUnlocked ? "rgba(255,255,255,0.35)" : "white",
-            fontWeight: 800, fontSize: 14, letterSpacing: 1,
-            cursor: (isMax || !isUnlocked) ? "default" : "pointer",
+            padding: "14px 16px",
+            fontSize: 14,
+            letterSpacing: "0.08em",
             display: "flex", flexDirection: "column", gap: 2,
           }}
         >
-          <span>{!isUnlocked ? "🔒 НЕДОСТУПНО" : isMax ? "✓ МАКС. УРОВЕНЬ" : `▲ УЛУЧШИТЬ ДО УР. ${level + 1}`}</span>
+          <span>{!isUnlocked ? t("char.lockedBtn") : isMax ? t("char.maxLevelBtn") : t("char.upgradeTo", { level: String(level + 1) })}</span>
           {isUnlocked && !isMax && (
-            <span style={{ fontSize: 11, opacity: 0.8, fontWeight: 700, display: "flex", alignItems: "center", gap: 4, justifyContent: "center" }}>
+            <span style={{ fontSize: 11, opacity: 0.85, fontWeight: 700, display: "flex", alignItems: "center", gap: 4, justifyContent: "center" }}>
               <CoinIcon size={14} /> {cost.coins} • <PowerIcon size={14} /> {cost.powerPoints}
             </span>
           )}
         </button>
         {isUnlocked && (
-          <div style={{
-            background: "rgba(0,0,0,0.55)",
-            border: `1px solid ${brawler.color}55`,
-            borderRadius: 14, padding: "10px 12px",
-            backdropFilter: "blur(8px)",
+          <div className="ui-card" style={{
+            background: `linear-gradient(160deg, rgba(255,213,79,0.12), rgba(8,4,24,0.78))`,
+            border: `1px solid ${brawler.color}66`,
+            borderRadius: "var(--r-lg)", padding: "12px 14px",
+            backdropFilter: "blur(10px)",
+            WebkitBackdropFilter: "blur(10px)",
+            boxShadow: "var(--sh-glow-gold), var(--sh-sm)",
           }}>
-            <div style={{ fontSize: 11, color: "#FFD740", fontWeight: 800, letterSpacing: 1, marginBottom: 6 }}>
-              ✨ СОЗВЕЗДИЕ {starsOwned.length}/6
+            <div className="ui-eyebrow" style={{ color: "var(--c-gold-3)", marginBottom: 8 }}>
+              {t("char.constellation", { count: String(starsOwned.length) })}
             </div>
             <BrawlerConstellationView brawlerId={brawler.id} ownedStars={starsOwned} onPick={setPickedStar} />
-            <div style={{ marginTop: 6, fontSize: 11, color: "rgba(255,255,255,0.7)" }}>
-              Купленные: {starsOwned.length ? starsOwned.map(i => `#${i}`).join(", ") : "нет"}
+            <div style={{ marginTop: 8, fontSize: 11, color: "var(--t-3)" }}>
+              {t("char.starsOwned", { list: starsOwned.length ? starsOwned.map(i => `#${i}`).join(", ") : t("char.starsNone") })}
             </div>
           </div>
         )}
@@ -675,59 +1201,85 @@ function CharacterDetail({
           <button
             onClick={onPickAsActive}
             disabled={isActive}
+            className={`ui-btn ui-btn--xl ${isActive ? "ui-btn--ghost" : ""}`}
             style={{
-              background: isActive
-                ? "rgba(255,255,255,0.06)"
-                : `linear-gradient(135deg, ${brawler.color}, ${brawler.secondaryColor})`,
-              border: "none", borderRadius: 14,
-              padding: "14px 32px",
-              color: "white", fontWeight: 900, fontSize: 16, letterSpacing: 2,
-              cursor: isActive ? "default" : "pointer",
-              boxShadow: isActive ? "none" : `0 4px 25px ${brawler.color}aa`,
+              ...(isActive ? {
+                ["--ui-shear-fill" as string]: "rgba(0,0,0,0.35)",
+                ["--ui-shear-border" as string]: "var(--bd-2)",
+                ["--ui-shear-text" as string]: "#FFFFFF",
+                ["--ui-shear-text-shadow" as string]: "0 0 12px rgba(255,255,255,0.85), 0 2px 6px rgba(0,0,0,0.9)",
+              } : {
+                ["--ui-shear-fill" as string]: `linear-gradient(135deg, ${brawler.color}, ${brawler.secondaryColor})`,
+                ["--ui-shear-border" as string]: brawler.color,
+                ["--ui-shear-shadow" as string]: `0 12px 32px ${brawler.color}aa, inset 0 1px 0 rgba(255,255,255,0.32)`,
+                ["--ui-shear-blur" as string]: "none",
+                ["--ui-shear-text" as string]: "#ffffff",
+                ["--ui-shear-text-shadow" as string]: "0 1px 3px rgba(0,0,0,0.65)",
+              }),
+              letterSpacing: "0.18em",
             }}
           >
-            {isActive ? "✓ УЖЕ ВЫБРАН" : "ВЫБРАТЬ"}
+            {isActive ? t("char.alreadySelected") : t("char.select")}
           </button>
         ) : (
           <button
             onClick={handleUnlock}
             disabled={!canAffordUnlock}
-            style={{
-              background: canAffordUnlock
-                ? `linear-gradient(135deg, #1976D2, #40C4FF)`
-                : "rgba(255,82,82,0.18)",
-              border: canAffordUnlock ? "none" : "1px solid rgba(255,82,82,0.45)",
-              borderRadius: 14, padding: "14px 28px",
-              color: "white", fontWeight: 900, fontSize: 16, letterSpacing: 2,
-              cursor: canAffordUnlock ? "pointer" : "default",
-              boxShadow: canAffordUnlock ? "0 4px 25px rgba(64,196,255,0.6)" : "none",
-              display: "flex", alignItems: "center", gap: 8,
-            }}
+            className={`ui-btn ui-btn--xl ${canAffordUnlock ? "ui-btn--cyan" : "ui-btn--danger"}`}
+            style={{ letterSpacing: "0.18em" }}
           >
-            💎 РАЗБЛОКИРОВАТЬ • {unlockCost}
+            {t("char.unlockBtn", { cost: String(unlockCost) })}
+          </button>
+        )}
+        {isUnlocked && (
+          <button
+            onClick={() => setShowPinsModal(true)}
+            className="ui-btn ui-btn--xl"
+            style={{
+              letterSpacing: "0.14em",
+              display: "inline-flex", alignItems: "center", gap: 8,
+              ["--ui-shear-text" as string]: "#ffffff",
+              ["--ui-shear-fill" as string]: "linear-gradient(135deg, #5C6BC0, #283593)",
+              ["--ui-shear-border" as string]: "#7E57C2",
+              ["--ui-shear-shadow" as string]: "0 4px 22px rgba(94,107,192,0.55), inset 0 1px 0 rgba(255,255,255,0.25)",
+              ["--ui-shear-blur" as string]: "none",
+            }}
+            title={t("char.pinsTitle")}
+          >
+            <span style={{ fontSize: 18, lineHeight: 1 }}>💬</span>
+            {t("char.pins")}
           </button>
         )}
         <button
           onClick={onTraining}
+          className="ui-btn ui-btn--primary ui-btn--xl"
           style={{
-            background: "linear-gradient(135deg, #FFAB40, #FFD700)",
-            border: "none", borderRadius: 14,
-            padding: "14px 32px",
-            color: "#3E2723", fontWeight: 900, fontSize: 16, letterSpacing: 2,
-            cursor: "pointer",
-            boxShadow: "0 4px 25px rgba(255,171,64,0.5)",
+            letterSpacing: "0.18em",
+            ["--ui-shear-shadow" as string]: "0 4px 25px rgba(255,171,64,0.5)",
           }}
         >
-          🎯 ИСПЫТАТЬ
+          {t("char.try")}
         </button>
       </div>
 
+      {showPinsModal && (
+        <PinSelectModal
+          brawlerId={brawler.id}
+          onClose={() => setShowPinsModal(false)}
+        />
+      )}
+
       {msg && (
-        <div style={{
-          position: "absolute", bottom: 90, left: "50%", transform: "translateX(-50%)",
-          background: "rgba(0,0,0,0.85)", border: `1px solid ${brawler.color}`,
-          borderRadius: 10, padding: "10px 18px", color: "white", fontWeight: 700, fontSize: 14,
-          backdropFilter: "blur(10px)", zIndex: 6,
+        <div className="ui-glass-strong" style={{
+          position: "absolute", bottom: 96, left: "50%", transform: "translateX(-50%)",
+          border: `1px solid ${brawler.color}`,
+          padding: "10px 22px",
+          color: "var(--t-1)",
+          fontWeight: 800,
+          fontSize: 14,
+          letterSpacing: "0.04em",
+          zIndex: 6,
+          boxShadow: `0 0 22px ${brawler.color}aa, var(--sh-md)`,
         }}>
           {msg}
         </div>
@@ -741,23 +1293,30 @@ function CharacterDetail({
           onClose={() => setShowStatsModal(false)}
         />
       )}
-      {pickedStar && (
+      {pickedStar && (() => {
+        const star = getEffectiveConstellation(brawler.id).find(s => s.index === pickedStar);
+        if (!star) return null;
+        return (
         <div onClick={() => setPickedStar(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 70, display: "flex", alignItems: "center", justifyContent: "center" }}>
           <div onClick={(e) => e.stopPropagation()} style={{ width: 440, maxWidth: "95vw", borderRadius: 14, border: "1px solid rgba(255,255,255,0.22)", background: "linear-gradient(180deg, rgba(23,7,44,0.95), rgba(9,3,20,0.95))", padding: 14 }}>
             <div style={{ fontSize: 18, color: "#FFD740", fontWeight: 900 }}>
-              {(BRAWLER_CONSTELLATIONS[brawler.id] || []).find(s => s.index === pickedStar)?.icon} {(BRAWLER_CONSTELLATIONS[brawler.id] || []).find(s => s.index === pickedStar)?.name}
+              {star.icon} {starName(brawler.id, star.index, star.name)}
             </div>
             <div style={{ marginTop: 8, fontSize: 13, color: "rgba(255,255,255,0.8)", lineHeight: 1.45 }}>
-              {(BRAWLER_CONSTELLATIONS[brawler.id] || []).find(s => s.index === pickedStar)?.effect}
+              {starEffect(brawler.id, star.index, star.effect)}
             </div>
             <div style={{ marginTop: 10, fontSize: 12, color: starsOwned.includes(pickedStar) ? "#FFD740" : "rgba(255,255,255,0.65)" }}>
-              {starsOwned.includes(pickedStar) ? "Звезда активна в бою" : "Звезда не куплена"}
+              {starsOwned.includes(pickedStar) ? t("char.starActive") : t("char.starNotOwned")}
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
+      </div>
     </div>
   );
+
+  return createPortal(modal, document.body);
 }
 
 // =========================================================================
@@ -772,7 +1331,9 @@ interface StatsModalProps {
 }
 
 function StatsModal({ brawler, level, scaled, onClose }: StatsModalProps) {
+  const { t } = useI18n();
   const base = (import.meta as any).env?.BASE_URL ?? "/";
+  const hits = Math.ceil(100 / brawler.superChargePerHit);
   return (
     <div
       onClick={onClose}
@@ -791,17 +1352,18 @@ function StatsModal({ brawler, level, scaled, onClose }: StatsModalProps) {
       `}</style>
       <div
         onClick={(e) => e.stopPropagation()}
+        className="ui-glass-strong"
         style={{
           position: "relative",
           width: "min(680px, 95vw)",
           maxHeight: "min(760px, 92vh)",
           overflowY: "auto",
-          background: `linear-gradient(180deg, ${brawler.color}22 0%, #0a0028 60%, #050018 100%)`,
-          border: `2px solid ${brawler.color}`,
-          borderRadius: 20,
-          boxShadow: `0 30px 80px rgba(0,0,0,0.7), 0 0 80px ${brawler.color}55`,
+          background: `linear-gradient(160deg, ${brawler.color}33 0%, rgba(10,0,40,0.95) 60%, rgba(5,0,24,0.95) 100%)`,
+          border: `1px solid ${brawler.color}`,
+          borderRadius: "var(--r-xl)",
+          boxShadow: `0 30px 80px rgba(0,0,0,0.7), 0 0 80px ${brawler.color}66, inset 0 1px 0 rgba(255,255,255,0.1)`,
           animation: "pop 0.25s ease",
-          color: "white",
+          color: "var(--t-1)",
         }}
       >
         {/* Header */}
@@ -814,57 +1376,74 @@ function StatsModal({ brawler, level, scaled, onClose }: StatsModalProps) {
           top: 0,
           zIndex: 1,
         }}>
-          <img
-            src={`${base}brawlers/${brawler.id}_front.png`}
-            alt={brawler.name}
-            style={{ width: 90, height: 90, objectFit: "contain", filter: "drop-shadow(0 4px 10px rgba(0,0,0,0.4))" }}
-          />
+          <div
+            style={{
+              width: 72,
+              height: 72,
+              borderRadius: 14,
+              overflow: "hidden",
+              flexShrink: 0,
+              background: RARITY_AVATAR_BG[brawler.rarity] ?? `linear-gradient(180deg, ${brawler.color} 0%, rgba(0,0,0,0.6) 100%)`,
+              boxShadow: "0 4px 12px rgba(0,0,0,0.35)",
+              border: "2px solid rgba(255,255,255,0.35)",
+            }}
+          >
+            <img
+              src={`${base}brawlers/avatars/${brawler.id}.png`}
+              alt={brawlerName(brawler.id, brawler.name)}
+              style={{
+                width: "100%",
+                height: "100%",
+                objectFit: "cover",
+                objectPosition: "center top",
+                display: "block",
+              }}
+              onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+            />
+          </div>
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 32, fontWeight: 900, letterSpacing: 2, lineHeight: 1 }}>
-              {brawler.name.toUpperCase()}
+              {brawlerName(brawler.id, brawler.name).toUpperCase()}
             </div>
             <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: 3, opacity: 0.9, marginTop: 6 }}>
-              {brawler.role.toUpperCase()} • УРОВЕНЬ {level}/{MAX_BRAWLER_LEVEL}
+              {brawlerRole(brawler.id, brawler.role).toUpperCase()} • {t("char.levelLine", { level: String(level), max: String(MAX_BRAWLER_LEVEL) })}
             </div>
           </div>
           <button
             onClick={onClose}
-            style={{
-              background: "rgba(0,0,0,0.4)", border: "1px solid rgba(255,255,255,0.3)",
-              borderRadius: 10, padding: "6px 12px",
-              color: "white", fontWeight: 800, cursor: "pointer", fontSize: 14,
-            }}
+            className="ui-back-btn"
+            style={{ padding: "6px 12px", fontSize: 14 }}
           >✕</button>
         </div>
 
         {/* Stats grid */}
         <div style={{ padding: "14px 18px" }}>
-          <SectionTitle color={brawler.color}>БОЕВЫЕ ХАРАКТЕРИСТИКИ</SectionTitle>
+          <SectionTitle color={brawler.color}>{t("char.combatStats")}</SectionTitle>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
-            <FullStat icon="❤️"  label="ЗДОРОВЬЕ"          value={`${scaled.hp}`}                  base={`${brawler.hp} базовый`} color="#4CAF50" />
-            <FullStat icon="⚔️"  label="УРОН АТАКИ"        value={`${scaled.attackDamage}`}        base={`${brawler.attackDamage} базовый`} color="#FF5252" />
-            <FullStat icon="👟"  label="СКОРОСТЬ"           value={brawler.speed.toFixed(1)}         base="клеток в секунду" color="#40C4FF" />
-            <FullStat icon="🎯"  label="ДАЛЬНОСТЬ"          value={`${brawler.attackRange}`}         base="радиус выстрела"  color="#CE93D8" />
-            <FullStat icon="✨"  label="РЕГЕНЕРАЦИЯ"        value={`${brawler.regenRate}/c`}         base="HP в секунду"     color="#69F0AE" />
-            <FullStat icon="🔋"  label="ЗАРЯДЫ АТАКИ"       value={`${brawler.attackCharges}`}       base="макс. одновременно" color="#FFD700" />
-            <FullStat icon="⏱"  label="ПЕРЕЗАРЯДКА"        value={`${brawler.attackCooldown.toFixed(1)}c`} base="между выстрелами" color="#FFAB40" />
-            <FullStat icon="⚡"  label="ОТКАТ СУПЕРА"       value={`${brawler.superCooldown}c`}      base="максимум"         color="#E040FB" />
-            <FullStat icon="🔆"  label="ЗАРЯД СУПЕРА"       value={`+${brawler.superChargePerHit}%`} base={`за попадание (≈${Math.ceil(100 / brawler.superChargePerHit)} попад.)`} color="#FFD740" />
+            <FullStat icon="❤️"  label={t("char.stat.hp")}          value={`${scaled.hp}`}                  base={t("char.baseHp", { value: String(brawler.hp) })} color="#4CAF50" />
+            <FullStat icon="⚔️"  label={t("char.attackDamage")}        value={`${scaled.attackDamage}`}        base={t("char.baseHp", { value: String(brawler.attackDamage) })} color="#FF5252" />
+            <FullStat icon="👟"  label={t("char.stat.speed")}           value={brawler.speed.toFixed(1)}         base={t("char.cellsPerSec")} color="#40C4FF" />
+            <FullStat icon="🎯"  label={t("char.rangeFull")}          value={`${brawler.attackRange}`}         base={t("char.shotRadius")}  color="#CE93D8" />
+            <FullStat icon="✨"  label={t("char.stat.regenFull")}        value={`${brawler.regenRate}/c`}         base={t("char.baseRegen")}     color="#69F0AE" />
+            <FullStat icon="🔋"  label={t("char.stat.attackChargesFull")}       value={`${brawler.attackCharges}`}       base={t("char.baseMaxCharges")} color="#FFD700" />
+            <FullStat icon="⏱"  label={t("char.stat.cooldown")}        value={`${brawler.attackCooldown.toFixed(1)}c`} base={t("char.baseBetweenShots")} color="#FFAB40" />
+            <FullStat icon="⚡"  label={t("char.stat.superCooldown")}       value={`${brawler.superCooldown}c`}      base={t("char.baseMax")}         color="#E040FB" />
+            <FullStat icon="🔆"  label={t("char.stat.superCharge")}       value={`+${brawler.superChargePerHit}%`} base={t("char.basePerHit", { hits: String(hits) })} color="#FFD740" />
           </div>
 
-          <SectionTitle color="#40C4FF">⚔️ ОСНОВНАЯ АТАКА — {brawler.attackName}</SectionTitle>
+          <SectionTitle color="#40C4FF">{t("char.attackSection", { name: brawlerAttackName(brawler.id, brawler.attackName) })}</SectionTitle>
           <div style={{ background: "rgba(64,196,255,0.08)", border: "1px solid rgba(64,196,255,0.3)", borderRadius: 12, padding: "10px 12px", fontSize: 12, lineHeight: 1.45, color: "rgba(255,255,255,0.85)", marginBottom: 10 }}>
-            {brawler.attackDesc}
+            {brawlerAttackDesc(brawler.id, brawler.attackDesc)}
           </div>
 
-          <SectionTitle color="#FFD700">⚡ СУПЕРСПОСОБНОСТЬ — {brawler.superName}</SectionTitle>
+          <SectionTitle color="#FFD700">{t("char.superSection", { name: brawlerSuperName(brawler.id, brawler.superName) })}</SectionTitle>
           <div style={{ background: "rgba(255,215,0,0.08)", border: "1px solid rgba(255,215,0,0.3)", borderRadius: 12, padding: "10px 12px", fontSize: 12, lineHeight: 1.45, color: "rgba(255,255,255,0.85)", marginBottom: 10 }}>
-            {brawler.superDesc}
+            {brawlerSuperDesc(brawler.id, brawler.superDesc)}
           </div>
 
-          <SectionTitle color={brawler.color}>📜 ОПИСАНИЕ</SectionTitle>
+          <SectionTitle color={brawler.color}>{t("char.descriptionSection")}</SectionTitle>
           <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, padding: "10px 12px", fontSize: 11, lineHeight: 1.35, color: "rgba(255,255,255,0.7)", fontStyle: "italic" }}>
-            {brawler.description}
+            {brawlerDescription(brawler.id, brawler.description)}
           </div>
         </div>
       </div>
@@ -949,9 +1528,10 @@ function Stat({ label, value, icon, color }: { label: string; value: string; ico
 }
 
 const pillBtn: React.CSSProperties = {
-  background: "rgba(255,255,255,0.07)",
-  border: "1px solid rgba(255,255,255,0.15)",
-  borderRadius: 10, padding: "7px 16px",
+  ["--ui-shear-fill" as string]: "rgba(255,255,255,0.07)",
+  ["--ui-shear-border" as string]: "rgba(255,255,255,0.15)",
+  ["--ui-shear-blur" as string]: "blur(8px)",
+  padding: "7px 16px",
   color: "rgba(255,255,255,0.85)",
   cursor: "pointer", fontSize: 13, fontWeight: 600,
 };

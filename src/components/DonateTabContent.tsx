@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useI18n } from "../i18n";
 import {
   GEM_PACKS, GEM_TO_COIN_PACKS, GEM_TO_POWER_PACKS,
   RUB_TO_POWER_PACKS, RUB_TO_COIN_PACKS,
@@ -9,10 +10,12 @@ import {
 } from "../utils/donateShop";
 import { CoinIcon, GemIcon, PowerIcon } from "./GameIcons";
 import RewardDropModal, { type RewardInfo } from "./RewardDropModal";
+import { shopBtnLabel, shopLabelOnFill } from "./shop/shopButtonStyles";
 
 interface Props { onPurchased: () => void }
 
 export default function DonateTabContent({ onPurchased }: Props) {
+  const { t } = useI18n();
   const [reward, setReward] = useState<RewardInfo | null>(null);
   const [err, setErr] = useState("");
 
@@ -25,41 +28,43 @@ export default function DonateTabContent({ onPurchased }: Props) {
 
   const handleGemPack = (pack: GemPack) => {
     const r = buyGemPack(pack.id);
-    if (!r.success) { showErr(r.error || "Ошибка"); return; }
+    if (!r.success) { showErr(r.error || t("common.error")); return; }
     onPurchased();
     setReward({
       type: "gems",
       amount: r.gemsAdded || 0,
-      label: `${r.gemsAdded} кристаллов${r.doubled ? " (×2 первая покупка!)" : ""}`,
+      label: r.doubled
+        ? t("donate.reward.gemsDouble", { count: r.gemsAdded || 0 })
+        : t("donate.reward.gems", { count: r.gemsAdded || 0 }),
     });
   };
 
   const handleCoinsForGems = (id: string, coins: number) => {
     const r = buyCoinsForGems(id);
-    if (!r.success) { showErr(r.error || "Ошибка"); return; }
+    if (!r.success) { showErr(r.error || t("common.error")); return; }
     onPurchased();
-    setReward({ type: "coins", amount: coins, label: `${coins} монет` });
+    setReward({ type: "coins", amount: coins, label: t("donate.reward.coins", { count: coins }) });
   };
 
   const handlePowerForGems = (id: string, pp: number) => {
     const r = buyPowerForGems(id);
-    if (!r.success) { showErr(r.error || "Ошибка"); return; }
+    if (!r.success) { showErr(r.error || t("common.error")); return; }
     onPurchased();
-    setReward({ type: "powerPoints", amount: pp, label: `${pp} очков силы` });
+    setReward({ type: "powerPoints", amount: pp, label: t("donate.reward.power", { count: pp }) });
   };
 
   const handlePowerForRub = (id: string, pp: number) => {
     const r = buyPowerForRub(id);
-    if (!r.success) { showErr(r.error || "Ошибка"); return; }
+    if (!r.success) { showErr(r.error || t("common.error")); return; }
     onPurchased();
-    setReward({ type: "powerPoints", amount: pp, label: `${pp} очков силы` });
+    setReward({ type: "powerPoints", amount: pp, label: t("donate.reward.power", { count: pp }) });
   };
 
   const handleCoinsForRub = (id: string, coins: number) => {
     const r = buyCoinsForRub(id);
-    if (!r.success) { showErr(r.error || "Ошибка"); return; }
+    if (!r.success) { showErr(r.error || t("common.error")); return; }
     onPurchased();
-    setReward({ type: "coins", amount: coins, label: `${coins} монет` });
+    setReward({ type: "coins", amount: coins, label: t("donate.reward.coins", { count: coins }) });
   };
 
   return (
@@ -67,10 +72,8 @@ export default function DonateTabContent({ onPurchased }: Props) {
       {/* ── ₽ → 💎 GEM PACKS ── */}
       <SectionTitle
         accent="#40C4FF"
-        title="Покупка кристаллов за рубли"
-        subtitle={firstAvail
-          ? "🔥 Первая покупка любого пакета — кристаллы удваиваются!"
-          : "Основной источник премиум-валюты"}
+        title={t("donate.gems.title")}
+        subtitle={firstAvail ? t("donate.gems.firstPurchaseHint") : t("donate.gems.subtitle")}
       />
       <Grid min={210}>
         {GEM_PACKS.map(pack => {
@@ -78,8 +81,8 @@ export default function DonateTabContent({ onPurchased }: Props) {
           const totalNoDouble = pack.gems + pack.bonusGems;
           return (
             <Card key={pack.id} accent="#40C4FF" highlight={pack.highlight}>
-              {pack.highlight === "popular" && <Tag color="#FF8A00" text="ПОПУЛЯРНОЕ" />}
-              {pack.highlight === "best"    && <Tag color="#E91E63" text="ВЫГОДНО" />}
+              {pack.highlight === "popular" && <Tag color="#FF8A00" text={t("donate.tag.popular")} />}
+              {pack.highlight === "best"    && <Tag color="#E91E63" text={t("donate.tag.best")} />}
               <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
                 <GemIcon size={48} />
               </div>
@@ -93,12 +96,12 @@ export default function DonateTabContent({ onPurchased }: Props) {
               </div>
               {pack.bonusGems > 0 && !doubled && (
                 <div style={{ fontSize: 11, color: "#69F0AE", textAlign: "center", marginTop: 2, fontWeight: 700 }}>
-                  +{pack.bonusGems} бонус
+                  {t("donate.bonusGems", { count: pack.bonusGems })}
                 </div>
               )}
               {doubled && (
                 <div style={{ fontSize: 10, color: "rgba(255,255,255,0.55)", textAlign: "center", marginTop: 2 }}>
-                  обычно {totalNoDouble}
+                  {t("donate.usually", { count: totalNoDouble })}
                 </div>
               )}
               <button
@@ -115,8 +118,8 @@ export default function DonateTabContent({ onPurchased }: Props) {
       {/* ── 💎 → 🪙 COINS ── */}
       <SectionTitle
         accent="#FFD740"
-        title="Обмен кристаллов на монеты"
-        subtitle="Базовый курс: 1 кристалл = 20 монет, бонус растёт с пакетом"
+        title={t("donate.exchange.coinsTitle")}
+        subtitle={t("donate.exchange.coinsSubtitle")}
       />
       <Grid min={170}>
         {GEM_TO_COIN_PACKS.map(p => (
@@ -124,7 +127,7 @@ export default function DonateTabContent({ onPurchased }: Props) {
             {p.bonusPct > 0 && <Tag color="#69F0AE" text={`+${p.bonusPct}%`} />}
             <Row><CoinIcon size={36} /></Row>
             <CenterText size={20} weight={900} color="#FFD740">{p.coins}</CenterText>
-            <CenterText size={11} color="rgba(255,255,255,0.6)">монет</CenterText>
+            <CenterText size={11} color="rgba(255,255,255,0.6)">{t("donate.unit.coins")}</CenterText>
             <button
               onClick={() => handleCoinsForGems(p.id, p.coins)}
               style={primaryBtn("#FFD740", "#FFA000")}
@@ -138,8 +141,8 @@ export default function DonateTabContent({ onPurchased }: Props) {
       {/* ── 💎 → ⚡ POWER POINTS ── */}
       <SectionTitle
         accent="#CE93D8"
-        title="Обмен кристаллов на очки силы"
-        subtitle="Базовый курс: 1 кристалл = 2 очка, бонус растёт с пакетом"
+        title={t("donate.exchange.powerTitle")}
+        subtitle={t("donate.exchange.powerSubtitle")}
       />
       <Grid min={170}>
         {GEM_TO_POWER_PACKS.map(p => (
@@ -147,7 +150,7 @@ export default function DonateTabContent({ onPurchased }: Props) {
             {p.bonusPct > 0 && <Tag color="#69F0AE" text={`+${p.bonusPct}%`} />}
             <Row><PowerIcon size={36} /></Row>
             <CenterText size={20} weight={900} color="#CE93D8">{p.powerPoints}</CenterText>
-            <CenterText size={11} color="rgba(255,255,255,0.6)">очков силы</CenterText>
+            <CenterText size={11} color="rgba(255,255,255,0.6)">{t("donate.unit.power")}</CenterText>
             <button
               onClick={() => handlePowerForGems(p.id, p.powerPoints)}
               style={primaryBtn("#CE93D8", "#7B1FA2")}
@@ -161,15 +164,15 @@ export default function DonateTabContent({ onPurchased }: Props) {
       {/* ── ₽ → ⚡ POWER POINTS ── */}
       <SectionTitle
         accent="#CE93D8"
-        title="Прямая покупка очков силы за рубли"
-        subtitle="Удобно, когда нужно быстро докачать бойца без обмена через кристаллы"
+        title={t("donate.rubPower.title")}
+        subtitle={t("donate.rubPower.subtitle")}
       />
       <Grid min={170}>
         {RUB_TO_POWER_PACKS.map(p => (
           <Card key={p.id} accent="#CE93D8">
             <Row><PowerIcon size={36} /></Row>
             <CenterText size={20} weight={900} color="#CE93D8">{p.powerPoints}</CenterText>
-            <CenterText size={11} color="rgba(255,255,255,0.6)">очков силы</CenterText>
+            <CenterText size={11} color="rgba(255,255,255,0.6)">{t("donate.unit.power")}</CenterText>
             <button
               onClick={() => handlePowerForRub(p.id, p.powerPoints)}
               style={primaryBtn("#CE93D8", "#7B1FA2")}
@@ -183,15 +186,15 @@ export default function DonateTabContent({ onPurchased }: Props) {
       {/* ── ₽ → 🪙 COINS ── */}
       <SectionTitle
         accent="#FFD740"
-        title="Прямая покупка монет за рубли"
-        subtitle="Акционные пакеты для новичков и быстрых трат"
+        title={t("donate.rubCoins.title")}
+        subtitle={t("donate.rubCoins.subtitle")}
       />
       <Grid min={170}>
         {RUB_TO_COIN_PACKS.map(p => (
           <Card key={p.id} accent="#FFD740">
             <Row><CoinIcon size={36} /></Row>
             <CenterText size={20} weight={900} color="#FFD740">{p.coins}</CenterText>
-            <CenterText size={11} color="rgba(255,255,255,0.6)">монет</CenterText>
+            <CenterText size={11} color="rgba(255,255,255,0.6)">{t("donate.unit.coins")}</CenterText>
             <button
               onClick={() => handleCoinsForRub(p.id, p.coins)}
               style={primaryBtn("#FFD740", "#FFA000")}
@@ -208,8 +211,7 @@ export default function DonateTabContent({ onPurchased }: Props) {
         background: "rgba(0,0,0,0.3)", borderRadius: 12,
         color: "rgba(255,255,255,0.55)", textAlign: "center",
       }}>
-        💳 Это демонстрационная витрина: реальная оплата не подключена.
-        Покупки за рубли мгновенно начисляют выбранный товар.
+        {t("donate.disclaimer")}
       </div>
 
       {err && (
@@ -304,12 +306,20 @@ function CenterText({ size, color, weight, children }: {
 }
 
 function primaryBtn(c1: string, c2: string): React.CSSProperties {
-  return {
-    marginTop: 10, width: "100%",
-    background: `linear-gradient(135deg, ${c2}, ${c1})`,
-    border: "none", borderRadius: 8, padding: "8px 0",
-    color: "#1A1A1A", fontWeight: 900, fontSize: 12, letterSpacing: 1,
-    cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4,
+  const fill = `linear-gradient(135deg, ${c2}, ${c1})`;
+  return shopBtnLabel(fill, shopLabelOnFill(c1), {
+    marginTop: 10,
+    width: "100%",
+    borderRadius: 8,
+    padding: "8px 0",
+    fontWeight: 900,
+    fontSize: 12,
+    letterSpacing: 1,
+    cursor: "pointer",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
     boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
-  };
+  });
 }

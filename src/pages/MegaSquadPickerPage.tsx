@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { BRAWLERS } from "../entities/BrawlerData";
 import { getCurrentProfile } from "../utils/localStorageAPI";
+import { PageBg, PageBody, PageHeader } from "../components/PageChrome";
+import { useI18n, brawlerName } from "../i18n";
 
 interface MegaSquadPickerPageProps {
   onConfirm: (squadIds: string[], squadLevels: number[]) => void;
@@ -8,6 +10,7 @@ interface MegaSquadPickerPageProps {
 }
 
 export default function MegaSquadPickerPage({ onConfirm, onBack }: MegaSquadPickerPageProps) {
+  const { t } = useI18n();
   const profile = getCurrentProfile();
   const ownedIds = profile?.unlockedBrawlers ?? [];
   const ownedBrawlers = BRAWLERS.filter(b => ownedIds.includes(b.id));
@@ -51,50 +54,25 @@ export default function MegaSquadPickerPage({ onConfirm, onBack }: MegaSquadPick
   };
 
   return (
-    <div
+    <PageBg
+      variant="megasquad"
       style={{
-        minHeight: "100%",
-        background: "linear-gradient(135deg, #2D1B0A 0%, #6A040F 50%, #DC2F02 100%)",
+        display: "flex",
+        flexDirection: "column",
+        fontFamily: "var(--app-font-sans)",
+      }}
+    >
+      <PageHeader onBack={onBack} title={t("megasquad.title")} compact />
+
+      <PageBody style={{
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
-        padding: "40px 20px",
-        fontFamily: "'Segoe UI', Arial, sans-serif",
-        position: "relative",
-      }}
-    >
-      <button
-        onClick={onBack}
-        style={{
-          position: "absolute",
-          top: 20, left: 20,
-          background: "rgba(255,255,255,0.07)",
-          border: "1px solid rgba(255,255,255,0.15)",
-          borderRadius: 10,
-          padding: "8px 18px",
-          color: "rgba(255,255,255,0.7)",
-          cursor: "pointer",
-          fontSize: 14,
-          fontWeight: 600,
-        }}
-      >
-        ← Назад
-      </button>
-
-      <div style={{ textAlign: "center", marginBottom: 24, marginTop: 12 }}>
-        <h1 style={{
-          fontSize: 38,
-          fontWeight: 900,
-          color: "#FFD54F",
-          margin: 0,
-          textShadow: "0 0 18px rgba(255,213,79,0.5)",
-        }}>
-          ✨ Соберите отряд ✨
-        </h1>
-        <p style={{ color: "rgba(255,255,255,0.7)", marginTop: 8, fontSize: 14 }}>
-          Выберите 3 бойца. Первый выйдет на арену, остальные ждут в резерве.
-        </p>
-      </div>
+        padding: "24px 20px 40px",
+      }}>
+      <p style={{ color: "rgba(255,255,255,0.7)", margin: "0 0 24px", fontSize: 14, textAlign: "center" }}>
+        {t("megasquad.pickHint")}
+      </p>
 
       <div style={{
         display: "flex",
@@ -132,7 +110,7 @@ export default function MegaSquadPickerPage({ onConfirm, onBack }: MegaSquadPick
                 letterSpacing: 1.5,
                 marginBottom: 6,
               }}>
-                СЛОТ {idx + 1}{idx === 0 ? " · НАЧАЛЬНЫЙ" : ""}
+                {t("megasquad.slot", { num: idx + 1, starter: idx === 0 ? t("megasquad.starter") : "" })}
               </div>
               {b ? (
                 <>
@@ -145,13 +123,13 @@ export default function MegaSquadPickerPage({ onConfirm, onBack }: MegaSquadPick
                     border: `2px solid ${b.color}`,
                     boxShadow: `0 0 18px ${b.color}88`,
                   }}>
-                    {b.name.charAt(0)}
+                    {brawlerName(b.id, b.name).charAt(0)}
                   </div>
                   <div style={{ color: "white", fontWeight: 800, fontSize: 17 }}>
-                    {b.name}
+                    {brawlerName(b.id, b.name)}
                   </div>
                   <div style={{ color: b.color, fontSize: 12, fontWeight: 700, marginTop: 4 }}>
-                    Ур. {lvl} · 🏆 {trophies}
+                    {t("megasquad.levelTrophies", { levelShort: t("common.levelShort"), level: lvl, trophies })}
                   </div>
                 </>
               ) : (
@@ -162,7 +140,7 @@ export default function MegaSquadPickerPage({ onConfirm, onBack }: MegaSquadPick
                   fontSize: 16,
                   fontWeight: 700,
                 }}>
-                  + Выбрать бойца
+                  {t("megasquad.pickBrawler")}
                 </div>
               )}
             </div>
@@ -189,8 +167,9 @@ export default function MegaSquadPickerPage({ onConfirm, onBack }: MegaSquadPick
           opacity: allFilled ? 1 : 0.5,
         }}
       >
-        ▶ В БОЙ
+        {t("megasquad.toBattle")}
       </button>
+      </PageBody>
 
       {editingSlot !== null && (
         <div
@@ -220,7 +199,7 @@ export default function MegaSquadPickerPage({ onConfirm, onBack }: MegaSquadPick
             onClick={e => e.stopPropagation()}
           >
             <div style={{ color: "white", fontSize: 22, fontWeight: 900, marginBottom: 16, textAlign: "center" }}>
-              Выберите бойца для слота {editingSlot + 1}
+              {t("megasquad.pickForSlot", { slot: editingSlot + 1 })}
             </div>
             <div style={{
               display: "grid",
@@ -252,7 +231,7 @@ export default function MegaSquadPickerPage({ onConfirm, onBack }: MegaSquadPick
                         position: "absolute",
                         top: 4, right: 6,
                         fontSize: 10, color: "#FFD54F", fontWeight: 800,
-                      }}>В ОТРЯДЕ</div>
+                      }}>{t("megasquad.inSquad")}</div>
                     )}
                     <div style={{
                       width: 56, height: 56, borderRadius: 12,
@@ -261,13 +240,13 @@ export default function MegaSquadPickerPage({ onConfirm, onBack }: MegaSquadPick
                       display: "flex", alignItems: "center", justifyContent: "center",
                       color: "white", fontWeight: 900, fontSize: 20,
                     }}>
-                      {b.name.charAt(0)}
+                      {brawlerName(b.id, b.name).charAt(0)}
                     </div>
                     <div style={{ color: "white", fontWeight: 700, fontSize: 13 }}>
-                      {b.name}
+                      {brawlerName(b.id, b.name)}
                     </div>
                     <div style={{ color: b.color, fontSize: 11, fontWeight: 700 }}>
-                      Ур. {lvl}
+                      {t("common.levelShort")} {lvl}
                     </div>
                   </div>
                 );
@@ -288,11 +267,11 @@ export default function MegaSquadPickerPage({ onConfirm, onBack }: MegaSquadPick
                 fontWeight: 600,
               }}
             >
-              Отмена
+              {t("common.cancel")}
             </button>
           </div>
         </div>
       )}
-    </div>
+    </PageBg>
   );
 }

@@ -6,17 +6,21 @@ import {
   isStarGuardianActive, getStarGuardianDaysRemaining, consumePowerUpToken,
   isMainDailyAvailable, isSecondaryDailyAvailable, isSpecialDailyAvailable,
 } from "../utils/subscription";
-import { BRAWLERS } from "../entities/BrawlerData";
+import { BRAWLERS, MAX_BRAWLER_LEVEL } from "../entities/BrawlerData";
 import { PETS } from "../entities/PetData";
 import { CHESTS, CHEST_RARITY_ORDER, type ChestRarity } from "../utils/chests";
 import { getTodaysDeals } from "../utils/dailyDeals";
 import { getUnreadNewsCount } from "../utils/news";
+import { tryClubChatRuleReply, type AstralGameChatContext } from "./astralChatContext";
 import {
   findBrawlerInMessage, findPetInMessage, findModeInMessage,
   describeBrawler, describePet, describeMode, chestPriceList,
   subscriptionDescription, randomGameplayHint,
   listAllBrawlers, listAllPets, listAllModes,
+  getBrawlerTactics, getModeTactics, compareBrawlers, topBrawlersByStat,
+  recommendBrawlerForMode, brawlerProgressSummary, extendedRandomHint,
 } from "../data/astralKnowledge";
+import { MODES } from "../data/modes";
 
 // ─── Chat (FREE) ───────────────────────────────────────────────────────────
 
@@ -25,31 +29,56 @@ export interface ChatReply {
   suggestion?: string;  // optional follow-up the UI can render as a chip
 }
 
-export function chatRespond(message: string): ChatReply {
+/**
+ * Главный rule-based обработчик чата. Расширенный набор паттернов:
+ *   • приветствия / помощь / о Астрале,
+ *   • подписка, ежедневки, news,
+ *   • профиль, прогресс, рекомендации,
+ *   • описание бойцов/питомцев/режимов (с fuzzy match),
+ *   • тактика конкретного бойца / режима,
+ *   • топы по статам, сравнение бойцов,
+ *   • рекомендация бойца под режим, советы,
+ *   • LLM-настройки (как включить, как поменять модель).
+ *
+ * Если LLM включён — этот rule-based ответ работает как fallback, когда сеть
+ * не отвечает. Если LLM выключен — это единственный ответ.
+ */
+export function chatRespond(message: string, gameContext?: AstralGameChatContext | null): ChatReply {
   const m = (message ?? "").toLowerCase().trim();
   if (!m) return { text: "Спроси что-нибудь — я знаю всё про бойцов, питомцев, режимы и магазин." };
 
-  if (/(привет|здравств|хай|hello|hi)\b/.test(m)) {
+  if (gameContext?.clubSnapshot) {
+    const ctxReply = tryClubChatRuleReply(message, gameContext.clubSnapshot);
+    if (ctxReply) return ctxReply;
+  }
+
+  // ── Приветствия / база ───────────────────────────────────────────────────
+  if (/(^привет|здравств|хай|hello|hi|здарова|здоров)\b/.test(m)) {
     return {
-      text: "Звёздный свет приветствует тебя! Спроси про любого бойца, режим, питомца или сундук — я расскажу всё.",
+      text: "Звёздный свет приветствует тебя! Спроси про любого бойца, режим, питомца или сундук — я расскажу всё. Или попроси: «кого взять для ограбления», «сравни Мию и Юки», «топ-3 по урону».",
       suggestion: "Расскажи про Мию",
     };
   }
 
-  if (/(помощь|что ты умеешь|команды|что ты знаешь|help)/.test(m)) {
+  if (/(помощь|что ты умеешь|команды|что ты знаешь|help|как тебя использовать)/.test(m)) {
     return {
       text: [
-        "Я — Астрал, твой звёздный спутник. Я знаю:",
-        "• Всё про бойцов (хар-ки, скиллы, лор) — спроси «расскажи про Мию»",
-        "• Все игровые режимы — «как играть в Star Battle?»",
-        "• Питомцев и их эффекты — «что умеет Огневик?»",
-        "• Цены сундуков и подписки — «сколько стоит мега сундук?»",
-        "Со Star Guardian я ещё могу: играть за тебя, давать подсказки в бою и выполнять команды («открой сундук», «прокачай Мию»).",
+        "🌟 Я — Астрал, твой звёздный спутник. Я могу:",
+        "• Рассказать про бойцов («расскажи про Мию», «тактика на Кендзи»)",
+        "• Объяснить режимы («как играть в столкновении», «советы по ограблению»)",
+        "• Сравнить бойцов («сравни Мию и Хану», «топ-3 по HP»)",
+        "• Порекомендовать состав («кого взять для выноса кристаллов»)",
+        "• Рассказать про твой профиль («сколько у меня монет», «мой прогресс»)",
+        "• Цены сундуков, подписки, питомцев",
+        "",
+        "Со Star Guardian: «открой мегасундук», «прокачай Мию до 7», «поставь Феникса».",
+        "А если включишь LLM-режим в настройках, я отвечу на любой свободный вопрос про игру.",
       ].join("\n"),
     };
   }
 
-  if (/(подписк|star guardian|стар гард|премиум|премиум|сколько стоит подписка|астрал что|что ты ещё)/.test(m)) {
+  // ── Подписка / магазин ───────────────────────────────────────────────────
+  if (/(подписк|star guardian|стар гард|премиум|сколько стоит подписка)/.test(m)) {
     const active = isStarGuardianActive();
     const days = getStarGuardianDaysRemaining();
     return {
@@ -57,7 +86,7 @@ export function chatRespond(message: string): ChatReply {
     };
   }
 
-  if (/(ежедневн|бонус|daily)/.test(m)) {
+  if (/(ежедневн|бонус|daily|задани|квест)/.test(m)) {
     const tasks: string[] = [];
     if (isMainDailyAvailable()) tasks.push("• Главная награда подписки готова — забери в разделе «Награды Star Guardian».");
     if (isSecondaryDailyAvailable()) tasks.push("• Дополнительная награда подписки ждёт твоего выбора (3 варианта).");
@@ -66,11 +95,11 @@ export function chatRespond(message: string): ChatReply {
     return { text: "📅 Ежедневные дела:\n" + tasks.join("\n") };
   }
 
-  if (/(список бойц|все бойцы|каких бойцов)/.test(m)) return { text: listAllBrawlers() };
-  if (/(список питом|все питомцы|какие питомцы)/.test(m)) return { text: listAllPets() };
-  if (/(список режим|все режимы|какие режимы)/.test(m)) return { text: listAllModes() };
+  if (/(список бойц|все бойцы|каких бойцов|кто в игре|сколько бойцов)/.test(m)) return { text: listAllBrawlers() };
+  if (/(список питом|все питомцы|какие питомцы|сколько питомцев)/.test(m)) return { text: listAllPets() };
+  if (/(список режим|все режимы|какие режимы|сколько режимов)/.test(m)) return { text: listAllModes() };
 
-  if (/(сундук|ящик|chest|цен)/.test(m)) {
+  if (/(сундук|ящик|chest)/.test(m) && /(цен|стои|сколько)/.test(m)) {
     return { text: chestPriceList() };
   }
 
@@ -82,6 +111,78 @@ export function chatRespond(message: string): ChatReply {
     return { text: "🎟️ Star Pass — 90-уровневый сезонный пропуск (450₽). Качай уровень за победы и квесты, на каждом уровне приз. С платной версией — двойные награды." };
   }
 
+  // ── Топ-листы и сравнения ────────────────────────────────────────────────
+  const topMatch = m.match(/топ[ -]?(\d+)?\s*(по\s+)?(хп|hp|здоров|урон|дмг|dmg|скорост|speed|дальност|range)/);
+  if (topMatch) {
+    const n = topMatch[1] ? Math.max(1, Math.min(10, Number(topMatch[1]))) : 3;
+    const what = topMatch[3];
+    let stat: "hp" | "damage" | "speed" | "range" = "hp";
+    if (/урон|дмг|dmg/.test(what)) stat = "damage";
+    else if (/скорост|speed/.test(what)) stat = "speed";
+    else if (/дальност|range/.test(what)) stat = "range";
+    else stat = "hp";
+    return { text: topBrawlersByStat(stat, n) };
+  }
+
+  if (/(сравни|сравнен|vs|против)/.test(m)) {
+    // Ищем двух бойцов в сообщении.
+    const found: typeof BRAWLERS[number][] = [];
+    const tokens = m.split(/[^a-zа-яё]+/).filter(Boolean);
+    for (const tok of tokens) {
+      const b = findBrawlerInMessage(tok);
+      if (b && !found.find(x => x.id === b.id)) found.push(b);
+      if (found.length >= 2) break;
+    }
+    if (found.length === 2) {
+      return { text: compareBrawlers(found[0] as any, found[1] as any) };
+    }
+  }
+
+  // ── «Кого взять для X» ───────────────────────────────────────────────────
+  if (/(кого\s+(брать|взять|играть)|какой\s+боец|кого\s+выбрать|лучший\s+боец|кто\s+лучше)/.test(m)) {
+    const mode = findModeInMessage(m);
+    if (mode) return { text: recommendBrawlerForMode(mode.id) };
+    // Без указания режима — общая рекомендация фаворита по статам.
+    return { text: "💡 Универсальные фавориты: Мия (снайпер), Юки (контроль), Кендзи (burst). Уточни режим — дам прицельный совет." };
+  }
+
+  // ── Тактика на конкретного бойца ─────────────────────────────────────────
+  if (/(тактик|как\s+играть\s+за|как\s+бить|стратеги|совет\s+по)/.test(m)) {
+    const b = findBrawlerInMessage(m);
+    if (b) return { text: getBrawlerTactics(b.id) };
+    const mode = findModeInMessage(m);
+    if (mode) return { text: getModeTactics(mode.id) };
+  }
+
+  // ── «Как играть в X режим» — тоже совет ──────────────────────────────────
+  if (/(как\s+играть|как\s+побеждать|как\s+выиграть)/.test(m)) {
+    const mode = findModeInMessage(m);
+    if (mode) return { text: getModeTactics(mode.id) };
+    // Без указания режима — общий совет.
+    return { text: extendedRandomHint() };
+  }
+
+  // ── Профиль и прогресс ───────────────────────────────────────────────────
+  const inClubChat = gameContext?.channel === "club";
+  const clubFundQuestion = /(фонд|сокровищ|клубн|в\s+клубе)/i.test(m);
+  if (/(мой\s+(профил|прогресс)|сколько\s+у\s+меня|статистик|кубки|трофеи|монет|кристалл|поинт)/.test(m)) {
+    if (!(inClubChat && clubFundQuestion && !/(мо[ихйе]|у\s+меня|личн)/i.test(m))) {
+      const p = getCurrentProfile();
+      if (!p) return { text: "Профиль не найден." };
+      const progress = brawlerProgressSummary(p.brawlerLevels, p.unlockedBrawlers);
+      return {
+        text: [
+          `🧑 ${p.username} — ${p.trophies} 🏆 (всего побед: ${p.totalWins} из ${p.totalGamesPlayed})`,
+          `💰 ${p.coins} монет, 💎 ${p.gems} кристаллов, ⚡ ${p.powerPoints} поинтов`,
+          `🐾 Открыто питомцев: ${p.unlockedPets?.length ?? 0} из ${PETS.length}`,
+          ``,
+          progress,
+        ].join("\n"),
+      };
+    }
+  }
+
+  // ── Описания (с fuzzy match) ─────────────────────────────────────────────
   const b = findBrawlerInMessage(m);
   if (b) return { text: describeBrawler(b) };
   const pet = findPetInMessage(m);
@@ -89,27 +190,31 @@ export function chatRespond(message: string): ChatReply {
   const mode = findModeInMessage(m);
   if (mode) return { text: describeMode(mode) };
 
-  if (/(мой профил|сколько у меня|статистик|кубки|трофеи|монет|кристалл)/.test(m)) {
-    const p = getCurrentProfile();
-    if (!p) return { text: "Профиль не найден." };
+  // ── Общие советы ─────────────────────────────────────────────────────────
+  if (/(совет|подскажи|что мне делать|как победить|тип|подсказк)/.test(m)) {
+    // Чередуем расширенные и базовые советы.
+    return { text: Math.random() < 0.6 ? extendedRandomHint() : randomGameplayHint() };
+  }
+
+  // ── LLM настройки ────────────────────────────────────────────────────────
+  if (/(llm|нейрос|настоящ\s+ии|gpt|claude|openai|openrouter|api\s+ключ)/.test(m)) {
     return {
       text: [
-        `🧑 ${p.username} — ${p.trophies} 🏆 (всего побед: ${p.totalWins} из ${p.totalGamesPlayed})`,
-        `💰 ${p.coins} монет, 💎 ${p.gems} кристаллов, ⚡ ${p.powerPoints} поинтов`,
-        `🦸 Открыто бойцов: ${p.unlockedBrawlers.length} из ${BRAWLERS.length}`,
-        `🐾 Открыто питомцев: ${p.unlockedPets?.length ?? 0} из ${PETS.length}`,
+        "🧠 LLM-режим — это опциональная фича: я могу отвечать через настоящую нейросеть (OpenAI / OpenRouter), если ты дашь мне свой API-ключ.",
+        "Открой чат Астрала → «⚙️ ИИ» → включи «Своя нейросеть (LLM)», выбери провайдера и вставь ключ.",
+        "Без него я работаю на встроенной базе знаний — этого хватает для 95% вопросов.",
       ].join("\n"),
     };
   }
 
-  if (/(совет|подскажи|что мне делать|как победить|тип)/.test(m)) {
-    return { text: randomGameplayHint() };
-  }
-
+  // ── Дефолт ───────────────────────────────────────────────────────────────
   return {
-    text: "Хм, не уверен, что ты имеешь в виду. Попробуй: «расскажи про Мию», «как играть в Star Battle», «что умеет Феникс», «сколько стоит мега сундук» или «что такое Star Guardian».",
+    text: "Хм, не уверен, что ты имеешь в виду. Попробуй:\n• «расскажи про Мию»\n• «как играть в столкновении»\n• «тактика на Кендзи»\n• «сравни Хану и Юки»\n• «кого взять для ограбления»\n• «топ-3 по урону»",
   };
 }
+
+// Suppress unused warnings for MODES (used indirectly via knowledge helpers).
+void MODES;
 
 // ─── Command parsing (PAID) ────────────────────────────────────────────────
 
@@ -146,7 +251,7 @@ function parseTargetLevel(message: string): number | null {
   if (!m) return null;
   const v = Number(m[1]);
   if (!Number.isFinite(v)) return null;
-  return Math.max(1, Math.min(11, v));
+  return Math.max(1, Math.min(MAX_BRAWLER_LEVEL, v));
 }
 
 export function executeCommand(message: string): CommandResult {
@@ -375,7 +480,7 @@ export function generateBattleTip(s: BattleSnapshot): string | null {
   }
   if (mode === "showdown" && s.nearestCrate && !s.nearestEnemy) {
     return pickModeTip(mode, [
-      `📦 Star Battle: стартуй через ресурсы — ящик ${crateDir} в ${Math.round(s.nearestCrate.distance)}px.`,
+      `📦 Столкновение: стартуй через ресурсы — ящик ${crateDir} в ${Math.round(s.nearestCrate.distance)}px.`,
       `🌵 В showdown темп даёт фарм. Сначала ящики и позиция, потом файт.`,
       `🧠 Без прямого контакта в showdown выгоднее забрать ящик и улучшить размен.`,
     ]);
@@ -391,7 +496,7 @@ export function generateBattleTip(s: BattleSnapshot): string | null {
   if (s.gasDistance !== null && s.gasDistance > 0) {
     return styleVariant([
       "☠️ Ты уже в газе. Сместись к центру прямо сейчас, иначе срежет HP быстрее, чем успеешь добить цель.",
-      "☠️ Газ уронит тебя быстрее врага. Немедленно выходи в safe-зону.",
+      "☠️ Газ уронит тебя быстрее врага. Немедленно выходи в безопасную зону.",
       "☠️ Сейчас главный враг — газ. Приоритет: выжить и выйти из кольца.",
     ]);
   }
@@ -499,7 +604,7 @@ export function generateBattleTip(s: BattleSnapshot): string | null {
   }
 
   if (s.mode === "megashowdown" && hpPct < 30) {
-    return "🔁 В Mega Star Battle этот боец на грани. Сыграй им в размен и сохрани более здорового на лейт.";
+    return "🔁 В МЕГА-столкновении этот боец на грани. Сыграй им в размен и сохрани более здорового на лейт.";
   }
 
   if (s.mode === "showdown" && e && hpPct > 75 && lowHpEnemy > 70 && s.enemyCount <= 2) {

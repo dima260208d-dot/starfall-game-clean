@@ -41,15 +41,18 @@ export default function ChestVisual({
     >
       <ChestStyles />
 
-      {/* Outer aura glow */}
-      <div style={{
-        position: "absolute", inset: -size * 0.12,
-        borderRadius: "50%",
-        background: `radial-gradient(circle, ${def.color}55 0%, transparent 68%)`,
-        animation: animated ? `chestPulse ${2 + def.tier * 0.2}s ease-in-out infinite` : undefined,
-        pointerEvents: "none",
-        zIndex: 0,
-      }} />
+      {/* Outer aura glow — ultra chest has no extra glow overlays */}
+      {def.tier !== 7 && (
+        <div style={{
+          position: "absolute",
+          inset: -size * 0.12,
+          borderRadius: "50%",
+          background: `radial-gradient(circle, ${def.color}55 0%, transparent 68%)`,
+          animation: animated ? `chestPulse ${2 + def.tier * 0.2}s ease-in-out infinite` : undefined,
+          pointerEvents: "none",
+          zIndex: 0,
+        }} />
+      )}
 
       {/* 3D chest model — singleton renderer, safe to use in long lists */}
       <SpinningModel3D
@@ -60,8 +63,14 @@ export default function ChestVisual({
         dirMult={2.2}
         cameraPos={[0, 1.0, 3.8]}
         lookAtPos={[0, 0.45, 0]}
-        rotSpeed={0.018}
-        style={{ display: "block", position: "relative", zIndex: 1 }}
+        rotSpeed={animated ? 0.018 : 0}
+        frozen={!animated}
+        style={{
+          display: "block",
+          position: "relative",
+          zIndex: 1,
+          transform: `translateY(${-Math.round(size * 0.07)}px)`,
+        }}
       />
 
       {/* High-tier sparkle particles */}
@@ -86,30 +95,6 @@ export default function ChestVisual({
         </>
       )}
 
-      {/* Legendary+ crown of light */}
-      {def.tier >= 6 && animated && (
-        <div style={{
-          position: "absolute", left: "50%", top: -size * 0.18,
-          transform: "translateX(-50%)",
-          width: size * (def.tier === 7 ? 0.95 : 0.7),
-          height: size * 0.18,
-          background: `radial-gradient(ellipse, ${def.color}AA 0%, transparent 70%)`,
-          animation: `chestPulse ${def.tier === 7 ? 1.0 : 1.5}s ease-in-out infinite`,
-          pointerEvents: "none", zIndex: 2,
-        }} />
-      )}
-      {def.tier === 7 && animated && (
-        <div style={{
-          position: "absolute", left: "50%", top: "50%",
-          transform: "translate(-50%, -50%)",
-          width: size * 1.15, height: size * 1.15,
-          borderRadius: "50%",
-          border: `${Math.max(1, size * 0.015)}px solid ${def.borderColor}88`,
-          boxShadow: `0 0 ${size * 0.08}px ${def.borderColor}, inset 0 0 ${size * 0.08}px ${def.color}55`,
-          animation: `chestPulse 1.2s ease-in-out infinite`,
-          pointerEvents: "none", zIndex: 2,
-        }} />
-      )}
     </div>
   );
 }

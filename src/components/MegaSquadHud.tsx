@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import { BRAWLERS } from "../entities/BrawlerData";
 import type { ClashMega, SquadHudSnapshot } from "../modes/ClashMega";
+import { useI18n } from "../i18n";
 
 interface MegaSquadHudProps {
   gameRef: React.MutableRefObject<ClashMega | null>;
 }
 
 export default function MegaSquadHud({ gameRef }: MegaSquadHudProps) {
+  const { t } = useI18n();
   const [snap, setSnap] = useState<SquadHudSnapshot | null>(null);
 
   useEffect(() => {
@@ -63,7 +65,7 @@ export default function MegaSquadHud({ gameRef }: MegaSquadHudProps) {
           letterSpacing: 1.5,
           textAlign: "center",
         }}>
-          ОТРЯД · Врагов: {snap.enemyMembersRemaining}
+          {t("megasquad.squadEnemies", { count: snap.enemyMembersRemaining })}
         </div>
         {snap.slots.map((slot, idx) => {
           const b = BRAWLERS.find(br => br.id === slot.brawlerId);
@@ -133,7 +135,7 @@ export default function MegaSquadHud({ gameRef }: MegaSquadHudProps) {
                   fontWeight: 700,
                   marginTop: 1,
                 }}>
-                  {dead ? "ВЫБЫЛ" : `${Math.round(slot.hp)} / ${slot.maxHp}`}
+                  {dead ? t("megasquad.eliminated") : `${Math.round(slot.hp)} / ${slot.maxHp}`}
                 </div>
               </div>
             </div>
@@ -149,7 +151,7 @@ export default function MegaSquadHud({ gameRef }: MegaSquadHudProps) {
             background: "rgba(100,0,150,0.4)",
             borderRadius: 6,
           }}>
-            🫙 ×{snap.powerCubes} · +{snap.powerCubes * 10}% урон/HP
+            {t("megasquad.powerCubes", { count: snap.powerCubes, bonus: snap.powerCubes * 10 })}
           </div>
         )}
       </div>
@@ -186,13 +188,13 @@ export default function MegaSquadHud({ gameRef }: MegaSquadHudProps) {
               transition: "width 0.1s linear",
             }} />
             <span style={{ position: "relative" }}>
-              ⏱ {snap.switchCooldown.toFixed(1)}с
+              {t("megasquad.switchCooldown", { seconds: snap.switchCooldown.toFixed(1) })}
             </span>
           </>
         ) : aliveOthers === 0 ? (
-          <span>Один в отряде</span>
+          <span>{t("megasquad.solo")}</span>
         ) : (
-          <span>🔄 СМЕНИТЬ [Q]</span>
+          <span>{t("megasquad.switch")}</span>
         )}
       </button>
     </div>

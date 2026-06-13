@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   getCurrentUsername,
   getCurrentProfile,
@@ -16,28 +16,72 @@ import CharacterSelect from "./pages/CharacterSelect";
 import GameScreen from "./pages/GameScreen";
 import CollectionPage from "./pages/CollectionPage";
 import ShopPage from "./pages/ShopPage";
+import CustomizationPage from "./pages/CustomizationPage";
 import SettingsPage from "./pages/SettingsPage";
 import ProfilePage from "./pages/ProfilePage";
 import ClashPassPage from "./pages/ClashPassPage";
+import ProStarPassPage from "./pages/ProStarPassPage";
 import TrophyRoadPage from "./pages/TrophyRoadPage";
 import ChestsPage from "./pages/ChestsPage";
 import PetsPage from "./pages/PetsPage";
 import LoadingScreen from "./pages/LoadingScreen";
 import MapEditorPage from "./pages/MapEditorPage";
 import NewsPage from "./pages/NewsPage";
+import MessagesPage from "./pages/MessagesPage";
 import AdminPanel from "./pages/AdminPanel";
 import ClubsPage from "./pages/ClubsPage";
+import FriendsPage from "./pages/FriendsPage";
+import PlayerProfilePage from "./pages/PlayerProfilePage";
+import { setMyPresence } from "./utils/social/presence";
+import { screenToMenuActivity, setMyMenuActivity } from "./utils/social/presence";
+import { clearPartyBattleRoster, readPartyBattleRoster, stashPartyBattleRoster } from "./utils/social/partyBattle";
+import { clearAllPlayAgainState } from "./utils/social/battleTeamPlayAgain";
+import MatchmakingScreen from "./pages/MatchmakingScreen";
+import {
+  getMatchmakingInitialFound,
+  getMatchmakingTotalPlayers,
+  matchmakingModeLabel,
+} from "./utils/matchmaking/matchmakingConfig";
+import {
+  clearPartyMatchmaking,
+  clearPartyPlayReady,
+  getPartyMemberCount,
+} from "./utils/social/party";
+import { getPartyCount, canPlayWithParty, partyModeFromProfile } from "./utils/social/partyConfig";
 import MegaSquadPickerPage from "./pages/MegaSquadPickerPage";
 import StarGuardianRewardsPage from "./pages/StarGuardianRewardsPage";
+import BattleHistoryPage from "./pages/BattleHistoryPage";
+import BattleFeedPage from "./pages/BattleFeedPage";
+import RecordsPage from "./pages/RecordsPage";
+import RegisterPage from "./pages/RegisterPage";
+import AccountsPage from "./pages/AccountsPage";
+import AccountDetailPage from "./pages/AccountDetailPage";
+import BrawlerMasteryPage from "./pages/BrawlerMasteryPage";
+import BrawlerComicPage from "./pages/BrawlerComicPage";
+import StarFeatsPage from "./pages/StarFeatsPage";
+import RankedMenuPage, { RankedMatchFlowPage } from "./pages/RankedMenuPage";
+import { clearRankedBattleSession } from "./utils/rankedMapPick";
+import LiveBattleSpectator from "./components/LiveBattleSpectator";
+import { ensureBotLiveBattleSim } from "./utils/social/botLiveBattleSim";
+import { syncAiBattleTrainingFromControl, stopAiBattleTraining } from "./ai/aiTrainingRuntime";
+import { ensureAdminScheduleTicker } from "./utils/adminScheduler";
+import { isAdminUnlocked } from "./utils/mapEditorAPI";
+import { editorModeForGameMode } from "./utils/mapSchedule";
+import type { EditorMode } from "./utils/mapEditorAPI";
+import { isTechBreakActive, subscribeTechBreakChanges, isBattleEntryBlockedByTechBreak, ensureTechBreakTicker } from "./utils/techBreak";
+import TechBreakScreen from "./components/TechBreakScreen";
 // Side-effect import: installs the battle-finished listener so the club battle
 // counter starts ticking the moment the app boots, even before the player ever
 // opens the Clubs page.
 import "./utils/clubs";
 import RotateDeviceOverlay from "./components/RotateDeviceOverlay";
-import { preloadCharRenderers } from "./game/miyaTopDownRenderer";
+import { MenuStageShell, PlatformLayoutProvider } from "./platform";
+import { translate } from "./i18n";
 import { preloadAllModels } from "./utils/modelPreloader";
-import { loadPlatformTile } from "./utils/platformTile";
-import { getBossRaidCurrentLevel } from "./utils/bossRaidProgress";
+import { preloadBattleAssets } from "./utils/battleAssetPreloader";
+import { BOSS_RAID_MAX_LEVEL } from "./utils/bossRaidProgress";
+import { resolvePartyBossRaidLevel } from "./utils/partyRaidLevel";
+import { resolvePartySiegeLevel } from "./utils/siegeProgress";
 
 type Screen =
   | "auth"
@@ -47,6 +91,7 @@ type Screen =
   | "game"
   | "collection"
   | "shop"
+  | "customization"
   | "settings"
   | "profile"
   | "clashpass"
@@ -54,13 +99,31 @@ type Screen =
   | "chests"
   | "pets"
   | "mapeditor"
+  | "mapEditorModeSelect"
   | "news"
+  | "messages"
   | "admin"
   | "clubs"
+  | "friends"
+  | "playerProfile"
   | "megaSquad"
-  | "starGuardianRewards";
+  | "starGuardianRewards"
+  | "battleHistory"
+  | "records"
+  | "techBreakPreview"
+  | "register"
+  | "accounts"
+  | "accountDetail"
+  | "battleFeed"
+  | "mastery"
+  | "comic"
+  | "starFeats"
+  | "rankedMenu"
+  | "rankedMatch"
+  | "matchmaking"
+  | "proStarPass";
 
-export type GameMode = "showdown" | "crystals" | "siege" | "heist" | "gemgrab" | "training" | "megashowdown" | "starstrike" | "bossraid";
+export type GameMode = "showdown" | "crystals" | "siege" | "heist" | "gemgrab" | "training" | "megashowdown" | "starstrike" | "bossraid" | "bounty" | "monsterhide" | "monsterInvasion" | "teamHunt" | "ranked";
 export type ShowdownFormat = "solo" | "duo" | "trio";
 export type StarStrikeFormat = "3v3" | "5v5";
 
@@ -73,6 +136,8 @@ export default function App() {
   const [selectedShowdownFormat, setSelectedShowdownFormat] = useState<ShowdownFormat>((initial?.selectedShowdownFormat as ShowdownFormat) || "solo");
   const [selectedStarStrikeFormat, setSelectedStarStrikeFormat] = useState<StarStrikeFormat>((initial?.selectedStarStrikeFormat as StarStrikeFormat) || "3v3");
   const [selectedBrawler, setSelectedBrawler] = useState(initial?.selectedBrawlerId || "miya");
+  const [masteryBrawlerId, setMasteryBrawlerId] = useState(initial?.selectedBrawlerId || "hana");
+  const [comicBrawlerId, setComicBrawlerId] = useState(initial?.selectedBrawlerId || "hana");
 
   // Always rehydrate selections from the active profile when entering the menu/game,
   // so a profile switch never carries stale picks across accounts.
@@ -91,24 +156,123 @@ export default function App() {
   };
   const [bootLoading, setBootLoading] = useState(true);
   const [bootProgress, setBootProgress] = useState(0);
+  const [techBreakActive, setTechBreakActive] = useState(() => isTechBreakActive());
   const [transitionTo, setTransitionTo] = useState<Screen | null>(null);
-  const [transitionLabel, setTransitionLabel] = useState("ЗАГРУЗКА");
+  const [transitionLabel, setTransitionLabel] = useState(() => translate("loading.default"));
+  const [transitionProgress, setTransitionProgress] = useState(0);
   // Transient one-shot mode override (used by "Испытать" → training).
   // Cleared automatically as soon as the player exits the game so the
   // persisted lobby mode is restored on the next "Играть".
   const [forceMode, setForceMode] = useState<GameMode | null>(null);
+  /** Actual 3v3 mode picked in ranked match flow (gemgrab, crystals, …). */
+  const [rankedBattleMode, setRankedBattleMode] = useState<GameMode | null>(null);
+  const [mapEditorMode, setMapEditorMode] = useState<EditorMode | null>(null);
   // Mega Star Battle squad picked on the squad-picker page; consumed by GameScreen.
   const [megaSquad, setMegaSquad] = useState<{ ids: string[]; levels: number[] } | null>(null);
-  /** Active boss raid battle target (boss id + difficulty). When set, `GameScreen` runs in `bossraid` mode. */
+  /** Активный бой с боссом (id + уровень). Если задан — `GameScreen` в режиме `bossraid`. */
+  const [bossRaidBattle, setBossRaidBattle] = useState<{ bossId: string; level: number } | null>(null);
+  const [siegeBattle, setSiegeBattle] = useState<{ level: number } | null>(null);
+  const [viewPlayerId, setViewPlayerId] = useState<string | null>(null);
+  const [viewClubId, setViewClubId] = useState<string | null>(null);
+  const [profileBackScreen, setProfileBackScreen] = useState<Screen>("menu");
+  const [spectateTargetId, setSpectateTargetId] = useState<string | null>(null);
   /** Босс, выбранный в ленте режимов; «Играть» в лобби запускает bossraid с этим id */
-  const [lobbyBossRaidBossId, setLobbyBossRaidBossId] = useState<string | null>(null);
+  // Сохраняется между сессиями, чтобы при перезаходе в игру выбранный босс
+  // (а вместе с ним — корректный «текущий уровень» из профиля) восстанавливался,
+  // а не сбрасывался на первого/первый уровень.
+  const LOBBY_BOSS_KEY = "lobby_bossraid_boss_v1";
+  const [lobbyBossRaidBossId, _setLobbyBossRaidBossIdRaw] = useState<string | null>(() => {
+    try { return localStorage.getItem(LOBBY_BOSS_KEY) || null; } catch { return null; }
+  });
+  const setLobbyBossRaidBossId = (id: string | null) => {
+    _setLobbyBossRaidBossIdRaw(id);
+    try {
+      if (id) localStorage.setItem(LOBBY_BOSS_KEY, id);
+      else localStorage.removeItem(LOBBY_BOSS_KEY);
+    } catch { /* localStorage disabled */ }
+  };
+
+  const matchmakingCompleteRef = useRef<() => void>(() => {});
+  const [matchmakingUi, setMatchmakingUi] = useState<{
+    totalPlayers: number;
+    initialFound: number;
+    ranked?: boolean;
+    modeHint?: string;
+  } | null>(null);
+
+  const startMatchmaking = useCallback((
+    onComplete: () => void,
+    opts?: { ranked?: boolean; modeHint?: string; totalPlayers?: number; initialFound?: number },
+  ) => {
+    const p = getCurrentProfile();
+    const sel = partyModeFromProfile(p);
+    const partyCount = getPartyCount(getPartyMemberCount());
+    const total = opts?.totalPlayers ?? getMatchmakingTotalPlayers(sel);
+    const initial = opts?.initialFound ?? getMatchmakingInitialFound(partyCount, total);
+    matchmakingCompleteRef.current = () => {
+      setMatchmakingUi(null);
+      clearPartyMatchmaking();
+      onComplete();
+    };
+    setMatchmakingUi({
+      totalPlayers: total,
+      initialFound: initial,
+      ranked: opts?.ranked,
+      modeHint: opts?.modeHint ?? (opts?.ranked ? undefined : matchmakingModeLabel(sel)),
+    });
+    setScreen("matchmaking");
+  }, []);
+
+  const cancelMatchmakingToMenu = useCallback(() => {
+    setMatchmakingUi(null);
+    clearPartyMatchmaking();
+    clearPartyPlayReady();
+    setScreen("menu");
+  }, []);
 
   useEffect(() => {
-    document.title = "Starfall";
-    // Kick off parallel preloading of all GLB models immediately on boot.
+    if (screen === "mapeditor" && !mapEditorMode) {
+      go("mapEditorModeSelect");
+    }
+  }, [screen, mapEditorMode]);
+
+  useEffect(() => {
+    if (screen === "auth" || screen === "game") return;
+    setMyPresence("menu");
+    setMyMenuActivity(screenToMenuActivity(screen));
+  }, [screen]);
+
+  useEffect(() => {
+    ensureAdminScheduleTicker();
+    ensureTechBreakTicker();
+  }, []);
+
+  useEffect(() => subscribeTechBreakChanges(() => {
+    setTechBreakActive(isTechBreakActive());
+  }), []);
+
+  useEffect(() => {
+    try {
+      const migrated = localStorage.getItem("ai_training_manual_control_v1");
+      if (!migrated) {
+        stopAiBattleTraining();
+        localStorage.setItem("ai_training_manual_control_v1", "1");
+        return;
+      }
+    } catch { /* ignore */ }
+    syncAiBattleTrainingFromControl();
+  }, []);
+
+  useEffect(() => {
+    if (bootLoading) return;
+    // Bot battle sim + localStorage writes pause during live gameplay.
+    if (screen === "game") return;
+    return ensureBotLiveBattleSim();
+  }, [bootLoading, screen]);
+
+  useEffect(() => {
     const base = (import.meta as any).env?.BASE_URL ?? "/";
     preloadAllModels(base, (p) => setBootProgress(p)).catch(() => setBootProgress(1));
-    loadPlatformTile().catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -138,42 +302,52 @@ export default function App() {
 
   const go = (s: Screen) => setScreen(s);
 
-  // Animated transition with a loading screen
-  const goWithLoad = (s: Screen, label = "ЗАГРУЗКА") => {
-    // When heading into battle, start downloading all 3D models immediately so
-    // they finish during the 4.5 s loading screen — not during gameplay.
-    if (s === "game") {
-      const base = (import.meta as any).env?.BASE_URL ?? "/";
-      preloadCharRenderers(base); // fire-and-forget; GameScreen awaits completion
+  // Animated transition with a loading screen (real asset progress for battles).
+  const goWithLoad = (s: Screen, label?: string) => {
+    if (s === "game" && isBattleEntryBlockedByTechBreak()) {
+      return;
     }
-    setTransitionLabel(label);
+    setTransitionLabel(label ?? translate("loading.default"));
     setTransitionTo(s);
+
+    if (s !== "game") {
+      setTransitionProgress(1);
+      return;
+    }
+
+    setTransitionProgress(0);
+    const base = (import.meta as any).env?.BASE_URL ?? "/";
+    const mode = forceMode ?? selectedMode;
+    preloadBattleAssets(base, (p) => setTransitionProgress(p), { mode }).catch(() => {
+      setTransitionProgress(1);
+    });
   };
 
   const content = renderContent();
   const isGame = screen === "game";
   return (
-    <>
+    <PlatformLayoutProvider>
       {isGame ? (
         <div style={{ position: "fixed", inset: 0, zIndex: 0 }}>
           {content}
         </div>
       ) : (
-        <div style={{ position: "fixed", inset: 0, overflow: "hidden" }}>
-          <div style={{
-            width: "calc(100% / 1.3)",
-            height: "calc(100% / 1.3)",
-            transform: "scale(1.3)",
-            transformOrigin: "top left",
-            overflowX: "hidden",
-            overflowY: "auto",
-          }}>
-            {content}
-          </div>
-        </div>
+        <MenuStageShell>
+          {content}
+        </MenuStageShell>
       )}
       <RotateDeviceOverlay />
-    </>
+      {spectateTargetId && (
+        <LiveBattleSpectator
+          targetPlayerId={spectateTargetId}
+          onClose={() => setSpectateTargetId(null)}
+          onExitToMenu={() => {
+            setSpectateTargetId(null);
+            go("menu");
+          }}
+        />
+      )}
+    </PlatformLayoutProvider>
   );
 
   function renderContent() {
@@ -182,20 +356,35 @@ export default function App() {
       <LoadingScreen
         onDone={() => setBootLoading(false)}
         duration={1500}
-        label="ДОБРО ПОЖАЛОВАТЬ"
+        label={translate("loading.welcome")}
         progress={bootProgress}
       />
     );
+  }
+
+  if (screen === "techBreakPreview") {
+    return (
+      <TechBreakScreen
+        showDevExit
+        onDevExit={() => go("admin")}
+      />
+    );
+  }
+
+  if (techBreakActive && !isAdminUnlocked()) {
+    return <TechBreakScreen />;
   }
 
   if (transitionTo) {
     return (
       <LoadingScreen
         label={transitionLabel}
-        duration={4500}
+        duration={1200}
+        progress={transitionProgress}
         onDone={() => {
           const target = transitionTo;
           setTransitionTo(null);
+          setTransitionProgress(0);
           if (target) go(target);
         }}
       />
@@ -211,39 +400,135 @@ export default function App() {
       <MainMenu
         lobbyBossRaidBossId={lobbyBossRaidBossId}
         onPlay={() => {
+          const p = getCurrentProfile();
+          if (p) {
+            const sel = partyModeFromProfile(p);
+            const n = getPartyMemberCount();
+            if (!canPlayWithParty(n, sel)) {
+              return;
+            }
+          }
+          stashPartyBattleRoster();
+          clearAllPlayAgainState();
           if (lobbyBossRaidBossId) {
-            hydrateFromProfile();
-            const p = getCurrentProfile();
-            const lv = p ? getBossRaidCurrentLevel(p, lobbyBossRaidBossId) : 1;
-            setBossRaidBattle({ bossId: lobbyBossRaidBossId, level: lv });
-            goWithLoad("game", "БОЙ С БОССОМ");
+            startMatchmaking(() => {
+              hydrateFromProfile();
+              const lv = resolvePartyBossRaidLevel(lobbyBossRaidBossId);
+              setBossRaidBattle({ bossId: lobbyBossRaidBossId, level: lv });
+              setSiegeBattle(null);
+              goWithLoad("game", translate("loading.bossBattle"));
+            });
             return;
           }
-          // Always read latest selections from the active profile before entering battle.
+          setBossRaidBattle(null);
           const { mode } = hydrateFromProfile();
-          // Mega Star Battle requires the player to assemble a 3-brawler squad first.
+          if (mode === "siege") {
+            setSiegeBattle({ level: resolvePartySiegeLevel() });
+          } else {
+            setSiegeBattle(null);
+          }
           if (mode === "megashowdown") {
             go("megaSquad");
             return;
           }
-          goWithLoad("game", "ВХОД В АРЕНУ");
+          if (mode === "ranked") {
+            go("rankedMatch");
+            return;
+          }
+          startMatchmaking(() => goWithLoad("game", translate("loading.arena")));
         }}
+        onRanked={() => go("rankedMenu")}
+        onProStarPass={() => go("proStarPass")}
         onCollection={() => go("collection")}
         onShop={() => go("shop")}
+        onCustomization={() => go("customization")}
         onSettings={() => go("settings")}
         onProfile={() => go("profile")}
+        onBattleFeed={() => go("battleFeed")}
         onClashPass={() => go("clashpass")}
         onTrophyRoad={() => go("trophyroad")}
         onChests={() => go("chests")}
         onPets={() => go("pets")}
+        onStarFeats={() => go("starFeats")}
         onModeSelect={() => go("modeSelect")}
         onBrawlerSelect={() => go("characterSelect")}
+        onMastery={(id) => { setMasteryBrawlerId(id); go("mastery"); }}
+        onComic={(id) => { setComicBrawlerId(id); go("comic"); }}
         onLogout={() => { logout(); go("auth"); }}
-        onMapEditor={() => go("mapeditor")}
+        onRegister={() => go("register")}
+        onAccounts={() => go("accounts")}
+        onMapEditor={() => go("mapEditorModeSelect")}
         onNews={() => go("news")}
-        onClubs={() => go("clubs")}
+        onMessages={() => go("messages")}
+        onClubs={() => { setViewClubId(null); go("clubs"); }}
+        onFriends={() => go("friends")}
+        onBattleHistory={() => go("battleHistory")}
+        onRecords={() => go("records")}
+        onViewPlayerProfile={(id) => {
+          setViewPlayerId(id);
+          setProfileBackScreen("menu");
+          go("playerProfile");
+        }}
         onAdmin={() => go("admin")}
         onStarGuardianRewards={() => go("starGuardianRewards")}
+        onSpectate={(playerId) => setSpectateTargetId(playerId)}
+      />
+    );
+  }
+
+  if (screen === "battleHistory") {
+    return (
+      <BattleHistoryPage
+        onBack={() => go("menu")}
+        onViewProfile={(id) => {
+          setViewPlayerId(id);
+          setProfileBackScreen("battleHistory");
+          go("playerProfile");
+        }}
+      />
+    );
+  }
+
+  if (screen === "records") {
+    return (
+      <RecordsPage
+        onBack={() => go("menu")}
+        onViewProfile={(id) => {
+          setViewPlayerId(id);
+          setProfileBackScreen("records");
+          go("playerProfile");
+        }}
+        onViewClub={(clubId) => {
+          setViewClubId(clubId);
+          go("clubs");
+        }}
+      />
+    );
+  }
+
+  if (screen === "friends") {
+    return (
+      <FriendsPage
+        onBack={() => go("menu")}
+        onViewProfile={(id) => {
+          setViewPlayerId(id);
+          setProfileBackScreen("friends");
+          go("playerProfile");
+        }}
+        onGiftShop={() => go("customization")}
+      />
+    );
+  }
+
+  if (screen === "playerProfile" && viewPlayerId) {
+    return (
+      <PlayerProfilePage
+        playerId={viewPlayerId}
+        onBack={() => go(profileBackScreen)}
+        onViewClub={(clubId) => {
+          setViewClubId(clubId);
+          go("clubs");
+        }}
       />
     );
   }
@@ -252,16 +537,70 @@ export default function App() {
     return <StarGuardianRewardsPage onBack={() => go("menu")} />;
   }
 
+  if (screen === "mapEditorModeSelect") {
+    return (
+      <ModeSelect
+        mapEditorPick={(gameMode) => {
+          const editorMode = editorModeForGameMode(gameMode);
+          if (!editorMode) return;
+          setMapEditorMode(editorMode);
+          go("mapeditor");
+        }}
+        onSelect={() => {}}
+        selectedShowdownFormat={selectedShowdownFormat}
+        selectedStarStrikeFormat={selectedStarStrikeFormat}
+        onBack={() => go("menu")}
+      />
+    );
+  }
+
   if (screen === "mapeditor") {
-    return <MapEditorPage onBack={() => go("menu")} />;
+    if (!mapEditorMode) return null;
+    return (
+      <MapEditorPage
+        initialMode={mapEditorMode}
+        onBack={() => {
+          setMapEditorMode(null);
+          go("mapEditorModeSelect");
+        }}
+      />
+    );
   }
 
   if (screen === "news") {
     return <NewsPage onBack={() => go("menu")} />;
   }
 
+  if (screen === "messages") {
+    return <MessagesPage onBack={() => go("menu")} />;
+  }
+
   if (screen === "clubs") {
-    return <ClubsPage onBack={() => go("menu")} />;
+    return (
+      <ClubsPage
+        onBack={() => { setViewClubId(null); go("menu"); }}
+        viewClubId={viewClubId}
+        onGoToMainMenu={(bossId) => {
+          setSelectedMode("bossraid");
+          persistMode("bossraid");
+          setLobbyBossRaidBossId(bossId);
+          go("menu");
+        }}
+      />
+    );
+  }
+
+  if (screen === "matchmaking" && matchmakingUi) {
+    return (
+      <MatchmakingScreen
+        totalPlayers={matchmakingUi.totalPlayers}
+        initialFound={matchmakingUi.initialFound}
+        ranked={matchmakingUi.ranked}
+        modeHint={matchmakingUi.modeHint}
+        onComplete={() => matchmakingCompleteRef.current()}
+        onCancel={cancelMatchmakingToMenu}
+      />
+    );
   }
 
   if (screen === "megaSquad") {
@@ -269,7 +608,7 @@ export default function App() {
       <MegaSquadPickerPage
         onConfirm={(ids, levels) => {
           setMegaSquad({ ids, levels });
-          goWithLoad("game", "СБОР ОТРЯДА");
+          startMatchmaking(() => goWithLoad("game", translate("loading.squad")));
         }}
         onBack={() => go("menu")}
       />
@@ -277,12 +616,18 @@ export default function App() {
   }
 
   if (screen === "admin") {
-    return <AdminPanel onBack={() => go("menu")} />;
+    return (
+      <AdminPanel
+        onBack={() => go("menu")}
+        onPreviewTechBreak={() => go("techBreakPreview")}
+      />
+    );
   }
 
   if (screen === "modeSelect") {
     return (
       <ModeSelect
+        selectedMode={selectedMode}
         onSelect={(mode, showdownFormat, starStrikeFormat) => {
           setLobbyBossRaidBossId(null);
           setSelectedMode(mode);
@@ -300,6 +645,7 @@ export default function App() {
         selectedShowdownFormat={selectedShowdownFormat}
         selectedStarStrikeFormat={selectedStarStrikeFormat}
         onBack={() => go("menu")}
+        onClashPass={() => go("clashpass")}
         onBossRaidLobbyPick={(bossId) => {
           setLobbyBossRaidBossId(bossId);
           setSelectedMode("bossraid");
@@ -322,6 +668,8 @@ export default function App() {
             go("menu");
           }
         }}
+        onOpenMastery={(id) => { setMasteryBrawlerId(id); go("mastery"); }}
+        onOpenComic={(id) => { setComicBrawlerId(id); go("comic"); }}
         onTraining={(id) => {
           // For training we use the brawler locally without persisting it as
           // the player's active pick — locked brawlers are testable but
@@ -330,7 +678,7 @@ export default function App() {
           // main-menu "Играть" button keeps launching the user's chosen mode.
           setSelectedBrawler(id);
           setForceMode("training");
-          goWithLoad("game", "ВХОД В ТРЕНИРОВКУ");
+          goWithLoad("game", translate("loading.training"));
         }}
         onBack={() => go("menu")}
       />
@@ -338,13 +686,53 @@ export default function App() {
   }
 
   if (screen === "profile") {
-    return <ProfilePage onBack={() => go("menu")} />;
+    return (
+      <ProfilePage
+        onBack={() => go("menu")}
+        onViewClub={(clubId) => {
+          setViewClubId(clubId);
+          go("clubs");
+        }}
+      />
+    );
   }
   if (screen === "clashpass") {
     return <ClashPassPage onBack={() => go("menu")} />;
   }
   if (screen === "trophyroad") {
     return <TrophyRoadPage onBack={() => go("menu")} />;
+  }
+
+  if (screen === "rankedMenu") {
+    return (
+      <RankedMenuPage
+        onBack={() => go("menu")}
+        onProStarPass={() => go("proStarPass")}
+        onGoToLobby={() => {
+          setSelectedMode("ranked");
+          persistMode("ranked");
+          go("menu");
+        }}
+      />
+    );
+  }
+
+  if (screen === "proStarPass") {
+    return <ProStarPassPage onBack={() => go("rankedMenu")} />;
+  }
+
+  if (screen === "rankedMatch") {
+    return (
+      <RankedMatchFlowPage
+        onBack={() => go("rankedMenu")}
+        onStartBattle={(mode, brawlerId, _pet) => {
+          setRankedBattleMode(mode);
+          setSelectedBrawler(brawlerId);
+          persistBrawler(brawlerId);
+          goWithLoad("game", translate("loading.ranked"));
+        }}
+      />
+    );
   }
   if (screen === "chests") {
     return <ChestsPage onBack={() => go("menu")} />;
@@ -354,33 +742,55 @@ export default function App() {
   }
 
   if (screen === "game") {
-    const activeMode: GameMode = bossRaidBattle ? "bossraid" : (forceMode ?? selectedMode);
+    const activeMode: GameMode = bossRaidBattle
+      ? "bossraid"
+      : (rankedBattleMode ?? forceMode ?? selectedMode);
     return (
       <GameScreen
         mode={activeMode}
         showdownFormat={selectedShowdownFormat}
-        starStrikeFormat={selectedStarStrikeFormat}
+        starStrikeFormat={rankedBattleMode ? "3v3" : selectedStarStrikeFormat}
         brawlerId={selectedBrawler}
         megaSquad={activeMode === "megashowdown" ? megaSquad : null}
         bossRaid={bossRaidBattle}
+        siege={siegeBattle}
         onExit={() => {
+          clearAllPlayAgainState();
           setForceMode(null);
+          setRankedBattleMode(null);
+          clearRankedBattleSession();
           setMegaSquad(null);
           setBossRaidBattle(null);
-          goWithLoad("menu", "ВОЗВРАТ В ЛОББИ");
+          setSiegeBattle(null);
+          goWithLoad("menu", translate("loading.lobbyReturn"));
         }}
-        onPlayAgain={() => {
-          // For mega mode, replay must re-pick a squad; route back to picker.
-          if (activeMode === "megashowdown") {
+        onResultPlayAgain={(won) => {
+          const partyRematch = readPartyBattleRoster().length > 1;
+          if (rankedBattleMode !== null && !partyRematch) {
+            clearRankedBattleSession();
+            setRankedBattleMode(null);
+            go("menu");
+            return;
+          }
+          if (activeMode === "megashowdown" && !partyRematch) {
             setMegaSquad(null);
             go("megaSquad");
             return;
           }
-          if (activeMode === "bossraid" && bossRaidBattle) {
-            goWithLoad("game", "ПЕРЕЗАПУСК...");
-            return;
-          }
-          goWithLoad("game", "ПЕРЕЗАПУСК...");
+          const launchRematch = () => {
+            if (activeMode === "bossraid" && bossRaidBattle && !partyRematch) {
+              if (won && bossRaidBattle.level < BOSS_RAID_MAX_LEVEL) {
+                setBossRaidBattle({ ...bossRaidBattle, level: bossRaidBattle.level + 1 });
+                goWithLoad("game", translate("loading.nextLevel"));
+                return;
+              }
+              goWithLoad("game", translate("loading.restart"));
+              return;
+            }
+            if (!partyRematch) stashPartyBattleRoster();
+            goWithLoad("game", partyRematch ? translate("loading.rematch") : translate("loading.restart"));
+          };
+          startMatchmaking(launchRematch);
         }}
       />
     );
@@ -399,13 +809,90 @@ export default function App() {
     );
   }
 
+  if (screen === "customization") {
+    return <CustomizationPage onBack={() => go("menu")} />;
+  }
+
   if (screen === "settings") {
     return (
       <SettingsPage
         onBack={() => go("menu")}
-        onSwitchProfile={() => { logout(); go("auth"); }}
+        onSwitchProfile={() => go("accounts")}
+        onOpenAccount={() => go("accountDetail")}
+        onRegister={() => go("register")}
       />
     );
+  }
+
+  if (screen === "register") {
+    return (
+      <RegisterPage
+        onBack={() => go("menu")}
+        onDone={() => { hydrateFromProfile(); go("menu"); }}
+      />
+    );
+  }
+
+  if (screen === "accounts") {
+    return (
+      <AccountsPage
+        onBack={() => go("menu")}
+        onOpenAccount={() => go("accountDetail")}
+        onRegister={() => go("register")}
+        onAuth={() => { logout(); go("auth"); }}
+      />
+    );
+  }
+
+  if (screen === "accountDetail") {
+    return (
+      <AccountDetailPage
+        onBack={() => go("accounts")}
+        onDeleted={() => {
+          if (getCurrentUsername()) go("menu");
+          else go("auth");
+        }}
+        onLogout={() => { logout(); go("auth"); }}
+        onOpenAppSettings={() => go("settings")}
+        onSwitchAccounts={() => go("accounts")}
+        onRegister={() => go("register")}
+      />
+    );
+  }
+
+  if (screen === "battleFeed") {
+    return (
+      <BattleFeedPage
+        onBack={() => go("menu")}
+        onViewProfile={(id) => {
+          setViewPlayerId(id);
+          setProfileBackScreen("battleFeed");
+          go("playerProfile");
+        }}
+      />
+    );
+  }
+
+  if (screen === "mastery") {
+    return (
+      <BrawlerMasteryPage
+        brawlerId={masteryBrawlerId}
+        onBack={() => go("menu")}
+      />
+    );
+  }
+
+  if (screen === "comic") {
+    return (
+      <BrawlerComicPage
+        brawlerId={comicBrawlerId}
+        onBack={() => go("menu")}
+      />
+    );
+  }
+
+  if (screen === "starFeats") {
+    return <StarFeatsPage onBack={() => go("menu")} />;
   }
 
   return null;

@@ -1,47 +1,76 @@
-import { useState, useMemo } from "react";
-import { BRAWLERS, BRAWLER_RARITY_LABEL, getScaledStats } from "../entities/BrawlerData";
+import { useEffect, useState, useMemo } from "react";
+import { BRAWLERS, BRAWLER_LORE, BRAWLER_RARITY_LABEL, getBrawlerById, getScaledStats } from "../entities/BrawlerData";
 import { CHESTS } from "../utils/chests";
 import {
-  getCurrentProfile, upgradeBrawler,
+  getCurrentProfile, upgradeBrawler, upgradeBrawlerCost, MAX_BRAWLER_LEVEL,
   getBrawlerTrophies, getBrawlerRank,
-  getUnclaimedBrawlerRankCount,
   BRAWLER_RANK_TABLE, MAX_BRAWLER_RANK,
   markBrawlerSeen,
   getBrawlerStars,
   buyBrawlerStarWithGems,
   buyBrawlerStarsPackWithGems,
+  hasPendingBrawlerStarPick,
+  getPendingBrawlerStarPicks,
+  getUnownedStarIndices,
+  claimPendingBrawlerStar,
 } from "../utils/localStorageAPI";
 import BrawlerViewer3D from "../components/BrawlerViewer3D";
 import BrawlerRankRewardsModal from "../components/BrawlerRankRewardsModal";
-import { sortBrawlers, type BrawlerSortKey } from "./CharacterSelect";
+import BrawlerRankBar, { RankBadgeIcon } from "../components/BrawlerRankBar";
+import { computeBrawlerRankBarState } from "../utils/brawlerRankUI";
+import { sortBrawlers, type BrawlerSortKey, RARITY_AVATAR_BG } from "./CharacterSelect";
 import { CoinIcon, PowerIcon, GemIcon } from "../components/GameIcons";
-import { PETS, PET_RARITY_LABEL, PET_RARITY_ORDER, PET_GEM_COST } from "../entities/PetData";
+import { PETS, PET_RARITY_LABEL, PET_RARITY_ORDER, getPetById } from "../entities/PetData";
+import { getEffectivePetGemCost, getEffectiveConstellation, getEffectiveStarCosts } from "../utils/characterBalance";
 import PetSvg from "../components/PetSvg";
-import { BRAWLER_CONSTELLATIONS, STAR_COST_GEMS, STAR_PACK3_COST_GEMS } from "../utils/constellations";
+import { petPageBackgroundStyle } from "../game/pet3DRenderer";
 import BrawlerConstellationView from "../components/BrawlerConstellationView";
+import { GlowingStarStyles } from "../components/GlowingStar";
+import {
+  useI18n,
+  brawlerName,
+  brawlerRarityLabel,
+  brawlerAttackName,
+  brawlerSuperName,
+  brawlerAttackDesc,
+  brawlerSuperDesc,
+  brawlerLore,
+  petName,
+  petEffectLabel,
+  petRarityLabel,
+  starName,
+  starEffect,
+} from "../i18n";
 
 interface CollectionPageProps {
   onBack: () => void;
 }
 
-const COLLECTION_SORT_OPTIONS: { key: BrawlerSortKey; label: string }[] = [
-  { key: "rarity", label: "По редкости" },
-  { key: "level",  label: "По уровню" },
-  { key: "name",   label: "По имени" },
-  { key: "hp",     label: "По здоровью" },
-  { key: "damage", label: "По урону" },
-  { key: "speed",  label: "По скорости" },
-  { key: "range",  label: "По дальности" },
-];
-
 export default function CollectionPage({ onBack }: CollectionPageProps) {
+  const { t } = useI18n();
+  const sortOptions: { key: BrawlerSortKey; label: string }[] = [
+    { key: "rarity", label: t("char.sort.rarity") },
+    { key: "level", label: t("char.sort.level") },
+    { key: "name", label: t("char.sort.name") },
+    { key: "hp", label: t("char.sort.hp") },
+    { key: "damage", label: t("char.sort.damage") },
+    { key: "speed", label: t("char.sort.speed") },
+    { key: "range", label: t("char.sort.range") },
+  ];
   const [profile, setProfile] = useState(getCurrentProfile());
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(() => {
+    const p = getCurrentProfile();
+    const menuId = p?.selectedBrawlerId;
+    if (menuId && p?.unlockedBrawlers.includes(menuId)) return menuId;
+    return null;
+  });
   const [sortKey, setSortKey] = useState<BrawlerSortKey>("rarity");
-  const [msg, setMsg] = useState("");
+  const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [rankModalBrawlerId, setRankModalBrawlerId] = useState<string | null>(null);
   const [tab, setTab] = useState<"brawlers" | "pets" | "stars">("brawlers");
   const [pickedStar, setPickedStar] = useState<number | null>(null);
+  const [starPickMode, setStarPickMode] = useState(false);
+  const [petsBgId, setPetsBgId] = useState<string | null>(null);
 
   const ownedSorted = useMemo(() => {
     if (!profile) return [];
@@ -49,28 +78,59 @@ export default function CollectionPage({ onBack }: CollectionPageProps) {
     return sortBrawlers(owned, sortKey, profile.brawlerLevels);
   }, [profile, sortKey]);
 
-  // Default selection: first in sorted list, or keep current if still owned.
-  const activeId = selectedId && ownedSorted.some(b => b.id === selectedId)
-    ? selectedId
-    : (ownedSorted[0]?.id ?? null);
+  // Выбранный в списке, иначе боец из главного меню, иначе первый в сортировке.
+  const menuBrawlerId =
+    profile?.selectedBrawlerId && profile.unlockedBrawlers.includes(profile.selectedBrawlerId)
+      ? profile.selectedBrawlerId
+      : null;
+  const activeId =
+    (selectedId && ownedSorted.some(b => b.id === selectedId) ? selectedId : null)
+    ?? (menuBrawlerId && ownedSorted.some(b => b.id === menuBrawlerId) ? menuBrawlerId : null)
+    ?? (ownedSorted[0]?.id ?? null);
+
+  // Когда поверх коллекции открыт popup, колесо/тач не должны прокручивать
+  // страницу за ним. Само окно при этом остаётся прокручиваемым.
+  useEffect(() => {
+    const hasPopup = !!rankModalBrawlerId || pickedStar !== null;
+    if (!hasPopup) return;
+    const prevBody = document.body.style.overflow;
+    const prevHtml = document.documentElement.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prevBody;
+      document.documentElement.style.overflow = prevHtml;
+    };
+  }, [rankModalBrawlerId, pickedStar]);
 
   if (!profile || ownedSorted.length === 0 || !activeId) {
+    const baseUrl = (import.meta as any).env?.BASE_URL ?? "/";
     return (
       <div style={{
         minHeight: "100%",
-        background: "linear-gradient(135deg, #013A40 0%, #02575C 50%, #0CA4A5 100%)",
+        backgroundImage: `url("${baseUrl}collection-bg.png")`,
+        backgroundSize: "cover",
+        backgroundPosition: "center",
+        backgroundRepeat: "no-repeat",
+        backgroundColor: "#040712",
         color: "white", display: "flex", flexDirection: "column",
-        fontFamily: "'Segoe UI', Arial, sans-serif",
+        fontFamily: "var(--app-font-sans)",
+        position: "relative",
       }}>
-        <div style={{ display: "flex", alignItems: "center", padding: "16px 24px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
-          <button onClick={onBack} style={{ background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 10, padding: "7px 16px", color: "rgba(255,255,255,0.7)", cursor: "pointer", fontSize: 13, fontWeight: 600 }}>← Назад</button>
-          <h2 style={{ flex: 1, textAlign: "center", margin: 0, fontSize: 22, fontWeight: 800, color: "#CE93D8" }}>Коллекция</h2>
+        <div style={{
+          position: "absolute", inset: 0, pointerEvents: "none",
+          background: "linear-gradient(180deg, rgba(6,4,22,0.46) 0%, rgba(6,4,22,0.32) 35%, rgba(6,4,22,0.62) 100%)",
+        }} />
+        <div style={{ position: "relative", zIndex: 1, display: "flex", alignItems: "center", padding: "14px 22px", borderBottom: "1px solid var(--bd-1)", background: "linear-gradient(180deg, rgba(0,0,0,0.42) 0%, rgba(0,0,0,0.18) 100%)", backdropFilter: "blur(10px) saturate(1.15)" }}>
+          <button onClick={onBack} className="ui-back-btn">← {t("common.back")}</button>
+          <h2 className="ui-page-title" style={{ flex: 1, fontSize: 22, margin: 0, letterSpacing: "0.08em" }}>{t("collection.title")}</h2>
+          <div style={{ width: 92 }} />
         </div>
-        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 14, padding: 40, textAlign: "center" }}>
+        <div style={{ position: "relative", zIndex: 1, flex: 1, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 14, padding: 40, textAlign: "center" }}>
           <div style={{ fontSize: 72 }}>🔒</div>
-          <div style={{ fontSize: 18, fontWeight: 700, color: "rgba(255,255,255,0.85)" }}>В коллекции пока никого нет</div>
-          <div style={{ fontSize: 13, color: "rgba(255,255,255,0.55)", maxWidth: 420 }}>
-            Открывайте сундуки и покупайте бойцов в магазине, чтобы пополнить коллекцию.
+          <div style={{ fontSize: 18, fontWeight: 700, color: "var(--t-1)" }}>{t("collection.emptyTitle")}</div>
+          <div style={{ fontSize: 13, color: "var(--t-3)", maxWidth: 420 }}>
+            {t("collection.emptyHint")}
           </div>
         </div>
       </div>
@@ -83,22 +143,21 @@ export default function CollectionPage({ onBack }: CollectionPageProps) {
     const result = upgradeBrawler(brawler.id);
     if (result.success) {
       setProfile(getCurrentProfile());
-      setMsg("Уровень повышен!");
+      setMsg({ text: t("char.upgraded"), ok: true });
     } else {
-      setMsg(result.error || "Невозможно улучшить");
+      setMsg({ text: result.error || t("char.notEnough"), ok: false });
     }
-    setTimeout(() => setMsg(""), 3000);
+    setTimeout(() => setMsg(null), 3000);
   };
 
   const level = profile.brawlerLevels[brawler.id] || 1;
   const scaled = getScaledStats(brawler, level);
-  const nextScaled = level < 10 ? getScaledStats(brawler, level + 1) : null;
-  const upgradeCost = { coins: 100 * level, pp: 5 * level };
-  const canUpgrade = level < 10 && profile.coins >= upgradeCost.coins && profile.powerPoints >= upgradeCost.pp;
+  const nextScaled = level < MAX_BRAWLER_LEVEL ? getScaledStats(brawler, level + 1) : null;
+  const upgradeCost = upgradeBrawlerCost(level);
+  const canUpgrade = level < MAX_BRAWLER_LEVEL && profile.coins >= upgradeCost.coins && profile.powerPoints >= upgradeCost.powerPoints;
 
   const trophies = getBrawlerTrophies(profile, brawler.id);
   const rank = getBrawlerRank(trophies);
-  const unclaimed = getUnclaimedBrawlerRankCount(profile, brawler.id);
   const nextReward = rank < MAX_BRAWLER_RANK ? BRAWLER_RANK_TABLE[rank] : null;
   const trophiesIntoNext = nextReward
     ? Math.max(0, trophies - (rank > 0 ? BRAWLER_RANK_TABLE[rank - 1].trophies : 0))
@@ -107,11 +166,49 @@ export default function CollectionPage({ onBack }: CollectionPageProps) {
     ? nextReward.trophies - (rank > 0 ? BRAWLER_RANK_TABLE[rank - 1].trophies : 0)
     : 0;
 
+  // Full-screen background that changes per tab and per selected brawler/pet.
+  // Brawlers tab → that brawler's lore scene. Stars tab → starry cosmos.
+  // Pets tab → equipped pet's background (or first owned pet) — falls back to soft green.
+  const base = import.meta.env.BASE_URL;
+  const petsTabBgId = petsBgId
+    || profile?.equippedPetId
+    || ((profile?.unlockedPets || [])[0] ?? null);
+  const petsTabPet = petsTabBgId ? getPetById(petsTabBgId) : null;
+  const petsTabBg = petPageBackgroundStyle(base, petsTabPet ?? undefined);
+  const pageBgImage =
+    tab === "stars"
+      ? `url("${base}constellation-bg.png")`
+      : tab === "brawlers"
+        ? `url("${base}brawlers/backgrounds/${activeId}.png")`
+        : tab === "pets"
+          ? petsTabBg.backgroundImage
+          : undefined;
+  const pageBgColor =
+    tab === "stars" ? "#03001a"
+      : tab === "brawlers" ? "#03001a"
+        : tab === "pets" ? petsTabBg.backgroundColor
+          : "#0a1f12";
+  const pendingStarPicks = getPendingBrawlerStarPicks(profile);
+  const pendingStarPickCount = pendingStarPicks.length;
+
+  const pageBgFallback =
+    tab === "stars"
+      ? "radial-gradient(ellipse at center, #1a0f4a 0%, #0a052a 70%, #03001a 100%)"
+      : tab === "brawlers"
+        ? "linear-gradient(135deg, #013A40 0%, #02575C 50%, #0CA4A5 100%)"
+        : "linear-gradient(135deg, #052e16 0%, #14532d 50%, #166534 100%)";
+
   return (
+    <>
+    <GlowingStarStyles />
     <div
       style={{
         height: "100%",
-        background: "linear-gradient(135deg, #013A40 0%, #02575C 50%, #0CA4A5 100%)",
+        backgroundImage: pageBgImage,
+        backgroundColor: pageBgColor,
+        backgroundSize: "cover",
+        backgroundPosition: "center",
+        backgroundRepeat: "no-repeat",
         display: "flex",
         flexDirection: "column",
         fontFamily: "'Segoe UI', Arial, sans-serif",
@@ -120,84 +217,198 @@ export default function CollectionPage({ onBack }: CollectionPageProps) {
         position: "relative",
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", padding: "16px 24px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
-        <button
-          onClick={onBack}
-          style={{ background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 10, padding: "7px 16px", color: "rgba(255,255,255,0.7)", cursor: "pointer", fontSize: 13, fontWeight: 600 }}
-        >
-          ← Назад
-        </button>
-        <h2 style={{ flex: 1, textAlign: "center", margin: 0, fontSize: 22, fontWeight: 800, color: "#CE93D8" }}>
-Коллекция
-        </h2>
-        <div style={{ display: "flex", gap: 14, fontSize: 14, alignItems: "center" }}>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "#FFD700" }}><CoinIcon size={18} /> {profile?.coins || 0}</span>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "#CE93D8" }}><PowerIcon size={18} /> {profile?.powerPoints || 0}</span>
+      {/* Soft fallback gradient when no image is loaded (also adds a tint over the painted bg) */}
+      {!pageBgImage && (
+        <div aria-hidden style={{ position: "absolute", inset: 0, background: pageBgFallback, pointerEvents: "none" }} />
+      )}
+      {/* Subtle dark vignette to ensure text remains readable on top of the painted scene */}
+      <div
+        aria-hidden
+        style={{
+          position: "absolute",
+          inset: 0,
+          pointerEvents: "none",
+          background:
+            "linear-gradient(180deg, rgba(0,0,0,0.45) 0%, rgba(0,0,0,0.10) 18%, rgba(0,0,0,0.10) 75%, rgba(0,0,0,0.55) 100%)",
+        }}
+      />
+      {/*
+        Единая верхняя панель: раньше тут были ДВЕ прозрачные полосы
+        (header + tab bar), они визуально разрывали градиент бэкграунда.
+        Теперь обе строки лежат на одном background с одним blur,
+        разделитель внутри — лишь тонкая линия `borderTop` у tab-bar.
+      */}
+      <div style={{
+        position: "relative", zIndex: 1, flexShrink: 0,
+        display: "flex", flexDirection: "column",
+        borderBottom: "1px solid var(--bd-1)",
+        background: "linear-gradient(180deg, rgba(0,0,0,0.45) 0%, rgba(0,0,0,0.30) 100%)",
+        backdropFilter: "blur(10px) saturate(1.15)",
+        WebkitBackdropFilter: "blur(10px) saturate(1.15)",
+      }}>
+        <div style={{
+          display: "flex", alignItems: "center",
+          padding: "14px 22px", gap: 12,
+        }}>
+          <button onClick={onBack} className="ui-back-btn">← {t("common.back")}</button>
+          <h2 className="ui-page-title" style={{ flex: 1, fontSize: 22, margin: 0, letterSpacing: "0.08em" }}>
+            {t("collection.title")}
+          </h2>
+          <div className="ui-resource-bar">
+            <span className="ui-resource-pill ui-resource-pill--gold">
+              <CoinIcon size={20} /> {(profile?.coins || 0).toLocaleString("ru-RU")}
+            </span>
+            <span className="ui-resource-pill ui-resource-pill--violet">
+              <GemIcon size={20} /> {(profile?.gems || 0).toLocaleString("ru-RU")}
+            </span>
+            <span className="ui-resource-pill ui-resource-pill--violet">
+              <PowerIcon size={20} /> {(profile?.powerPoints || 0).toLocaleString("ru-RU")}
+            </span>
+          </div>
+        </div>
+        <div style={{
+          display: "flex", justifyContent: "center", gap: 8,
+          padding: "10px 0 12px",
+          borderTop: "1px solid rgba(255,255,255,0.06)",
+        }}>
+          <div className="ui-tab-bar">
+            {(["brawlers", "pets", "stars"] as const).map(tabKey => {
+              const active = tab === tabKey;
+              const label = tabKey === "brawlers"
+                ? t("collection.tab.brawlers")
+                : (tabKey === "pets" ? t("collection.tab.pets") : t("collection.tab.stars"));
+              const starsBadge = tabKey === "stars" && pendingStarPickCount > 0 ? pendingStarPickCount : 0;
+              const starsGlow = tabKey === "stars" && pendingStarPickCount > 0;
+              return (
+                <button
+                  key={tabKey}
+                  onClick={() => {
+                    setTab(tabKey);
+                    if (tabKey !== "pets") setPetsBgId(null);
+                    if (tabKey === "stars") {
+                      const pending = getPendingBrawlerStarPicks(profile);
+                      if (pending.length > 0 && !pending.includes(activeId)) {
+                        setSelectedId(pending[0]);
+                      }
+                    }
+                  }}
+                  className={`ui-tab ${active ? "is-active" : ""}`}
+                  style={starsGlow && !active ? {
+                    boxShadow: "0 0 18px rgba(255,213,79,0.55)",
+                    borderColor: "rgba(255,213,79,0.65)",
+                  } : undefined}
+                >
+                  {label}
+                  {starsBadge > 0 && (
+                    <span style={{
+                      marginLeft: 6,
+                      fontSize: 10,
+                      fontWeight: 900,
+                      background: "linear-gradient(135deg,#FF6B00,#FFD54F)",
+                      color: "#1a0a00",
+                      borderRadius: 8,
+                      padding: "1px 6px",
+                      minWidth: 16,
+                      display: "inline-block",
+                      textAlign: "center",
+                    }}>
+                      {starsBadge}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
         </div>
       </div>
 
-      {/* Tab toggle: Brawlers / Pets */}
-      <div style={{
-        display: "flex", justifyContent: "center", gap: 8,
-        padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,0.06)",
-        background: "rgba(0,0,0,0.18)",
-      }}>
-        {(["brawlers", "pets", "stars"] as const).map(t => {
-          const active = tab === t;
-          const label = t === "brawlers" ? "🦸 БОЙЦЫ" : (t === "pets" ? "🐾 ПИТОМЦЫ" : "✨ СОЗВЕЗДИЕ");
-          const colors = t === "brawlers"
-            ? { fg: "#CE93D8", bg: "rgba(206,147,216,0.18)", border: "#CE93D8" }
-            : t === "pets"
-              ? { fg: "#B2FF59", bg: "rgba(118,255,3,0.18)",  border: "#76FF03" }
-              : { fg: "#FFD740", bg: "rgba(255,215,64,0.18)", border: "#FFD740" };
-          return (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              style={{
-                padding: "8px 22px",
-                background: active ? colors.bg : "rgba(255,255,255,0.04)",
-                border: `1.5px solid ${active ? colors.border : "rgba(255,255,255,0.10)"}`,
-                borderRadius: 10,
-                color: active ? colors.fg : "rgba(255,255,255,0.55)",
-                fontWeight: 800, fontSize: 12, letterSpacing: 1.5,
-                cursor: "pointer",
-                boxShadow: active ? `0 0 12px ${colors.border}55` : "none",
-              }}
-            >{label}</button>
-          );
-        })}
-      </div>
-
       {tab === "pets" ? (
-        <PetsCollectionTab profile={profile} />
+        <PetsCollectionTab profile={profile} onPreviewPet={setPetsBgId} />
       ) : tab === "stars" ? (
-        <StarsCollectionTab
-          profile={profile}
-          brawlerId={activeId}
-          onChanged={() => setProfile(getCurrentProfile())}
-          onMsg={(m) => { setMsg(m); setTimeout(() => setMsg(""), 2200); }}
-          pickedStar={pickedStar}
-          onPickStar={setPickedStar}
-        />
-      ) : (
-      <div style={{ flex: 1, display: "flex", overflow: "hidden", minHeight: 0 }}>
-        <div style={{ width: 280, display: "flex", flexDirection: "column", borderRight: "1px solid rgba(255,255,255,0.06)", minHeight: 0 }}>
-          <div style={{ padding: "12px 14px", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+      <div style={{ position: "relative", zIndex: 1, flex: 1, display: "flex", overflow: "hidden", minHeight: 0 }}>
+        <div style={{ width: 280, display: "flex", flexDirection: "column", borderRight: "1px solid rgba(255,255,255,0.10)", minHeight: 0, background: "rgba(0,0,0,0.42)", backdropFilter: "blur(6px)", WebkitBackdropFilter: "blur(6px)" }}>
+          <div style={{ padding: "12px 14px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
             <label style={{ fontSize: 10, color: "rgba(255,255,255,0.45)", fontWeight: 700, letterSpacing: 2, display: "block", marginBottom: 5 }}>
-              СОРТИРОВКА ({ownedSorted.length})
+              {t("collection.brawlersCount", { count: ownedSorted.length })}
             </label>
             <select
               value={sortKey}
               onChange={(e) => setSortKey(e.target.value as BrawlerSortKey)}
-              style={{
-                width: "100%", background: "rgba(0,0,0,0.5)",
-                border: "1px solid rgba(255,255,255,0.18)",
-                borderRadius: 8, padding: "7px 10px",
-                color: "white", fontSize: 12, fontWeight: 700, cursor: "pointer",
-              }}
+              className="ui-input"
+              style={{ width: "100%", fontSize: 12, padding: "8px 12px", cursor: "pointer" }}
             >
-              {COLLECTION_SORT_OPTIONS.map(o => (
+              {sortOptions.map(o => (
+                <option key={o.key} value={o.key} style={{ background: "#0a0040" }}>{o.label}</option>
+              ))}
+            </select>
+          </div>
+          <div style={{ flex: 1, overflowY: "auto", padding: 14, minHeight: 0 }}>
+            {ownedSorted.map((b) => {
+              const isSelected = b.id === activeId;
+              const pendingStar = hasPendingBrawlerStarPick(b.id, profile);
+              return (
+                <div
+                  key={b.id}
+                  onClick={() => {
+                    setSelectedId(b.id);
+                    setStarPickMode(false);
+                    setPickedStar(null);
+                  }}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 10,
+                    padding: "10px 12px", borderRadius: "var(--r-md)", cursor: "pointer", marginBottom: 6,
+                    background: isSelected
+                      ? `linear-gradient(135deg, ${b.color}33, ${b.color}11)`
+                      : "rgba(255,255,255,0.03)",
+                    border: `1px solid ${pendingStar ? "#FFD54F" : isSelected ? b.color : "var(--bd-1)"}`,
+                    boxShadow: pendingStar
+                      ? "0 0 16px rgba(255,213,79,0.65)"
+                      : isSelected ? `0 0 16px ${b.color}55` : "var(--sh-sm)",
+                  }}
+                >
+                  <BrawlerSidebarAvatar brawler={b} size={40} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: 14, color: isSelected ? b.color : "white", display: "flex", alignItems: "center", gap: 6 }}>
+                      {brawlerName(b.id, b.name)}
+                      {pendingStar && (
+                        <span style={{
+                          fontSize: 10, fontWeight: 900, minWidth: 18, textAlign: "center",
+                          background: "linear-gradient(135deg,#FF6B00,#FFD54F)",
+                          color: "#1a0a00", borderRadius: 8, padding: "1px 6px",
+                        }}>1</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        <StarsCollectionTab
+          profile={profile}
+          brawlerId={activeId}
+          onChanged={() => setProfile(getCurrentProfile())}
+          onMsg={(m, ok) => { setMsg({ text: m, ok: ok ?? true }); setTimeout(() => setMsg(null), 2200); }}
+          pickedStar={pickedStar}
+          onPickStar={setPickedStar}
+          starPickMode={starPickMode}
+          onStarPickMode={setStarPickMode}
+        />
+      </div>
+      ) : (
+      <div style={{ position: "relative", zIndex: 1, flex: 1, display: "flex", overflow: "hidden", minHeight: 0 }}>
+        <div style={{ width: 280, display: "flex", flexDirection: "column", borderRight: "1px solid rgba(255,255,255,0.10)", minHeight: 0, background: "rgba(0,0,0,0.42)", backdropFilter: "blur(6px)", WebkitBackdropFilter: "blur(6px)" }}>
+          <div style={{ padding: "12px 14px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+            <label style={{ fontSize: 10, color: "rgba(255,255,255,0.45)", fontWeight: 700, letterSpacing: 2, display: "block", marginBottom: 5 }}>
+              {t("collection.sortLabel", { count: ownedSorted.length })}
+            </label>
+            <select
+              value={sortKey}
+              onChange={(e) => setSortKey(e.target.value as BrawlerSortKey)}
+              className="ui-input"
+              style={{ width: "100%", fontSize: 12, padding: "8px 12px", cursor: "pointer" }}
+            >
+              {sortOptions.map(o => (
                 <option key={o.key} value={o.key} style={{ background: "#0a0040" }}>{o.label}</option>
               ))}
             </select>
@@ -207,9 +418,11 @@ export default function CollectionPage({ onBack }: CollectionPageProps) {
               const lv = profile.brawlerLevels[b.id] || 1;
               const isSelected = b.id === activeId;
               const isNew = (profile.newBrawlers || []).includes(b.id);
+              const pendingStar = hasPendingBrawlerStarPick(b.id, profile);
               const rarityColor = CHESTS[b.rarity].borderColor;
               const bTrophies = getBrawlerTrophies(profile, b.id);
-              const bRank = getBrawlerRank(bTrophies);
+              const bPeak = profile.brawlerTrophyPeak?.[b.id] ?? bTrophies;
+              const bRank = computeBrawlerRankBarState(bTrophies, bPeak).badgeRank;
               return (
                 <div
                   key={b.id}
@@ -225,119 +438,99 @@ export default function CollectionPage({ onBack }: CollectionPageProps) {
                     alignItems: "center",
                     gap: 10,
                     padding: "10px 12px",
-                    borderRadius: 12,
+                    borderRadius: "var(--r-md)",
                     cursor: "pointer",
                     marginBottom: 6,
-                    background: isSelected ? `${b.color}20` : "rgba(255,255,255,0.03)",
-                    border: `1px solid ${isNew ? "#FF4500" : isSelected ? b.color + "60" : "rgba(255,255,255,0.05)"}`,
-                    boxShadow: isNew ? "0 0 8px rgba(255,69,0,0.5)" : undefined,
-                    transition: "all 0.2s",
+                    background: isSelected
+                      ? `linear-gradient(135deg, ${b.color}33, ${b.color}11)`
+                      : "rgba(255,255,255,0.03)",
+                    border: `1px solid ${isNew ? "#FF4500" : pendingStar ? "#FFD54F" : isSelected ? b.color : "var(--bd-1)"}`,
+                    boxShadow: isNew
+                      ? "0 0 12px rgba(255,69,0,0.55)"
+                      : pendingStar
+                        ? "0 0 16px rgba(255,213,79,0.65)"
+                        : isSelected
+                        ? `0 0 16px ${b.color}55, inset 0 1px 0 rgba(255,255,255,0.06)`
+                        : "var(--sh-sm)",
+                    transition: "all var(--ease-mid)",
+                    backdropFilter: "blur(6px)",
                   }}
                 >
                   <div style={{ position: "relative", flexShrink: 0, width: 48, height: 48 }}>
-                    <img
-                      src={`${import.meta.env.BASE_URL}brawlers/${b.id}_front.png`}
-                      alt={b.name}
-                      width={48}
-                      height={48}
-                      style={{
-                        borderRadius: 8,
-                        background: `radial-gradient(circle at 50% 60%, ${b.color}40, ${b.color}10 70%, transparent)`,
-                        objectFit: "contain",
-                        objectPosition: "center bottom",
-                        filter: `drop-shadow(0 2px 4px ${b.color}80)`,
-                      }}
-                    />
+                    <BrawlerSidebarAvatar brawler={b} size={48} />
                     <div
                       onClick={(e) => { e.stopPropagation(); setRankModalBrawlerId(b.id); }}
-                      title="Награды за ранги"
+                      title={t("char.rankRewards")}
                       style={{
-                        position: "absolute", bottom: -4, left: "50%", transform: "translateX(-50%)",
-                        background: "linear-gradient(135deg, #F9A825, #FFD700)",
-                        color: "#000",
-                        fontSize: 9, fontWeight: 900, letterSpacing: 0.5,
-                        borderRadius: 6, padding: "1px 6px",
-                        border: "1px solid rgba(0,0,0,0.4)",
-                        boxShadow: "0 2px 6px rgba(0,0,0,0.5)",
-                        minWidth: 16, textAlign: "center", whiteSpace: "nowrap",
+                        position: "absolute", bottom: -8, left: "50%", transform: "translateX(-50%)",
                         cursor: "pointer",
                       }}
-                    >Р{bRank}</div>
+                    >
+                      <RankBadgeIcon rank={bRank} size={32} />
+                    </div>
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontWeight: 700, fontSize: 14, color: isNew ? "#FF6B00" : isSelected ? b.color : "white", display: "flex", alignItems: "center", gap: 4 }}>
-                      {b.name}
-                      {isNew && <span style={{ fontSize: 9, fontWeight: 900, background: "linear-gradient(135deg,#FF4500,#FF6B00)", color: "white", borderRadius: 5, padding: "1px 5px", letterSpacing: 0.5 }}>НОВОЕ</span>}
+                      {brawlerName(b.id, b.name)}
+                      {isNew && <span style={{ fontSize: 9, fontWeight: 900, background: "linear-gradient(135deg,#FF4500,#FF6B00)", color: "white", borderRadius: 5, padding: "1px 5px", letterSpacing: 0.5 }}>{t("common.new")}</span>}
+                      {pendingStar && (
+                        <span style={{
+                          fontSize: 10, fontWeight: 900, minWidth: 18, textAlign: "center",
+                          background: "linear-gradient(135deg,#FF6B00,#FFD54F)",
+                          color: "#1a0a00", borderRadius: 8, padding: "1px 6px",
+                        }}>1</span>
+                      )}
                     </div>
-                    <div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)" }}>УР {lv} • 🏆 {bTrophies}</div>
+                    <div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)" }}>{t("collection.levelTrophies", { level: lv, trophies: bTrophies })}</div>
                   </div>
                   <div style={{
                     fontSize: 9, fontWeight: 800, letterSpacing: 1,
                     background: rarityColor, color: "white",
                     borderRadius: 6, padding: "2px 6px",
                     textShadow: "0 1px 2px rgba(0,0,0,0.5)",
-                  }}>{BRAWLER_RARITY_LABEL[b.rarity]}</div>
+                  }}>{brawlerRarityLabel(b.rarity, BRAWLER_RARITY_LABEL[b.rarity])}</div>
                 </div>
               );
             })}
           </div>
         </div>
 
-        <div style={{ flex: 1, display: "flex", flexDirection: "row", alignItems: "stretch", padding: "14px 18px", overflowY: "hidden", minHeight: 0, gap: 14 }}>
-          <div style={{ flex: "0 0 auto", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
-            <BrawlerViewer3D brawlerId={brawler.id} color={brawler.color} size={320} />
-            <div style={{ textAlign: "center", marginTop: 10 }}>
-              <div style={{ fontSize: 32, fontWeight: 900, color: brawler.color }}>{brawler.name}</div>
-              <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", letterSpacing: 2 }}>{brawler.role.toUpperCase()} • УРОВЕНЬ {level} / 10</div>
-              <button
+        <div
+          style={{
+            flex: 1,
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "stretch",
+            padding: "14px 18px",
+            overflowY: "hidden",
+            minHeight: 0,
+            gap: 14,
+            position: "relative",
+            background: "transparent",
+          }}
+        >
+          <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-start", position: "relative", zIndex: 1, paddingTop: 0, gap: 0, minHeight: "100%" }}>
+            <div style={{ transform: "translate(-32px, -18px)" }}>
+              <BrawlerViewer3D
+                brawlerId={brawler.id}
+                color={brawler.color}
+                size={340}
+                paused={!!rankModalBrawlerId}
+              />
+            </div>
+            <div style={{ textAlign: "center", marginTop: "auto", paddingTop: 28, paddingBottom: 12, width: "100%" }}>
+              <BrawlerRankBar
+                brawlerId={brawler.id}
+                trophies={trophies}
                 onClick={() => setRankModalBrawlerId(brawler.id)}
-                style={{
-                  marginTop: 12,
-                  position: "relative",
-                  background: "linear-gradient(135deg, rgba(255,215,0,0.18), rgba(206,147,216,0.18))",
-                  border: "1px solid rgba(255,215,0,0.5)",
-                  borderRadius: 12,
-                  padding: "10px 18px",
-                  color: "white",
-                  fontWeight: 800,
-                  fontSize: 13,
-                  cursor: "pointer",
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 10,
-                }}
-              >
-                <span style={{ color: "#FFD700", fontSize: 18 }}>🏆</span>
-                <span>{trophies} кубков</span>
-                <span style={{
-                  background: "rgba(255,255,255,0.12)",
-                  borderRadius: 6,
-                  padding: "2px 8px",
-                  fontSize: 11,
-                  letterSpacing: 1,
-                }}>РАНГ {rank} / {MAX_BRAWLER_RANK}</span>
-                {unclaimed > 0 && (
-                  <span style={{
-                    position: "absolute",
-                    top: -8, right: -8,
-                    minWidth: 22, height: 22,
-                    borderRadius: 11,
-                    background: "#FF3D00",
-                    color: "white",
-                    fontSize: 12,
-                    fontWeight: 800,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    padding: "0 6px",
-                    boxShadow: "0 0 0 2px rgba(255,61,0,0.35), 0 0 14px 2px rgba(255,61,0,0.85)",
-                    animation: "rankBadgePulse 1.4s ease-in-out infinite",
-                  }}>{unclaimed}</span>
-                )}
-              </button>
+              />
               {nextReward && (
-                <div style={{ marginTop: 8, fontSize: 11, color: "rgba(255,255,255,0.55)" }}>
-                  До ранга {rank + 1}: {Math.min(trophiesIntoNext, trophiesNeededForNext)} / {trophiesNeededForNext}
+                <div style={{ marginTop: 8, fontSize: 11, color: "rgba(255,255,255,0.82)" }}>
+                  {t("collection.rankProgress", {
+                    rank: rank + 1,
+                    current: Math.min(trophiesIntoNext, trophiesNeededForNext),
+                    needed: trophiesNeededForNext,
+                  })}
                 </div>
               )}
             </div>
@@ -349,69 +542,82 @@ export default function CollectionPage({ onBack }: CollectionPageProps) {
             }
           `}</style>
 
-          <div style={{ flex: 1, background: "rgba(255,255,255,0.04)", borderRadius: 16, padding: 12, minWidth: 250, maxWidth: 410, alignSelf: "stretch", overflowY: "auto" }}>
+          <div className="ui-card" style={{ flex: "0 0 380px", background: "linear-gradient(160deg, rgba(20,12,52,0.7) 0%, rgba(8,4,24,0.85) 100%)", backdropFilter: "blur(12px) saturate(1.18)", WebkitBackdropFilter: "blur(12px) saturate(1.18)", border: "1px solid var(--bd-2)", borderRadius: "var(--r-lg)", padding: 14, alignSelf: "stretch", overflowY: "auto", position: "relative", zIndex: 1, marginLeft: "auto", boxShadow: "var(--sh-md), inset 0 1px 0 rgba(255,255,255,0.06)" }}>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
               {[
-                { label: "ЗДОРОВЬЕ", base: brawler.hp, current: scaled.hp, color: "#4CAF50" },
-                { label: "УРОН", base: brawler.attackDamage, current: scaled.attackDamage, color: "#FF5252" },
-                { label: "СКОРОСТЬ", base: brawler.speed, current: scaled.speed, color: "#40C4FF" },
-                { label: "РЕГЕН", base: brawler.regenRate, current: brawler.regenRate, color: "#CE93D8" },
+                { key: "hp", label: t("char.stat.hp"), base: brawler.hp, current: scaled.hp, color: "#4CAF50" },
+                { key: "damage", label: t("char.stat.damage"), base: brawler.attackDamage, current: scaled.attackDamage, color: "#FF5252" },
+                { key: "speed", label: t("char.stat.speed"), base: brawler.speed, current: scaled.speed, color: "#40C4FF" },
+                { key: "regen", label: t("char.stat.regen"), base: brawler.regenRate, current: brawler.regenRate, color: "#CE93D8" },
               ].map(stat => (
-                <div key={stat.label} style={{ background: "rgba(255,255,255,0.04)", borderRadius: 10, padding: "7px 9px" }}>
-                  <div style={{ fontSize: 10, color: "rgba(255,255,255,0.4)", fontWeight: 700, letterSpacing: 1 }}>{stat.label}</div>
-                  <div style={{ fontSize: 15, fontWeight: 800, color: stat.color }}>{stat.current}</div>
-                  {nextScaled && stat.label === "ЗДОРОВЬЕ" && <div style={{ fontSize: 10, color: "#4CAF50" }}>→ {nextScaled.hp}</div>}
-                  {nextScaled && stat.label === "УРОН" && <div style={{ fontSize: 10, color: "#FF5252" }}>→ {nextScaled.attackDamage}</div>}
+                <div key={stat.key} style={{
+                  background: "rgba(255,255,255,0.04)",
+                  border: "1px solid var(--bd-1)",
+                  borderRadius: "var(--r-md)",
+                  padding: "8px 10px",
+                  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.04)",
+                }}>
+                  <div className="ui-eyebrow" style={{ marginBottom: 2 }}>{stat.label}</div>
+                  <div style={{ fontSize: 15, fontWeight: 900, color: stat.color }}>{stat.current}</div>
+                  {nextScaled && stat.key === "hp" && <div style={{ fontSize: 10, color: "#4CAF50" }}>→ {nextScaled.hp}</div>}
+                  {nextScaled && stat.key === "damage" && <div style={{ fontSize: 10, color: "#FF5252" }}>→ {nextScaled.attackDamage}</div>}
                 </div>
               ))}
             </div>
 
             <div
               style={{
-                background: "rgba(255,255,255,0.03)",
-                borderRadius: 12,
-                padding: "8px 10px",
-                marginBottom: 8,
+                background: "rgba(255,255,255,0.04)",
+                border: "1px solid var(--bd-1)",
+                borderRadius: "var(--r-md)",
+                padding: "10px 12px",
+                marginBottom: 10,
+                boxShadow: "inset 0 1px 0 rgba(255,255,255,0.04)",
               }}
             >
-              <div style={{ fontSize: 10, color: "#40C4FF", fontWeight: 700, marginBottom: 2 }}>АТАКА: {brawler.attackName}</div>
-              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.55)", lineHeight: 1.3 }}>{brawler.attackDesc}</div>
-              <div style={{ fontSize: 10, color: "#FFD700", fontWeight: 700, marginBottom: 2, marginTop: 6 }}>СУПЕР: {brawler.superName}</div>
-              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.55)", lineHeight: 1.3 }}>{brawler.superDesc}</div>
+              <div style={{ fontSize: 10, color: "#40C4FF", fontWeight: 700, marginBottom: 2 }}>{t("collection.attackLabel", { name: brawlerAttackName(brawler.id, brawler.attackName) })}</div>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.55)", lineHeight: 1.3 }}>{brawlerAttackDesc(brawler.id, brawler.attackDesc)}</div>
+              <div style={{ fontSize: 10, color: "#FFD700", fontWeight: 700, marginBottom: 2, marginTop: 6 }}>{t("collection.superLabel", { name: brawlerSuperName(brawler.id, brawler.superName) })}</div>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.55)", lineHeight: 1.3 }}>{brawlerSuperDesc(brawler.id, brawler.superDesc)}</div>
             </div>
 
-            {level < 10 ? (
+            <div
+              style={{
+                background: "rgba(255,255,255,0.04)",
+                border: "1px solid var(--bd-1)",
+                borderRadius: "var(--r-md)",
+                padding: "10px 12px",
+                marginBottom: 10,
+                boxShadow: "inset 0 1px 0 rgba(255,255,255,0.04)",
+              }}
+            >
+              <div style={{ fontSize: 10, color: brawler.color, fontWeight: 700, marginBottom: 4 }}>{t("char.history")}</div>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.55)", lineHeight: 1.35 }}>
+                {brawlerLore(brawler.id, BRAWLER_LORE[brawler.id] || brawler.description)}
+              </div>
+            </div>
+
+            {level < MAX_BRAWLER_LEVEL ? (
               <div>
                 <div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", marginBottom: 6, textAlign: "center", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, flexWrap: "wrap" }}>
-                  Улучшить до ур. {level + 1}: <CoinIcon size={14} /> {upgradeCost.coins} + <PowerIcon size={14} /> {upgradeCost.pp}
+                  {t("collection.upgradeCostPrefix", { level: level + 1 })} <CoinIcon size={14} /> {upgradeCost.coins} + <PowerIcon size={14} /> {upgradeCost.powerPoints}
                 </div>
                 <button
                   onClick={handleUpgrade}
                   disabled={!canUpgrade}
-                  style={{
-                    width: "100%",
-                    background: canUpgrade ? "linear-gradient(135deg, #F9A825, #FFD700)" : "rgba(255,255,255,0.1)",
-                    border: "none",
-                    borderRadius: 12,
-                    padding: "10px 0",
-                    color: canUpgrade ? "#000" : "rgba(255,255,255,0.3)",
-                    fontWeight: 800,
-                    fontSize: 14,
-                    cursor: canUpgrade ? "pointer" : "not-allowed",
-                    letterSpacing: 1,
-                    display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-                  }}
+                  className={`ui-btn ui-btn--block ui-btn--lg ${canUpgrade ? "ui-btn--primary" : "ui-btn--ghost"}`}
+                  style={{ letterSpacing: "0.14em" }}
                 >
-                  {canUpgrade ? <>УЛУЧШИТЬ</> : <><CoinIcon size={14} /> {upgradeCost.coins} + <PowerIcon size={14} /> {upgradeCost.pp}</>}
+                  {canUpgrade ? t("char.upgradeTo", { level: level + 1 }) : <><CoinIcon size={14} /> {upgradeCost.coins} + <PowerIcon size={14} /> {upgradeCost.powerPoints}</>}
                 </button>
               </div>
             ) : (
-              <div style={{ textAlign: "center", color: "#FFD700", fontWeight: 700, fontSize: 14 }}>МАКСИМАЛЬНЫЙ УРОВЕНЬ!</div>
+              <div style={{ textAlign: "center", color: "#FFD700", fontWeight: 700, fontSize: 14 }}>{t("char.maxLevel")}</div>
             )}
 
             {msg && (
-              <div style={{ textAlign: "center", marginTop: 10, color: msg === "Уровень повышен!" ? "#4CAF50" : "#FF5252", fontWeight: 700 }}>
-                {msg}
+              <div style={{ textAlign: "center", marginTop: 10, color: msg.ok ? "#4CAF50" : "#FF5252", fontWeight: 700 }}>
+                {msg.text}
               </div>
             )}
           </div>
@@ -427,52 +633,102 @@ export default function CollectionPage({ onBack }: CollectionPageProps) {
       )}
       
     </div>
+    </>
   );
 }
 
 function StarsCollectionTab({
-  profile, brawlerId, onChanged, onMsg, pickedStar, onPickStar,
+  profile, brawlerId, onChanged, onMsg, pickedStar, onPickStar, starPickMode, onStarPickMode,
 }: {
   profile: NonNullable<ReturnType<typeof getCurrentProfile>>;
   brawlerId: string;
   onChanged: () => void;
-  onMsg: (m: string) => void;
+  onMsg: (m: string, ok?: boolean) => void;
   pickedStar: number | null;
   onPickStar: (s: number) => void;
+  starPickMode: boolean;
+  onStarPickMode: (v: boolean) => void;
 }) {
-  const brawler = BRAWLERS.find(b => b.id === brawlerId) || BRAWLERS[0];
-  const defs = BRAWLER_CONSTELLATIONS[brawler.id] || [];
+  const { t } = useI18n();
+  const brawler = getBrawlerById(brawlerId) ?? BRAWLERS[0];
+  const starCosts = getEffectiveStarCosts();
+  const defs = getEffectiveConstellation(brawler.id);
   const owned = new Set(getBrawlerStars(profile, brawler.id));
   const missingCount = defs.length - owned.size;
   const activeStar = pickedStar ? defs.find(s => s.index === pickedStar) : null;
+  const pendingPick = hasPendingBrawlerStarPick(brawler.id, profile);
+  const pickable = starPickMode && pendingPick ? getUnownedStarIndices(profile, brawler.id) : [];
+  const handleStarClick = (idx: number) => {
+    if (starPickMode && pendingPick && !owned.has(idx)) {
+      const r = claimPendingBrawlerStar(brawler.id, idx);
+      const picked = defs.find(s => s.index === idx);
+      const pickedName = picked ? starName(brawler.id, picked.index, picked.name) : "";
+      onMsg(
+        r.success ? t("collection.starReceived", { name: pickedName }) : (r.error || t("common.error")),
+        r.success,
+      );
+      onStarPickMode(false);
+      onChanged();
+      return;
+    }
+    onPickStar(idx);
+  };
   return (
-    <div style={{ flex: 1, overflowY: "auto", padding: 22, minHeight: 0 }}>
-      <div style={{ fontSize: 18, fontWeight: 900, color: "#FFD740", marginBottom: 6 }}>
-        ✨ Созвездие: {brawler.name}
+    <div style={{ position: "relative", zIndex: 1, flex: 1, overflowY: "auto", padding: 22, minHeight: 0, minWidth: 0 }}>
+      <div style={{ fontSize: 20, fontWeight: 900, color: "#FFD740", marginBottom: 6, textShadow: "0 2px 8px rgba(0,0,0,0.9)", display: "flex", alignItems: "center", gap: 10 }}>
+        <span>{t("collection.constellationTitle", { name: brawlerName(brawler.id, brawler.name) })}</span>
+        {pendingPick && (
+          <span style={{
+            fontSize: 11, fontWeight: 900, minWidth: 20, textAlign: "center",
+            background: "linear-gradient(135deg,#FF6B00,#FFD54F)",
+            color: "#1a0a00", borderRadius: 10, padding: "2px 8px",
+          }}>1</span>
+        )}
       </div>
-      <div style={{ fontSize: 12, color: "rgba(255,255,255,0.6)", marginBottom: 12 }}>
-        Открыто {owned.size}/6 звёзд
+      <div style={{ fontSize: 12, color: "rgba(255,255,255,0.78)", marginBottom: 12, textShadow: "0 1px 4px rgba(0,0,0,0.85)" }}>
+        {t("collection.starsOpened", { count: owned.size })}
+        {pendingPick && <span style={{ marginLeft: 8, color: "#FFD54F", fontWeight: 800 }}>{t("collection.freeStarFromChest")}</span>}
       </div>
+      {pendingPick && (
+        <button
+          type="button"
+          onClick={() => onStarPickMode(!starPickMode)}
+          className="ui-btn ui-btn--primary"
+          style={{ marginBottom: 12, boxShadow: "0 0 16px rgba(255,213,79,0.55)" }}
+        >
+          {starPickMode ? t("common.cancel") : t("collection.pickStar")}
+        </button>
+      )}
       <div style={{ display: "grid", gridTemplateColumns: "1fr minmax(260px, 340px)", gap: 14, alignItems: "start" }}>
-        <div style={{ background: "rgba(0,0,0,0.28)", border: "1px solid rgba(255,255,255,0.16)", borderRadius: 14, padding: 14 }}>
-          <BrawlerConstellationView brawlerId={brawler.id} ownedStars={Array.from(owned)} onPick={onPickStar} />
+        <div style={{
+          background: "rgba(8,4,28,0.48)", backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)",
+          border: starPickMode ? "2px solid rgba(255,213,79,0.7)" : "1px solid rgba(255,215,64,0.28)",
+          borderRadius: 14, padding: 14,
+          boxShadow: starPickMode ? "0 0 24px rgba(255,213,79,0.4)" : "0 6px 24px rgba(0,0,0,0.45)",
+        }}>
+          <BrawlerConstellationView
+            brawlerId={brawler.id}
+            ownedStars={Array.from(owned)}
+            pickableStars={pickable}
+            onPick={handleStarClick}
+          />
         </div>
-        <div style={{ borderRadius: 12, padding: 12, background: "rgba(0,0,0,0.35)", border: "1px solid rgba(255,255,255,0.16)" }}>
+        <div style={{ borderRadius: 12, padding: 12, background: "rgba(8,4,28,0.55)", backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)", border: "1px solid rgba(255,215,64,0.28)", boxShadow: "0 6px 24px rgba(0,0,0,0.45)" }}>
           {activeStar ? (
             <>
               <div style={{ fontSize: 16, fontWeight: 800, color: owned.has(activeStar.index) ? "#FFD740" : "rgba(255,255,255,0.9)" }}>
-                {activeStar.icon} {activeStar.name}
+                {activeStar.icon} {starName(brawler.id, activeStar.index, activeStar.name)}
               </div>
               <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.45, color: "rgba(255,255,255,0.8)" }}>
-                {activeStar.effect}
+                {starEffect(brawler.id, activeStar.index, activeStar.effect)}
               </div>
               <div style={{ marginTop: 10, fontSize: 11, color: owned.has(activeStar.index) ? "#FFD740" : "rgba(255,255,255,0.6)" }}>
-                {owned.has(activeStar.index) ? "Куплено" : "Не куплено"}
+                {owned.has(activeStar.index) ? t("shop.stars.opened") : t("shop.stars.notOpened")}
               </div>
             </>
           ) : (
             <div style={{ fontSize: 12, color: "rgba(255,255,255,0.65)" }}>
-              Выберите звезду на созвездии, чтобы увидеть описание справа.
+              {t("collection.pickStarHint")}
             </div>
           )}
         </div>
@@ -482,31 +738,36 @@ function StarsCollectionTab({
           <button
             onClick={() => {
               const next = defs.find(s => !owned.has(s.index));
-              if (!next) return onMsg("Все 6 звёзд уже открыты");
+              if (!next) return onMsg(t("shop.stars.allUnlocked"), false);
               const r = buyBrawlerStarWithGems(brawler.id, next.index);
-              onMsg(r.success ? "Звезда куплена" : (r.error || "Ошибка"));
+              onMsg(r.success ? t("shop.stars.purchased") : (r.error || t("common.error")), !!r.success);
               onChanged();
             }}
-            style={{ border: "none", borderRadius: 10, padding: "10px 14px", background: "linear-gradient(135deg,#0288D1,#40C4FF)", color: "white", fontWeight: 800, cursor: "pointer" }}
+            className="ui-btn ui-btn--cyan"
           >
-            Купить 1 звезду ({STAR_COST_GEMS} 💎)
+            {t("shop.stars.buyOne", { cost: starCosts.singleGems })}
           </button>
         )}
         {missingCount >= 3 && (
           <button
             onClick={() => {
               const r = buyBrawlerStarsPackWithGems(brawler.id);
-              onMsg(r.success ? `Куплен пакет: +${r.gained?.length || 0} звезды` : (r.error || "Ошибка"));
+              onMsg(
+                r.success
+                  ? t("collection.packPurchasedMsg", { count: r.gained?.length || 0 })
+                  : (r.error || t("common.error")),
+                !!r.success,
+              );
               onChanged();
             }}
-            style={{ border: "none", borderRadius: 10, padding: "10px 14px", background: "linear-gradient(135deg,#F9A825,#FFD740)", color: "#3E2723", fontWeight: 800, cursor: "pointer" }}
+            className="ui-btn ui-btn--primary"
           >
-            Пакет 3 звезды ({STAR_PACK3_COST_GEMS} 💎)
+            {t("shop.stars.buyPack", { cost: starCosts.pack3Gems })}
           </button>
         )}
         {missingCount === 0 && (
-          <div style={{ padding: "10px 12px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.2)", background: "rgba(0,0,0,0.25)", color: "rgba(255,255,255,0.82)", fontSize: 12 }}>
-            Все 6 звёзд для этого бойца уже куплены
+          <div className="ui-pill ui-pill--success" style={{ padding: "10px 14px", fontSize: 12 }}>
+            ★ {t("shop.stars.allOwned")}
           </div>
         )}
       </div>
@@ -521,34 +782,45 @@ function StarInfoModal({
   starIndex: number;
   onClose: () => void;
   onChanged: () => void;
-  onMsg: (m: string) => void;
+  onMsg: (m: string, ok?: boolean) => void;
 }) {
+  const { t } = useI18n();
   const profile = getCurrentProfile();
   if (!profile) return null;
-  const defs = BRAWLER_CONSTELLATIONS[brawlerId] || [];
+  const starCosts = getEffectiveStarCosts();
+  const defs = getEffectiveConstellation(brawlerId);
   const star = defs.find(s => s.index === starIndex);
   if (!star) return null;
   const owned = new Set(getBrawlerStars(profile, brawlerId));
   const isOpen = owned.has(starIndex);
   return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,0.72)", display: "flex", alignItems: "center", justifyContent: "center", padding: 18 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ width: 460, maxWidth: "95vw", borderRadius: 14, background: "linear-gradient(180deg, rgba(26,10,51,0.95), rgba(8,2,20,0.95))", border: "1px solid rgba(255,255,255,0.2)", padding: 14 }}>
-        <div style={{ fontSize: 20, fontWeight: 900, color: "#FFD740" }}>{star.icon} {star.name}</div>
-        <div style={{ marginTop: 8, fontSize: 13, lineHeight: 1.5, color: "rgba(255,255,255,0.82)" }}>{star.effect}</div>
-        <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
+    <div
+      onClick={onClose}
+      onWheel={(e) => e.preventDefault()}
+      style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,0.72)", display: "flex", alignItems: "center", justifyContent: "center", padding: 18 }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        onWheel={(e) => e.stopPropagation()}
+        className="ui-glass-strong"
+        style={{ width: 460, maxWidth: "95vw", borderRadius: "var(--r-lg)", padding: 18, boxShadow: "var(--sh-glow-gold), var(--sh-lg)" }}
+      >
+        <div style={{ fontSize: 22, fontWeight: 900, color: "var(--c-gold-3)", letterSpacing: "0.04em" }}>{star.icon} {starName(brawlerId, star.index, star.name)}</div>
+        <div style={{ marginTop: 10, fontSize: 13.5, lineHeight: 1.55, color: "var(--t-2)" }}>{starEffect(brawlerId, star.index, star.effect)}</div>
+        <div style={{ marginTop: 14, display: "flex", gap: 8 }}>
           <button
             onClick={() => {
               const r = buyBrawlerStarWithGems(brawlerId, starIndex);
-              onMsg(r.success ? "Звезда куплена" : (r.error || "Ошибка"));
+              onMsg(r.success ? t("shop.stars.purchased") : (r.error || t("common.error")), !!r.success);
               onChanged();
             }}
             disabled={isOpen}
-            style={{ border: "none", borderRadius: 10, padding: "9px 12px", background: isOpen ? "rgba(255,255,255,0.1)" : "linear-gradient(135deg,#0288D1,#40C4FF)", color: isOpen ? "rgba(255,255,255,0.5)" : "white", fontWeight: 800, cursor: isOpen ? "default" : "pointer" }}
+            className={`ui-btn ${isOpen ? "ui-btn--ghost" : "ui-btn--cyan"}`}
           >
-            {isOpen ? "Уже куплено" : `Купить за ${STAR_COST_GEMS} 💎`}
+            {isOpen ? t("common.bought") : t("shop.stars.buyOne", { cost: starCosts.singleGems })}
           </button>
-          <button onClick={onClose} style={{ border: "1px solid rgba(255,255,255,0.25)", borderRadius: 10, padding: "9px 12px", background: "rgba(255,255,255,0.06)", color: "white", fontWeight: 700, cursor: "pointer" }}>
-            Закрыть
+          <button onClick={onClose} className="ui-btn ui-btn--secondary">
+            {t("common.close")}
           </button>
         </div>
       </div>
@@ -562,24 +834,67 @@ const PET_RARITY_TINT: Record<string, string> = {
   mythic: "#FF7043", legendary: "#FFD54F",
 };
 
-function PetsCollectionTab({ profile }: { profile: ReturnType<typeof getCurrentProfile> }) {
+function BrawlerSidebarAvatar({
+  brawler: b,
+  size,
+}: {
+  brawler: typeof BRAWLERS[number];
+  size: number;
+}) {
+  const base = import.meta.env.BASE_URL;
+  const avatarBg = RARITY_AVATAR_BG[b.rarity] ?? RARITY_AVATAR_BG.rare;
+  return (
+    <div style={{
+      width: size,
+      height: size,
+      borderRadius: 8,
+      overflow: "hidden",
+      flexShrink: 0,
+      background: avatarBg,
+      boxShadow: `0 2px 8px ${b.color}44`,
+    }}>
+      <img
+        src={`${base}brawlers/avatars/${b.id}.png`}
+        alt={brawlerName(b.id, b.name)}
+        style={{
+          width: "100%",
+          height: "100%",
+          objectFit: "cover",
+          objectPosition: "center top",
+          display: "block",
+        }}
+        onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+      />
+    </div>
+  );
+}
+
+function PetsCollectionTab({
+  profile,
+  onPreviewPet,
+}: {
+  profile: ReturnType<typeof getCurrentProfile>;
+  onPreviewPet?: (petId: string) => void;
+}) {
+  const { t } = useI18n();
   if (!profile) return null;
   const owned = new Set(profile.unlockedPets || []);
   const ownedPets = PETS
     .filter(p => owned.has(p.id))
     .sort((a, b) =>
       PET_RARITY_ORDER.indexOf(b.rarity) - PET_RARITY_ORDER.indexOf(a.rarity)
-      || a.name.localeCompare(b.name));
+      || petName(a.id, a.name).localeCompare(petName(b.id, b.name)));
   const lockedPets = PETS
     .filter(p => !owned.has(p.id))
     .sort((a, b) => PET_RARITY_ORDER.indexOf(a.rarity) - PET_RARITY_ORDER.indexOf(b.rarity));
 
   return (
-    <div style={{ flex: 1, overflowY: "auto", padding: 22, minHeight: 0 }}>
+    <div style={{ position: "relative", zIndex: 1, flex: 1, overflowY: "auto", padding: 22, minHeight: 0 }}>
       <div style={{
-        fontSize: 11, color: "rgba(178,255,89,0.85)",
+        fontSize: 11, color: "rgba(178,255,89,0.95)",
         letterSpacing: 3, fontWeight: 800, marginBottom: 10, paddingLeft: 4,
-      }}>МОИ ПИТОМЦЫ <span style={{ color: "rgba(255,255,255,0.4)", marginLeft: 6 }}>{ownedPets.length}/{PETS.length}</span></div>
+        textShadow: "0 1px 4px rgba(0,0,0,0.85)",
+      }}>{t("collection.myPets")} <span style={{ color: "rgba(255,255,255,0.7)", marginLeft: 6 }}>{ownedPets.length}/{PETS.length}</span></div>
       {ownedPets.length === 0 ? (
         <div style={{
           padding: 26, textAlign: "center",
@@ -587,27 +902,30 @@ function PetsCollectionTab({ profile }: { profile: ReturnType<typeof getCurrentP
           background: "rgba(0,0,0,0.25)", borderRadius: 12,
           border: "1px dashed rgba(255,255,255,0.10)",
           marginBottom: 18,
-        }}>Питомцы пока не пойманы — открывайте сундуки или покупайте за кристаллы.</div>
+        }}>{t("collection.petsEmpty")}</div>
       ) : (
-        <CollectionPetGrid pets={ownedPets} owned profile={profile} />
+        <CollectionPetGrid pets={ownedPets} owned profile={profile} onPreviewPet={onPreviewPet} />
       )}
 
       <div style={{
-        fontSize: 11, color: "rgba(255,255,255,0.4)",
+        fontSize: 11, color: "rgba(255,255,255,0.78)",
         letterSpacing: 3, fontWeight: 800, marginBottom: 10, marginTop: 18, paddingLeft: 4,
-      }}>ЗАБЛОКИРОВАНЫ <span style={{ marginLeft: 6 }}>{lockedPets.length}</span></div>
-      <CollectionPetGrid pets={lockedPets} owned={false} profile={profile} />
+        textShadow: "0 1px 4px rgba(0,0,0,0.85)",
+      }}>{t("collection.locked")} <span style={{ marginLeft: 6, color: "rgba(255,255,255,0.55)" }}>{lockedPets.length}</span></div>
+      <CollectionPetGrid pets={lockedPets} owned={false} profile={profile} onPreviewPet={onPreviewPet} />
     </div>
   );
 }
 
 function CollectionPetGrid({
-  pets, owned, profile,
+  pets, owned, profile, onPreviewPet,
 }: {
   pets: typeof PETS;
   owned: boolean;
   profile: ReturnType<typeof getCurrentProfile>;
+  onPreviewPet?: (petId: string) => void;
 }) {
+  const { t } = useI18n();
   return (
     <div style={{
       display: "grid",
@@ -618,11 +936,15 @@ function CollectionPetGrid({
         const isEquipped = owned && profile?.equippedPetId === p.id;
         const isNew = owned && (profile?.newPets || []).includes(p.id);
         return (
-          <div key={p.id} style={{
+          <div key={p.id} onClick={() => onPreviewPet?.(p.id)} style={{
             position: "relative",
-            background: owned
-              ? `linear-gradient(180deg, ${p.color}26 0%, rgba(0,0,0,0.55) 100%)`
-              : "rgba(0,0,0,0.45)",
+            cursor: onPreviewPet ? "pointer" : undefined,
+            backgroundImage: owned
+              ? `url("${import.meta.env.BASE_URL}pets/backgrounds/${p.id}.png")`
+              : undefined,
+            backgroundColor: owned ? p.secondaryColor : "rgba(0,0,0,0.45)",
+            backgroundSize: "cover",
+            backgroundPosition: "center",
             border: owned ? `1.5px solid ${p.color}55` : "1.5px solid rgba(255,255,255,0.10)",
             borderRadius: 14, padding: "12px 8px 10px",
             display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
@@ -639,7 +961,7 @@ function CollectionPetGrid({
                 fontSize: 8, fontWeight: 900, letterSpacing: 1,
                 background: "#76FF03", color: "#1B5E20",
                 borderRadius: 6, padding: "2px 5px",
-              }}>ЭКИП</div>
+              }}>{t("collection.equipped")}</div>
             )}
             {isNew && !isEquipped && (
               <div style={{
@@ -647,7 +969,7 @@ function CollectionPetGrid({
                 fontSize: 8, fontWeight: 900, letterSpacing: 1,
                 background: "#FF1744", color: "white",
                 borderRadius: 6, padding: "2px 5px",
-              }}>NEW</div>
+              }}>{t("common.new")}</div>
             )}
             <div style={{
               width: 84, height: 84,
@@ -660,17 +982,17 @@ function CollectionPetGrid({
               fontSize: 11, fontWeight: 800,
               color: owned ? p.color : "rgba(255,255,255,0.5)",
               textAlign: "center",
-            }}>{owned ? p.name : "???"}</div>
+            }}>{owned ? petName(p.id, p.name) : "???"}</div>
             <div style={{
               fontSize: 9, color: "rgba(255,255,255,0.55)",
               textAlign: "center", lineHeight: 1.2, minHeight: 22,
-            }}>{owned ? p.effectLabel : PET_RARITY_LABEL[p.rarity]}</div>
+            }}>{owned ? petEffectLabel(p.id, p.effectLabel) : petRarityLabel(p.rarity, PET_RARITY_LABEL[p.rarity])}</div>
             {!owned && (
               <div style={{
                 fontSize: 10, fontWeight: 800,
                 color: "#40C4FF", marginTop: 2,
                 display: "inline-flex", alignItems: "center", gap: 3,
-              }}><GemIcon size={10} /> {PET_GEM_COST[p.rarity]}</div>
+              }}><GemIcon size={10} /> {getEffectivePetGemCost(p.rarity)}</div>
             )}
           </div>
         );

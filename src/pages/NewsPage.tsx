@@ -1,22 +1,38 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  getNewsSorted, getNewsCategories, markNewsSeen,
+  getNewsSorted, getNewsCategories, markNewsSeen, isNewsUnread,
   type NewsItem, type NewsCategory,
 } from "../utils/news";
 import { getCurrentUsername } from "../utils/localStorageAPI";
+import { PageBg, PageBody, PageHeader, PageToolbar } from "../components/PageChrome";
+import NewsUnreadDot from "../components/NewsUnreadDot";
+import { useI18n } from "../i18n";
 
 interface NewsPageProps {
   onBack: () => void;
 }
 
 export default function NewsPage({ onBack }: NewsPageProps) {
+  const { t } = useI18n();
   const [items, setItems] = useState<NewsItem[]>(() => getNewsSorted());
   const [activeId, setActiveId] = useState<string | null>(items[0]?.id ?? null);
   const [filter, setFilter] = useState<string>("all");
+  const [seenTick, setSeenTick] = useState(0);
   const cats = useMemo(() => getNewsCategories(), []);
   const user = getCurrentUsername();
 
   useEffect(() => { setItems(getNewsSorted()); }, []);
+
+  const markSeen = (id: string) => {
+    if (!user) return;
+    markNewsSeen(user, id);
+    setSeenTick((n) => n + 1);
+  };
+
+  const selectNews = (id: string) => {
+    setActiveId(id);
+    markSeen(id);
+  };
 
   const visible = useMemo(() => (
     filter === "all" ? items : items.filter(n => n.categoryId === filter)
@@ -27,48 +43,25 @@ export default function NewsPage({ onBack }: NewsPageProps) {
     ?? visible[0]
     ?? null;
 
-  // Mark active as seen on click.
+  // Mark auto-selected first item as seen.
   useEffect(() => {
-    if (active && user) markNewsSeen(user, active.id);
+    if (active && user) markSeen(active.id);
   }, [active?.id, user]);
 
   return (
-    <div style={{
-      minHeight: "100%",
-      background: "linear-gradient(135deg, #0f2450 0%, #1b3b75 50%, #245297 100%)",
-      color: "white", display: "flex", flexDirection: "column",
-      fontFamily: "'Segoe UI', Arial, sans-serif",
+    <PageBg variant="news" style={{
+      display: "flex", flexDirection: "column",
+      fontFamily: "var(--app-font-sans)",
     }}>
-      <div style={{
-        display: "flex", alignItems: "center",
-        padding: "14px 22px",
-        borderBottom: "1px solid rgba(255,255,255,0.10)",
-        background: "rgba(0,0,0,0.25)",
-      }}>
-        <button onClick={onBack} style={{
-          background: "rgba(255,255,255,0.07)",
-          border: "1px solid rgba(255,255,255,0.18)",
-          borderRadius: 10, padding: "7px 16px",
-          color: "rgba(255,255,255,0.85)", cursor: "pointer",
-          fontSize: 13, fontWeight: 700,
-        }}>← Назад</button>
-        <h2 style={{
-          flex: 1, textAlign: "center", margin: 0,
-          fontSize: 22, fontWeight: 900, letterSpacing: 2,
-          color: "#FFD54F",
-          textShadow: "0 0 14px rgba(255,213,79,0.5)",
-        }}>📰 НОВОСТИ</h2>
-        <div style={{ width: 110 }} />
-      </div>
+      <PageHeader onBack={onBack} title={`📰 ${t("news.title")}`} />
 
-      {/* Category filter chips */}
-      <div style={{
+      <PageToolbar style={{
         display: "flex", gap: 8, padding: "10px 22px",
         overflowX: "auto", borderBottom: "1px solid rgba(255,255,255,0.06)",
         background: "rgba(0,0,0,0.18)",
       }}>
         <Chip active={filter === "all"} color="#FFD54F" onClick={() => setFilter("all")}>
-          Все ({items.length})
+          {t("news.allCount", { count: items.length })}
         </Chip>
         {cats.map(c => {
           const count = items.filter(n => n.categoryId === c.id).length;
@@ -79,8 +72,9 @@ export default function NewsPage({ onBack }: NewsPageProps) {
             </Chip>
           );
         })}
-      </div>
+      </PageToolbar>
 
+      <PageBody style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
       {items.length === 0 ? (
         <div style={{
           flex: 1, display: "flex", flexDirection: "column",
@@ -88,9 +82,9 @@ export default function NewsPage({ onBack }: NewsPageProps) {
           color: "rgba(255,255,255,0.55)", textAlign: "center", padding: 40,
         }}>
           <div style={{ fontSize: 64, marginBottom: 14 }}>📭</div>
-          <div style={{ fontSize: 16, fontWeight: 800 }}>Новостей пока нет</div>
+          <div style={{ fontSize: 16, fontWeight: 800 }}>{t("news.emptyTitle")}</div>
           <div style={{ fontSize: 12, marginTop: 6, maxWidth: 360 }}>
-            Когда команда разработки опубликует обновление или ивент, оно появится здесь.
+            {t("news.emptyHint")}
           </div>
         </div>
       ) : (
@@ -100,43 +94,65 @@ export default function NewsPage({ onBack }: NewsPageProps) {
           {/* List */}
           <div style={{
             flex: "0 0 320px", overflowY: "auto",
-            borderRight: "1px solid rgba(255,255,255,0.08)",
-            background: "rgba(0,0,0,0.18)",
+            borderRight: "1px solid var(--bd-1)",
+            background: "linear-gradient(180deg, rgba(8,4,24,0.65), rgba(8,4,24,0.45))",
+            backdropFilter: "blur(10px) saturate(1.15)",
+            WebkitBackdropFilter: "blur(10px) saturate(1.15)",
           }}>
             {visible.map(n => {
               const cat = cats.find(c => c.id === n.categoryId);
               const isActive = active?.id === n.id;
+              const isUnread = isNewsUnread(user, n.id);
               return (
                 <button
                   key={n.id}
-                  onClick={() => setActiveId(n.id)}
+                  onClick={() => selectNews(n.id)}
                   style={{
                     width: "100%", display: "flex", flexDirection: "column",
-                    gap: 6, padding: "12px 16px", textAlign: "left",
-                    background: isActive ? "rgba(255,255,255,0.08)" : "transparent",
-                    borderLeft: isActive ? `4px solid ${cat?.color ?? "#FFD54F"}` : "4px solid transparent",
-                    border: "none", borderBottom: "1px solid rgba(255,255,255,0.05)",
-                    cursor: "pointer", color: "white",
+                    gap: 6, padding: "14px 18px", textAlign: "left",
+                    position: "relative",
+                    background: isActive
+                      ? `linear-gradient(135deg, ${cat?.color ?? "#FFD54F"}26, transparent)`
+                      : isUnread
+                        ? "rgba(255,23,68,0.06)"
+                        : "transparent",
+                    borderLeft: isActive ? `3px solid ${cat?.color ?? "#FFD54F"}` : isUnread ? "3px solid rgba(255,23,68,0.45)" : "3px solid transparent",
+                    border: "none", borderBottom: "1px solid var(--bd-1)",
+                    cursor: "pointer", color: "var(--t-1)",
+                    transition: "all var(--ease-mid)",
+                    boxShadow: isActive ? `inset 0 0 14px ${cat?.color ?? "#FFD54F"}33` : "none",
                   }}
                 >
-                  <div style={{
+                  <div className="ui-eyebrow" style={{
                     display: "flex", alignItems: "center", gap: 6,
-                    fontSize: 10, color: cat?.color ?? "#FFD54F",
-                    fontWeight: 800, letterSpacing: 1.2, textTransform: "uppercase",
+                    color: cat?.color ?? "var(--c-gold-3)",
                   }}>
                     <span>{cat?.icon}</span>
                     <span>{cat?.label ?? "—"}</span>
-                    <span style={{ marginLeft: "auto", color: "rgba(255,255,255,0.4)", letterSpacing: 0 }}>
+                    {isUnread && (
+                      <span style={{
+                        display: "inline-flex", alignItems: "center", gap: 5,
+                        marginLeft: 4, fontSize: 9, fontWeight: 900,
+                        color: "#FF5252", letterSpacing: 0.8,
+                      }}>
+                        <NewsUnreadDot size={7} />
+                        {t("news.newBadge")}
+                      </span>
+                    )}
+                    <span style={{ marginLeft: "auto", color: "var(--t-4)", letterSpacing: 0, fontSize: 10 }}>
                       {new Date(n.publishedAt).toLocaleDateString()}
                     </span>
                   </div>
-                  <div style={{ fontSize: 13, fontWeight: 800, lineHeight: 1.3 }}>
+                  <div style={{
+                    fontSize: 13.5, fontWeight: 900, lineHeight: 1.3, letterSpacing: "0.01em",
+                  }}>
                     {n.title}
                   </div>
                   <div style={{
-                    fontSize: 11, color: "rgba(255,255,255,0.55)",
+                    fontSize: 11, color: "var(--t-3)",
                     overflow: "hidden", textOverflow: "ellipsis",
                     display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical",
+                    lineHeight: 1.4,
                   }}>{n.body.slice(0, 120)}</div>
                 </button>
               );
@@ -147,12 +163,13 @@ export default function NewsPage({ onBack }: NewsPageProps) {
             {active ? (
               <NewsDetail item={active} cat={cats.find(c => c.id === active.categoryId)} />
             ) : (
-              <div style={{ color: "rgba(255,255,255,0.55)" }}>Выберите новость слева</div>
+              <div style={{ color: "rgba(255,255,255,0.55)" }}>{t("news.selectHint")}</div>
             )}
           </div>
         </div>
       )}
-    </div>
+      </PageBody>
+    </PageBg>
   );
 }
 
@@ -164,21 +181,26 @@ function Chip({
   return (
     <button
       onClick={onClick}
+      className="ui-pill"
       style={{
         padding: "6px 14px",
-        background: active ? `${color}26` : "rgba(255,255,255,0.04)",
-        border: `1.5px solid ${active ? color : "rgba(255,255,255,0.10)"}`,
-        borderRadius: 999,
-        color: active ? color : "rgba(255,255,255,0.65)",
-        fontWeight: 800, fontSize: 11, letterSpacing: 1,
+        background: active
+          ? `linear-gradient(135deg, ${color}55, ${color}22)`
+          : "rgba(255,255,255,0.04)",
+        border: `1px solid ${active ? color : "var(--bd-1)"}`,
+        color: active ? "#fff" : "var(--t-3)",
+        fontWeight: 800, fontSize: 11, letterSpacing: "0.06em",
         whiteSpace: "nowrap", cursor: "pointer",
-        boxShadow: active ? `0 0 10px ${color}55` : "none",
+        boxShadow: active ? `0 0 14px ${color}88, inset 0 1px 0 rgba(255,255,255,0.12)` : "var(--sh-sm)",
+        transition: "all var(--ease-mid)",
       }}
     >{children}</button>
   );
 }
 
 function NewsDetail({ item, cat }: { item: NewsItem; cat: NewsCategory | undefined }) {
+  const hasMedia = !!(item.imageDataUrl || item.videoDataUrl || item.youtubeId);
+
   return (
     <article style={{ maxWidth: 820, margin: "0 auto" }}>
       <div style={{
@@ -200,22 +222,36 @@ function NewsDetail({ item, cat }: { item: NewsItem; cat: NewsCategory | undefin
         fontSize: 12, color: "rgba(255,255,255,0.5)", marginBottom: 18,
         fontWeight: 600,
       }}>{new Date(item.publishedAt).toLocaleString()}</div>
-      <NewsMedia item={item} />
-      <div style={{
-        whiteSpace: "pre-wrap", lineHeight: 1.6,
-        fontSize: 14, color: "rgba(255,255,255,0.88)",
-        marginTop: 16,
-      }}>{item.body}</div>
+      <div style={{ overflow: "hidden" }}>
+        {hasMedia && (
+          <div style={{
+            float: "left",
+            marginRight: 16,
+            marginBottom: 12,
+            maxWidth: "52%",
+          }}>
+            <NewsMedia item={item} floated />
+          </div>
+        )}
+        <div style={{
+          whiteSpace: "pre-wrap", lineHeight: 1.6,
+          fontSize: 14, color: "rgba(255,255,255,0.88)",
+        }}>{item.body}</div>
+      </div>
     </article>
   );
 }
 
-function NewsMedia({ item }: { item: NewsItem }) {
+function NewsMedia({ item, floated = false }: { item: NewsItem; floated?: boolean }) {
+  const frameStyle: React.CSSProperties = floated
+    ? { width: "100%", borderRadius: 14, boxShadow: "0 10px 30px rgba(0,0,0,0.5)", display: "block" }
+    : {};
   if (item.youtubeId) {
     return (
       <div style={{
-        width: "100%", aspectRatio: "16/9", borderRadius: 14, overflow: "hidden",
+        width: floated ? "100%" : "100%", aspectRatio: "16/9", borderRadius: 14, overflow: "hidden",
         boxShadow: "0 10px 30px rgba(0,0,0,0.5)",
+        ...frameStyle,
       }}>
         <iframe
           src={`https://www.youtube.com/embed/${item.youtubeId}`}
@@ -234,8 +270,9 @@ function NewsMedia({ item }: { item: NewsItem }) {
         src={item.videoDataUrl}
         controls
         style={{
-          width: "100%", maxHeight: 460, borderRadius: 14,
+          width: floated ? "100%" : "100%", maxHeight: floated ? 320 : 460, borderRadius: 14,
           boxShadow: "0 10px 30px rgba(0,0,0,0.5)", background: "black",
+          ...frameStyle,
         }}
       />
     );
@@ -246,8 +283,9 @@ function NewsMedia({ item }: { item: NewsItem }) {
         src={item.imageDataUrl}
         alt={item.title}
         style={{
-          width: "100%", maxHeight: 460, objectFit: "cover", borderRadius: 14,
+          width: floated ? "100%" : "100%", maxHeight: floated ? 320 : 460, objectFit: "cover", borderRadius: 14,
           boxShadow: "0 10px 30px rgba(0,0,0,0.5)",
+          ...frameStyle,
         }}
       />
     );

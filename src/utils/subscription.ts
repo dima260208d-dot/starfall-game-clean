@@ -1,15 +1,18 @@
 // ─── Star Guardian (monthly subscription) ──────────────────────────────────
 // 299₽/month "premium" stub: real money is mocked with a confirm dialog.
 // While active the player gets:
-//   • Daily main reward (auto-claimed on first visit each day)
+//   • Daily main reward (popup in main menu + manual claim with drop animation; once per game day at 12:00 MSK)
 //   • Daily secondary reward — pick 1 of 3 (rolled fresh each day)
 //   • A "Power-Up Token" every 3 days (instant-level item for any brawler)
 //   • The Astral assistant unlocks autoplay, in-battle tips and chat commands
+//   • 15 shimmering premium name colors (profile color picker)
 //
 // Persistence lives on UserProfile.starGuardian and UserProfile.astralSettings
 // so the standard saveProfiles flow auto-persists everything.
 
-import { getCurrentProfile, updateProfile, addCoins, addGems } from "./localStorageAPI";
+import { MAX_BRAWLER_LEVEL } from "../entities/BrawlerData";
+import { getCurrentProfile, updateProfile, addCoins, addGems, recordPurchase } from "./localStorageAPI";
+import { gameDaysBetween, getGameDayKeyInt, getMsUntilGameDayReset } from "./gameDay";
 
 export const STAR_GUARDIAN_PRICE_RUB = 299;
 export const STAR_GUARDIAN_DURATION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -26,7 +29,9 @@ export interface SecondaryRewardOption {
 
 export interface StarGuardianState {
   activeUntil: number;            // unix ms (0 = never bought, past = expired)
-  // Day-key (YYYYMMDD as int) of the last claim of each track.
+  /** @deprecated используйте lastMainClaimDay — unix ms больше не участвует в логике. */
+  lastMainClaimAt?: number;
+  /** Ключ игрового дня (YYYYMMDD, граница 12:00 МСК) последнего получения главного подарка. */
   lastMainClaimDay: number;
   lastSecondaryClaimDay: number;
   lastSpecialClaimDay: number;
@@ -53,10 +58,9 @@ export const DEFAULT_ASTRAL_SETTINGS: AstralSettings = {
   voice: 0,
 };
 
-/** YYYYMMDD as int for stable per-day comparisons. */
+/** YYYYMMDD as int for stable per-game-day comparisons (12:00 MSK). */
 export function dayKey(ts = Date.now()): number {
-  const d = new Date(ts);
-  return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+  return getGameDayKeyInt(ts);
 }
 
 function emptyState(): StarGuardianState {
@@ -118,6 +122,12 @@ export function purchaseStarGuardian(): { success: true; daysRemaining: number }
     totalSubscriptionsBought: cur.totalSubscriptionsBought + 1,
   };
   updateProfile({ starGuardian: next } as any);
+  recordPurchase({
+    category: "subscription",
+    title: "Star Guardian",
+    priceRub: STAR_GUARDIAN_PRICE_RUB,
+    rewardSummary: "30 days",
+  });
   return { success: true, daysRemaining: getStarGuardianDaysRemaining() };
 }
 
@@ -134,25 +144,34 @@ export interface MainDailyClaimResult {
   powerPoints: number;
 }
 
+/** Главный подарок доступен один раз за игровой день (смена в 12:00 МСК). */
 export function isMainDailyAvailable(): boolean {
   if (!isStarGuardianActive()) return false;
-  return getStarGuardian().lastMainClaimDay !== dayKey();
+  const claimedDay = getStarGuardian().lastMainClaimDay;
+  if (!claimedDay) return true;
+  return claimedDay !== dayKey();
 }
 
-/** Auto-grants the main daily reward (called on entering main menu).
- *  Returns the claim result so the UI can flash a notification. */
+/** До следующего главного подарка (до 12:00 МСК следующего игрового дня). */
+export function getMsUntilMainDaily(): number {
+  if (!isStarGuardianActive()) return 0;
+  if (isMainDailyAvailable()) return 0;
+  return getMsUntilGameDayReset();
+}
+
+/** Grants the main daily reward when the player taps «Получить».
+ *  Returns the claim result so the UI can run the drop animation. */
 export function claimMainDaily(): MainDailyClaimResult {
   if (!isMainDailyAvailable()) {
     return { claimed: false, coins: 0, gems: 0, powerPoints: 0 };
   }
   const profile = getCurrentProfile();
   if (!profile) return { claimed: false, coins: 0, gems: 0, powerPoints: 0 };
-  // Apply rewards (coins/gems via helpers, powerPoints via direct update).
   addCoins(MAIN_DAILY_COINS);
   addGems(MAIN_DAILY_GEMS);
   const p2 = getCurrentProfile()!;
   updateProfile({ powerPoints: p2.powerPoints + MAIN_DAILY_POWER });
-  patchSubscription({ lastMainClaimDay: dayKey() });
+  patchSubscription({ lastMainClaimDay: dayKey(), lastMainClaimAt: undefined });
   return { claimed: true, coins: MAIN_DAILY_COINS, gems: MAIN_DAILY_GEMS, powerPoints: MAIN_DAILY_POWER };
 }
 
@@ -205,19 +224,17 @@ export function isSpecialDailyAvailable(): boolean {
   if (!isStarGuardianActive()) return false;
   const s = getStarGuardian();
   if (s.lastSpecialClaimDay === 0) return true;
-  // Compare wall-clock days using day-key arithmetic (UTC-naive but stable).
-  const last = parseDayKey(s.lastSpecialClaimDay);
-  const today = parseDayKey(dayKey());
-  const diff = Math.floor((today - last) / (24 * 60 * 60 * 1000));
-  return diff >= SPECIAL_REWARD_INTERVAL_DAYS;
+  return gameDaysBetween(s.lastSpecialClaimDay, dayKey()) >= SPECIAL_REWARD_INTERVAL_DAYS;
 }
 
-function parseDayKey(k: number): number {
-  if (!k) return 0;
-  const y = Math.floor(k / 10000);
-  const m = Math.floor((k % 10000) / 100);
-  const d = k % 100;
-  return new Date(y, m - 1, d).getTime();
+export function getMsUntilSpecialDaily(): number {
+  if (!isStarGuardianActive()) return 0;
+  const s = getStarGuardian();
+  if (s.lastSpecialClaimDay === 0) return 0;
+  const elapsed = gameDaysBetween(s.lastSpecialClaimDay, dayKey());
+  if (elapsed >= SPECIAL_REWARD_INTERVAL_DAYS) return 0;
+  const daysLeft = SPECIAL_REWARD_INTERVAL_DAYS - elapsed;
+  return Math.max(0, (daysLeft - 1) * 24 * 60 * 60 * 1000 + getMsUntilGameDayReset());
 }
 
 export function claimSpecialDaily(): { claimed: boolean; tokens?: number } {
@@ -232,6 +249,17 @@ export function claimSpecialDaily(): { claimed: boolean; tokens?: number } {
 
 /** Spend one Power-Up Token to bump a brawler by +1 level.
  *  Returns false if no tokens, brawler not unlocked, or already max. */
+const DEV_POWER_TOKEN_KEY = "sg_dev_power_token_v1";
+
+/** Одноразово выдать тестовый токен прокачки (для проверки UI). */
+export function ensureDevPowerUpToken(): void {
+  if (typeof localStorage === "undefined") return;
+  if (localStorage.getItem(DEV_POWER_TOKEN_KEY)) return;
+  const sg = getStarGuardian();
+  patchSubscription({ powerUpTokens: sg.powerUpTokens + 1 });
+  localStorage.setItem(DEV_POWER_TOKEN_KEY, "1");
+}
+
 export function consumePowerUpToken(brawlerId: string): { success: boolean; newLevel?: number; error?: string } {
   const profile = getCurrentProfile();
   if (!profile) return { success: false, error: "Нет профиля" };
@@ -241,8 +269,7 @@ export function consumePowerUpToken(brawlerId: string): { success: boolean; newL
     return { success: false, error: "Этот боец ещё не открыт" };
   }
   const cur = profile.brawlerLevels[brawlerId] || 1;
-  const MAX_LEVEL = 11;
-  if (cur >= MAX_LEVEL) return { success: false, error: "Боец уже на максимальном уровне" };
+  if (cur >= MAX_BRAWLER_LEVEL) return { success: false, error: "Боец уже на максимальном уровне" };
   updateProfile({
     brawlerLevels: { ...profile.brawlerLevels, [brawlerId]: cur + 1 },
   });

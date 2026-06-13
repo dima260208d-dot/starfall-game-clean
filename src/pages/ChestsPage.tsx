@@ -1,16 +1,27 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   getCurrentProfile,
   buyChest,
   openChest,
 } from "../utils/localStorageAPI";
-import { CHESTS, CHEST_RARITY_ORDER, type ChestRarity, type ChestRoll } from "../utils/chests";
-import { CHEST_BRAWLER_DROP_CHANCE } from "../entities/BrawlerData";
+import { CHESTS, CHEST_RARITY_ORDER, CHEST_CARD_TINT, type ChestRarity, type ChestRoll } from "../utils/chests";
+import { getEffectiveChestPrices } from "../utils/characterBalance";
+import { getEffectiveChestDrops, getEffectivePinDropChance, getEffectiveProfileIconDropChance, getEffectiveBrawlerRarityDropRows, getEffectiveChestBrawlerFloorPctLabel, getEffectivePetRarityDropRows, getEffectiveChestPetFloorPctLabel } from "../utils/chestBalance";
+import {
+  BRAWLER_RARITY_LABEL,
+} from "../entities/BrawlerData";
+import {
+  getPetFloorTierLabel,
+  petFloorTier,
+  PET_RARITY_LABEL,
+} from "../entities/PetData";
 import Chest3DViewer from "../components/Chest3DViewer";
 import ChestOpenAnimation from "../components/ChestOpenAnimation";
 import ChestOpenModal from "../components/ChestOpenModal";
-import { CoinBadge, GemBadge, PowerBadge, CoinIcon, GemIcon } from "../components/GameIcons";
+import { CoinIcon, GemIcon } from "../components/GameIcons";
+import { PageBg, PageBody, PageHeader } from "../components/PageChrome";
+import { useI18n, chestName, chestDescription, brawlerRarityLabel, petRarityLabel } from "../i18n";
 
 interface Props {
   onBack: () => void;
@@ -20,10 +31,62 @@ function pct(n: number) {
   return `${Math.round(n * 100)}%`;
 }
 
+const CHEST_DISPLAY_MAX_TIER = CHEST_RARITY_ORDER.length;
+
+function chestTierStars(tier: number): string {
+  const filled = Math.min(Math.max(0, tier), CHEST_DISPLAY_MAX_TIER);
+  const empty = Math.max(0, CHEST_DISPLAY_MAX_TIER - filled);
+  return `${"★".repeat(filled)}${"☆".repeat(empty)}`;
+}
+
+/** Effective gem amounts shown in UI (÷3 at roll time). */
+function chestGemRange(range: [number, number]): [number, number] {
+  const lo = Math.max(1, Math.floor(range[0] / 3));
+  const hi = Math.max(lo, Math.floor(range[1] / 3));
+  return [lo, hi];
+}
+
+function chestBonusGems(amount: number): number {
+  return Math.max(1, Math.floor(amount / 3));
+}
+
+const PET_ROW_COLOR: Record<string, string> = {
+  common: CHESTS.common.color,
+  rare: CHESTS.rare.color,
+  epic: CHESTS.epic.color,
+  mythic: CHESTS.mythic.color,
+  legendary: CHESTS.legendary.color,
+};
+
+function InfoColumn({ title, accent, children }: { title: string; accent: string; children: ReactNode }) {
+  return (
+    <div style={{
+      display: "flex", flexDirection: "column", gap: 6,
+      minWidth: 0, flex: "1 1 200px",
+    }}>
+      <div style={{
+        fontSize: 10, fontWeight: 900, letterSpacing: 1.5, textTransform: "uppercase",
+        color: accent, paddingBottom: 6, borderBottom: `1px solid ${accent}44`,
+      }}>
+        {title}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>{children}</div>
+    </div>
+  );
+}
+
 function ChestInfoModal({ rarity, onClose }: { rarity: ChestRarity; onClose: () => void }) {
+  const { t } = useI18n();
   const def = CHESTS[rarity];
-  const d = def.drops;
-  const brawlerChance = CHEST_BRAWLER_DROP_CHANCE[rarity];
+  const d = getEffectiveChestDrops(rarity);
+  const brawlerRarityRows = getEffectiveBrawlerRarityDropRows(rarity);
+  const petRarityRows = getEffectivePetRarityDropRows(rarity);
+  const brawlerFloorRarity = (rarity === "common" ? "rare" : rarity) as ChestRarity;
+  const brawlerFloorLabel = brawlerRarityLabel(brawlerFloorRarity, BRAWLER_RARITY_LABEL[brawlerFloorRarity]);
+  const petFloorRarity = petFloorTier(rarity);
+  const petFloorLabel = petRarityLabel(petFloorRarity, PET_RARITY_LABEL[petFloorRarity]);
+  const pinChance = getEffectivePinDropChance(rarity);
+  const iconChance = getEffectiveProfileIconDropChance(rarity);
 
   const rollTotal = d.gemsChance + d.powerPointsChance;
   const coinsChance = Math.max(0, 1 - rollTotal);
@@ -36,63 +99,130 @@ function ChestInfoModal({ rarity, onClose }: { rarity: ChestRarity; onClose: () 
         background: "rgba(0,0,5,0.88)",
         backdropFilter: "blur(10px)",
         display: "flex", alignItems: "center", justifyContent: "center",
+        padding: 16,
       }}
     >
       <div
         onClick={e => e.stopPropagation()}
+        className="ui-glass-strong"
         style={{
-          background: `linear-gradient(180deg, ${def.color}22 0%, #0a0020 100%)`,
-          border: `2px solid ${def.borderColor}88`,
-          borderRadius: 24,
-          padding: "28px 32px",
-          maxWidth: 440,
-          width: "90%",
-          boxShadow: `0 0 60px ${def.color}44`,
+          background: `linear-gradient(160deg, ${def.color}33 0%, rgba(8,4,24,0.95) 100%)`,
+          border: `1px solid ${def.borderColor}`,
+          borderRadius: "var(--r-xl)",
+          padding: "22px 24px",
+          maxWidth: 920,
+          width: "100%",
+          maxHeight: "min(92vh, 720px)",
+          overflowY: "auto",
+          boxShadow: `0 0 60px ${def.color}66, var(--sh-lg), inset 0 1px 0 rgba(255,255,255,0.1)`,
         }}
       >
-        <div style={{ textAlign: "center", marginBottom: 20 }}>
+        <div style={{ textAlign: "center", marginBottom: 16 }}>
           <div style={{ fontSize: 24, fontWeight: 900, color: def.color, letterSpacing: 2 }}>
-            {def.name.toUpperCase()}
+            {chestName(rarity).toUpperCase()}
           </div>
           <div style={{ fontSize: 12, color: "rgba(255,255,255,0.5)", marginTop: 4 }}>
-            {"★".repeat(def.tier)}{"☆".repeat(6 - def.tier)} · {d.rolls} наград за открытие
+            {t("common.resourcesGuaranteed", { stars: chestTierStars(def.tier), rolls: String(d.rolls) })}
+          </div>
+          <div style={{ fontSize: 11, color: "rgba(255,255,255,0.42)", marginTop: 6, lineHeight: 1.45 }}>
+            {t("common.extraDrops", { rolls: String(d.rolls) })}
           </div>
         </div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <Row label="Шанс бойца" value={pct(brawlerChance)} color={def.color} highlight />
-          <div style={{ height: 1, background: "rgba(255,255,255,0.08)", margin: "4px 0" }} />
-          <div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>
-            За каждый из {d.rolls} бросков:
-          </div>
-          <Row label="💎 Кристаллы" value={`${pct(d.gemsChance)}  (${d.gemsRange[0]}–${d.gemsRange[1]})`} color="#40C4FF" />
-          <Row label="⚡ Очки прокачки" value={`${pct(d.powerPointsChance)}  (${d.powerPointsRange[0]}–${d.powerPointsRange[1]})`} color="#CE93D8" />
-          <Row label="🪙 Монеты" value={`~${pct(coinsChance)}  (${d.coinsRange[0]}–${d.coinsRange[1]})`} color="#FFD700" />
-          {(d.bonusGems || d.bonusPowerPoints || d.bonusCoins) && (
-            <>
-              <div style={{ height: 1, background: "rgba(255,255,255,0.08)", margin: "4px 0" }} />
-              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>
-                Гарантированные бонусы:
-              </div>
-              {d.bonusGems ? <Row label="💎 Бонус кристаллы" value={`+${d.bonusGems}`} color="#40C4FF" /> : null}
-              {d.bonusPowerPoints ? <Row label="⚡ Бонус ОП" value={`+${d.bonusPowerPoints}`} color="#CE93D8" /> : null}
-              {d.bonusCoins ? <Row label="🪙 Бонус монеты" value={`+${d.bonusCoins}`} color="#FFD700" /> : null}
-              {d.xp ? <Row label="⭐ Опыт Star Pass" value={`+${d.xp}`} color="#FFD700" /> : null}
-            </>
-          )}
+        <div style={{
+          display: "flex", flexWrap: "wrap", gap: 14,
+          alignItems: "flex-start",
+        }}>
+          <InfoColumn title={t("chest.info.brawlers")} accent={def.color}>
+            <Row
+              label={`🦸 ${brawlerFloorLabel}`}
+              value={getEffectiveChestBrawlerFloorPctLabel(rarity)}
+              color={def.color}
+              highlight
+            />
+            {brawlerRarityRows.map(row => (
+              <Row
+                key={row.rarity}
+                label={brawlerRarityLabel(row.rarity, row.label)}
+                value={row.pctLabel}
+                color={CHESTS[row.rarity].color}
+                compact
+              />
+            ))}
+          </InfoColumn>
+
+          <InfoColumn title={t("chest.info.pets")} accent="#69F0AE">
+            <Row
+              label={`🐾 ${petFloorLabel}`}
+              value={getEffectiveChestPetFloorPctLabel(rarity)}
+              color="#69F0AE"
+              highlight
+            />
+            {petRarityRows.map(row => (
+              <Row
+                key={row.rarity}
+                label={petRarityLabel(row.rarity, row.label)}
+                value={row.pctLabel}
+                color={PET_ROW_COLOR[row.rarity] ?? "#69F0AE"}
+                compact
+              />
+            ))}
+          </InfoColumn>
+
+          <InfoColumn title={t("chest.info.other")} accent="#CE93D8">
+            <Row label={t("chest.row.sticker")} value={pct(pinChance)} color="#CE93D8" />
+            <Row label={t("chest.row.icon")} value={pct(iconChance)} color="#B388FF" />
+          </InfoColumn>
+
+          <InfoColumn title={t("chest.info.resources", { rolls: String(d.rolls) })} accent="#40C4FF">
+            <Row
+              label={t("chest.row.gems")}
+              value={`${pct(d.gemsChance)} (${chestGemRange(d.gemsRange)[0]}–${chestGemRange(d.gemsRange)[1]})`}
+              color="#40C4FF"
+            />
+            <Row
+              label={t("chest.row.power")}
+              value={`${pct(d.powerPointsChance)} (${d.powerPointsRange[0]}–${d.powerPointsRange[1]})`}
+              color="#CE93D8"
+            />
+            <Row
+              label={t("chest.row.coins")}
+              value={`~${pct(coinsChance)} (${d.coinsRange[0]}–${d.coinsRange[1]})`}
+              color="#FFD700"
+            />
+          </InfoColumn>
+
+          {(d.bonusGems || d.bonusPowerPoints || d.bonusCoins || d.xp) ? (
+            <InfoColumn title={t("chest.info.bonuses")} accent="#FFD700">
+              {d.bonusGems ? (
+                <Row label={t("chest.row.gems")} value={`+${chestBonusGems(d.bonusGems)}`} color="#40C4FF" />
+              ) : null}
+              {d.bonusPowerPoints ? (
+                <Row label={t("chest.row.power")} value={`+${d.bonusPowerPoints}`} color="#CE93D8" />
+              ) : null}
+              {d.bonusCoins ? (
+                <Row label={t("chest.row.coins")} value={`+${d.bonusCoins}`} color="#FFD700" />
+              ) : null}
+              {d.xp ? (
+                <Row label={t("pass.starpassXp")} value={`+${d.xp}`} color="#FFD700" />
+              ) : null}
+            </InfoColumn>
+          ) : null}
         </div>
 
         <button
           onClick={onClose}
+          className="ui-btn ui-btn--block ui-btn--lg"
           style={{
-            marginTop: 24, width: "100%",
+            marginTop: 24,
             background: `linear-gradient(135deg, ${def.color}, ${def.secondaryColor})`,
-            border: "none", borderRadius: 12, padding: "12px 0",
-            color: "white", fontWeight: 900, fontSize: 14, letterSpacing: 2,
-            cursor: "pointer",
+            border: `1px solid ${def.borderColor}`,
+            color: "#fff",
+            letterSpacing: "0.16em",
+            boxShadow: `0 8px 22px ${def.color}66, inset 0 1px 0 rgba(255,255,255,0.32)`,
           }}
         >
-          ЗАКРЫТЬ
+          {t("common.closeUpper")}
         </button>
       </div>
     </div>
@@ -101,21 +231,30 @@ function ChestInfoModal({ rarity, onClose }: { rarity: ChestRarity; onClose: () 
   return createPortal(modal, document.body);
 }
 
-function Row({ label, value, color, highlight }: { label: string; value: string; color: string; highlight?: boolean }) {
+function Row({
+  label, value, color, highlight, compact,
+}: {
+  label: string; value: string; color: string; highlight?: boolean; compact?: boolean;
+}) {
   return (
     <div style={{
-      display: "flex", justifyContent: "space-between", alignItems: "center",
+      display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8,
       background: highlight ? `${color}18` : "rgba(255,255,255,0.04)",
-      borderRadius: 8, padding: "7px 12px",
+      borderRadius: 8, padding: compact ? "5px 8px" : "7px 12px",
       border: highlight ? `1px solid ${color}44` : "1px solid rgba(255,255,255,0.06)",
     }}>
-      <span style={{ fontSize: 13, color: "rgba(255,255,255,0.7)" }}>{label}</span>
-      <span style={{ fontSize: 13, fontWeight: 900, color }}>{value}</span>
+      <span style={{ fontSize: compact ? 11 : 13, color: "rgba(255,255,255,0.7)", flex: 1, minWidth: 0 }}>
+        {label}
+      </span>
+      <span style={{ fontSize: compact ? 11 : 13, fontWeight: 900, color, whiteSpace: "nowrap" }}>
+        {value}
+      </span>
     </div>
   );
 }
 
 export default function ChestsPage({ onBack }: Props) {
+  const { t } = useI18n();
   const [profile, setProfile] = useState(getCurrentProfile());
   const [msg, setMsg] = useState<string | null>(null);
   const [animating, setAnimating] = useState<{ rarity: ChestRarity; rolls: ChestRoll[] } | null>(null);
@@ -129,9 +268,9 @@ export default function ChestsPage({ onBack }: Props) {
 
   if (!profile) return null;
 
-  const handleBuy = (rarity: ChestRarity, currency: "coins" | "gems") => {
-    const r = buyChest(rarity, currency);
-    setMsg(r.success ? `Куплен ${CHESTS[rarity].name}` : (r.error || "Ошибка"));
+  const handleBuy = (rarity: ChestRarity) => {
+    const r = buyChest(rarity, "gems");
+    setMsg(r.success ? t("common.chestPurchased", { name: chestName(rarity) }) : (r.error || t("common.error")));
     setProfile(getCurrentProfile());
     setTimeout(() => setMsg(null), 2000);
   };
@@ -139,7 +278,7 @@ export default function ChestsPage({ onBack }: Props) {
   const handleOpen = (rarity: ChestRarity) => {
     const r = openChest(rarity);
     if (!r.success) {
-      setMsg(r.error || "Ошибка");
+      setMsg(r.error || t("common.error"));
       setTimeout(() => setMsg(null), 2000);
       return;
     }
@@ -154,102 +293,89 @@ export default function ChestsPage({ onBack }: Props) {
     setOpening(data);
   };
 
+  const handleOpenModalClose = () => {
+    setOpening(null);
+  };
+
   return (
-    <div style={{
-      minHeight: "100%",
-      background: "linear-gradient(135deg, #5C2A00 0%, #A04000 50%, #D35400 100%)",
-      padding: "24px 18px 60px",
-      color: "white",
-      fontFamily: "'Segoe UI', Arial, sans-serif",
-      position: "relative",
-    }}>
+    <PageBg variant="chests" style={{ fontFamily: "var(--app-font-sans)" }}>
       <style>{`
         @keyframes chestSparkle {
-          0%,100% { opacity: 0.3; transform: scale(0.85); }
-          50%     { opacity: 1;   transform: scale(1.2);  }
+          0%,100% { opacity: 0.25; transform: scale(0.8); }
+          50%     { opacity: 0.85; transform: scale(1.18); }
         }
       `}</style>
-      <div style={{ position: "fixed", inset: 0, zIndex: 0, pointerEvents: "none", overflow: "hidden" }}>
-        {Array.from({ length: 30 }).map((_, i) => (
+      <div style={{ position: "absolute", inset: 0, zIndex: 0, pointerEvents: "none", overflow: "hidden" }}>
+        {Array.from({ length: 22 }).map((_, i) => (
           <div key={i} style={{
             position: "absolute",
             left: `${(i * 7919) % 100}%`,
             top: `${(i * 4091) % 100}%`,
-            width: 4 + (i % 3) * 2, height: 4 + (i % 3) * 2,
+            width: 3 + (i % 3) * 2, height: 3 + (i % 3) * 2,
             borderRadius: "50%",
-            background: ["#FFD700", "#FFFFFF", "#FFEB3B"][i % 3],
-            boxShadow: "0 0 8px rgba(255,255,255,0.7)",
+            background: ["#FFD740", "#FFFFFF", "#FFE082"][i % 3],
+            boxShadow: "0 0 8px rgba(255,213,79,0.65)",
             animation: `chestSparkle ${2 + (i % 4) * 0.7}s ease-in-out infinite`,
             animationDelay: `${(i % 5) * 0.4}s`,
           }} />
         ))}
       </div>
-      <div style={{ display: "flex", alignItems: "center", marginBottom: 18, maxWidth: 1100, margin: "0 auto 18px" }}>
-        <button
-          onClick={onBack}
-          style={{
-            background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.15)",
-            borderRadius: 10, padding: "8px 18px", color: "rgba(255,255,255,0.7)",
-            cursor: "pointer", fontSize: 14, fontWeight: 600,
-          }}
-        >← Назад</button>
-        <h1 style={{
-          flex: 1, textAlign: "center", margin: 0, fontSize: 30, fontWeight: 900, letterSpacing: 3,
-          background: "linear-gradient(135deg, #FFD700, #FF6E40, #FF1744)",
-          WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
-        }}>
-          СУНДУКИ
-        </h1>
-        <div style={{ display: "flex", gap: 12, fontSize: 14 }}>
-          <CoinBadge value={profile.coins} />
-          <GemBadge value={profile.gems} />
-          <PowerBadge value={profile.powerPoints} />
-        </div>
-      </div>
+      <PageHeader
+        onBack={onBack}
+        title={t("chest.title")}
+        coins={profile.coins}
+        gems={profile.gems}
+        power={profile.powerPoints}
+      />
 
+      <PageBody style={{ paddingBottom: 40 }}>
       {msg && (
-        <div style={{
-          maxWidth: 600, margin: "0 auto 14px",
-          background: "rgba(255,215,0,0.15)", color: "#FFD700",
-          border: "1px solid rgba(255,215,0,0.4)",
-          borderRadius: 10, padding: "8px 14px",
+        <div className="ui-glass ui-glow-gold" style={{
+          maxWidth: 600, margin: "18px auto 14px",
+          color: "#ffd54f",
+          padding: "10px 16px",
           textAlign: "center", fontWeight: 700, fontSize: 14,
+          letterSpacing: "0.04em",
         }}>{msg}</div>
       )}
 
       <div style={{
-        maxWidth: 1100, margin: "0 auto",
+        maxWidth: 1100, margin: "0 auto", padding: "20px 18px 0",
         display: "grid",
         gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
         gap: 16,
       }}>
         {CHEST_RARITY_ORDER.map(rarity => {
           const def = CHESTS[rarity];
+          const prices = getEffectiveChestPrices(rarity);
           const owned = profile.chestInventory[rarity] || 0;
-          const canBuyCoins = profile.coins >= def.priceCoins;
-          const canBuyGems = profile.gems >= def.priceGems;
-          const brawlerPct = Math.round(CHEST_BRAWLER_DROP_CHANCE[rarity] * 100);
+          const canBuyGems = profile.gems >= prices.priceGems;
+          const brawlerPctLabel = getEffectiveChestBrawlerFloorPctLabel(rarity);
           return (
-            <div key={rarity} style={{
-              background: `linear-gradient(180deg, ${def.color}1A 0%, rgba(0,0,0,0.45) 100%)`,
-              border: `2px solid ${def.borderColor}55`,
-              borderRadius: 18,
+            <div key={rarity} className="ui-card is-interactive" style={{
+              background: CHEST_CARD_TINT[rarity],
+              border: `1px solid ${def.borderColor}99`,
+              borderRadius: "var(--r-xl)",
               padding: 16,
               display: "flex", flexDirection: "column", alignItems: "center",
-              boxShadow: `0 0 30px ${def.color}33`,
+              boxShadow: `0 0 32px ${def.color}40, var(--sh-md), inset 0 1px 0 rgba(255,255,255,0.08)`,
               position: "relative",
+              backdropFilter: "blur(12px) saturate(1.18)",
+              WebkitBackdropFilter: "blur(12px) saturate(1.18)",
             }}>
               <button
                 onClick={() => setInfoRarity(rarity)}
-                title="Шансы выпадения"
+                title={t("common.dropRates")}
                 style={{
                   position: "absolute", top: 10, right: 10,
-                  width: 26, height: 26, borderRadius: "50%",
-                  background: `${def.color}33`,
-                  border: `1px solid ${def.color}88`,
-                  color: def.color, fontWeight: 900, fontSize: 13,
+                  width: 28, height: 28, borderRadius: "50%",
+                  background: `linear-gradient(135deg, ${def.color}55, ${def.color}22)`,
+                  border: `1px solid ${def.color}`,
+                  color: "#fff", fontWeight: 900, fontSize: 13,
                   cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
                   lineHeight: 1,
+                  boxShadow: `0 0 12px ${def.color}66`,
+                  zIndex: 2,
                 }}
               >?</button>
 
@@ -261,7 +387,7 @@ export default function ChestsPage({ onBack }: Props) {
                   cursor: owned > 0 ? "pointer" : "default",
                 }}
                 onClick={() => owned > 0 && handleOpen(rarity)}
-                title={owned > 0 ? "Нажмите, чтобы открыть" : undefined}
+                title={owned > 0 ? t("common.tapToOpen") : undefined}
               >
                 <Chest3DViewer rarity={rarity} size={150} />
               </div>
@@ -270,83 +396,66 @@ export default function ChestsPage({ onBack }: Props) {
                 fontSize: 17, fontWeight: 900, color: def.color, marginTop: 8,
                 letterSpacing: 1, textAlign: "center",
               }}>
-                {def.name}
+                {chestName(rarity)}
               </div>
               <div style={{ fontSize: 11, color: "rgba(255,255,255,0.55)", marginTop: 4, textAlign: "center", minHeight: 30 }}>
-                {def.description}
+                {chestDescription(rarity)}
               </div>
               <div style={{
-                marginTop: 8, fontSize: 11, color: "rgba(255,255,255,0.65)",
-                background: "rgba(0,0,0,0.35)", border: `1px solid ${def.color}33`,
-                borderRadius: 8, padding: "4px 10px",
+                marginTop: 8, fontSize: 11, color: "var(--t-2)",
+                background: "rgba(0,0,0,0.4)", border: `1px solid ${def.color}55`,
+                borderRadius: "var(--r-pill)", padding: "5px 12px",
                 display: "flex", gap: 10, alignItems: "center",
+                backdropFilter: "blur(8px)",
+                fontWeight: 800,
+                letterSpacing: "0.04em",
               }}>
-                <span>{def.drops.rolls} наград · ★{def.tier}</span>
-                {brawlerPct > 0 && (
-                  <span style={{ color: def.color, fontWeight: 800 }}>🦸 {brawlerPct}%</span>
-                )}
+                <span>{t("common.resourcesRolls", { rolls: String(def.drops.rolls), tier: String(def.tier) })}</span>
+                <span style={{ color: def.color, fontWeight: 900 }}>🦸 {brawlerPctLabel}</span>
               </div>
 
               <div style={{ marginTop: 12, width: "100%" }}>
                 <div style={{
                   display: "flex", alignItems: "center", justifyContent: "space-between",
-                  fontSize: 12, color: "rgba(255,255,255,0.6)", marginBottom: 6,
+                  fontSize: 12, color: "var(--t-3)", marginBottom: 6,
+                  letterSpacing: "0.02em",
                 }}>
-                  <span>В инвентаре:</span>
+                  <span>{t("common.inventoryColon")}</span>
                   <span style={{ color: def.color, fontWeight: 900, fontSize: 14 }}>{owned}</span>
                 </div>
                 <button
                   onClick={() => handleOpen(rarity)}
                   disabled={owned < 1}
+                  className={`ui-btn ui-btn--block ${owned > 0 ? "" : "ui-btn--ghost"}`}
                   style={{
-                    width: "100%",
-                    background: owned > 0
-                      ? `linear-gradient(135deg, ${def.color}, ${def.secondaryColor})`
-                      : "rgba(255,255,255,0.05)",
-                    border: "none", borderRadius: 10, padding: "10px 0",
-                    color: owned > 0 ? "white" : "rgba(255,255,255,0.4)",
-                    fontWeight: 900, letterSpacing: 1, fontSize: 13,
-                    cursor: owned > 0 ? "pointer" : "default",
+                    padding: "10px 0",
+                    fontSize: 13,
+                    letterSpacing: "0.16em",
+                    ...(owned > 0 ? {
+                      background: `linear-gradient(135deg, ${def.color}, ${def.secondaryColor})`,
+                      border: `1px solid ${def.borderColor}`,
+                      color: "#fff",
+                      boxShadow: `0 8px 20px ${def.color}66, inset 0 1px 0 rgba(255,255,255,0.32)`,
+                    } : {}),
                   }}
                 >
-                  ОТКРЫТЬ
+                  {t("common.open")}
                 </button>
               </div>
 
-              <div style={{ marginTop: 10, width: "100%", display: "flex", gap: 8 }}>
-                <button
-                  onClick={() => handleBuy(rarity, "coins")}
-                  disabled={!canBuyCoins}
-                  style={{
-                    flex: 1,
-                    background: canBuyCoins ? "linear-gradient(135deg, #F9A825, #FFD700)" : "rgba(255,255,255,0.05)",
-                    border: "none", borderRadius: 8, padding: "8px 0",
-                    color: canBuyCoins ? "#000" : "rgba(255,255,255,0.4)",
-                    fontWeight: 800, fontSize: 12,
-                    cursor: canBuyCoins ? "pointer" : "default",
-                  }}
-                >
-                  <CoinIcon size={13} /> {def.priceCoins}
-                </button>
-                <button
-                  onClick={() => handleBuy(rarity, "gems")}
-                  disabled={!canBuyGems}
-                  style={{
-                    flex: 1,
-                    background: canBuyGems ? "linear-gradient(135deg, #0288D1, #40C4FF)" : "rgba(255,255,255,0.05)",
-                    border: "none", borderRadius: 8, padding: "8px 0",
-                    color: canBuyGems ? "white" : "rgba(255,255,255,0.4)",
-                    fontWeight: 800, fontSize: 12,
-                    cursor: canBuyGems ? "pointer" : "default",
-                  }}
-                >
-                  <GemIcon size={13} /> {def.priceGems}
-                </button>
-              </div>
+              <button
+                onClick={() => handleBuy(rarity)}
+                disabled={!canBuyGems}
+                className={`ui-btn ui-btn--block ${canBuyGems ? "ui-btn--cyan" : "ui-btn--ghost"}`}
+                style={{ marginTop: 10, padding: "8px 0", fontSize: 12 }}
+              >
+                <GemIcon size={13} /> {t("common.buyForGems", { price: String(prices.priceGems) })}
+              </button>
             </div>
           );
         })}
       </div>
+      </PageBody>
 
       {/* 3D spin+glow animation before the drop reveal */}
       {animating && (
@@ -360,13 +469,13 @@ export default function ChestsPage({ onBack }: Props) {
         <ChestOpenModal
           rarity={opening.rarity}
           rolls={opening.rolls}
-          onClose={() => setOpening(null)}
+          onClose={handleOpenModalClose}
         />
       )}
 
       {infoRarity && (
         <ChestInfoModal rarity={infoRarity} onClose={() => setInfoRarity(null)} />
       )}
-    </div>
+    </PageBg>
   );
 }

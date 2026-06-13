@@ -1,4 +1,9 @@
 import type { ChestRarity } from "../utils/chests";
+import {
+  computeTierOpenChances,
+  formatTierChancePct,
+  tierDropRows,
+} from "../utils/chestDropChances";
 
 // ─── Pet rarity tiers ────────────────────────────────────────────────────────
 // Pets share the chest rarity vocabulary with brawlers but never appear at
@@ -29,9 +34,9 @@ export interface PetDef {
   description: string;
   effect: PetEffect;
   effectLabel: string;  // human-readable effect summary
-  // Visual identity for the SVG renderer (kind drives the body silhouette)
+  // Visual identity (legacy field kept for colors; 3D models in /models/pets/)
   visual: {
-    kind: "cat" | "dragon" | "wolf" | "beetle" | "phoenix" | "owl" | "fox" | "turtle" | "rabbit" | "spirit";
+    kind: "cat" | "wolf" | "beetle" | "phoenix" | "fox" | "turtle" | "rabbit";
     bodyColor: string;
     accentColor: string;
     eyeColor: string;
@@ -52,30 +57,8 @@ export const PETS: PetDef[] = [
     effectLabel: "+200 HP каждые 10 сек",
     visual: { kind: "cat", bodyColor: "#1B1B1B", accentColor: "#3E3E3E", eyeColor: "#76FF03" },
   },
-  {
-    id: "wise_owl",
-    name: "Мудрая сова",
-    rarity: "common",
-    color: "#FFD54F",
-    secondaryColor: "#F57F17",
-    description: "Сова, которая ускоряет накопление супер-удара после убийства.",
-    effect: { kind: "supercharge", perKill: 25 },
-    effectLabel: "+25% супер за убийство",
-    visual: { kind: "owl", bodyColor: "#5D4037", accentColor: "#FFE082", eyeColor: "#FFD740" },
-  },
 
   // ── Rare ──
-  {
-    id: "spark_dragon",
-    name: "Искристый дракончик",
-    rarity: "rare",
-    color: "#FF6F00",
-    secondaryColor: "#BF360C",
-    description: "Маленький дракон, который поджигает врагов от ваших атак.",
-    effect: { kind: "ignite", chance: 0.10, dps: 50, durationSec: 3 },
-    effectLabel: "10% поджечь врага: 50 DPS на 3 сек",
-    visual: { kind: "dragon", bodyColor: "#FF7043", accentColor: "#FFD740", eyeColor: "#FFEB3B" },
-  },
   {
     id: "swift_rabbit",
     name: "Быстрый кролик",
@@ -148,27 +131,34 @@ export const PETS: PetDef[] = [
     effectLabel: "Воскрешает с 30% HP (раз за бой)",
     visual: { kind: "phoenix", bodyColor: "#FF3D00", accentColor: "#FFD600", eyeColor: "#FFFFFF" },
   },
-  {
-    id: "moon_spirit",
-    name: "Лунный дух",
-    rarity: "legendary",
-    color: "#80D8FF",
-    secondaryColor: "#0277BD",
-    description: "Светящийся дух щедро лечит хозяина в любой ситуации.",
-    effect: { kind: "heal", amount: 450, intervalSec: 6 },
-    effectLabel: "+450 HP каждые 6 сек",
-    visual: { kind: "spirit", bodyColor: "#B3E5FC", accentColor: "#FFFFFF", eyeColor: "#82B1FF" },
-  },
 ];
 
 export function getPetById(id: string | undefined | null): PetDef | undefined {
   if (!id) return undefined;
-  return PETS.find(p => p.id === id);
+  const base = PETS.find(p => p.id === id);
+  if (!base) return undefined;
+  if (typeof localStorage === "undefined") return { ...base, effect: { ...base.effect }, visual: { ...base.visual } };
+  try {
+    const raw = localStorage.getItem("clash_character_balance_v1");
+    if (!raw) return { ...base, effect: { ...base.effect }, visual: { ...base.visual } };
+    const patch = (JSON.parse(raw) as { pets?: Record<string, Partial<PetDef> & { effectPatch?: Partial<PetEffect> }> }).pets?.[id];
+    if (!patch) return { ...base, effect: { ...base.effect }, visual: { ...base.visual } };
+    const ep = patch.effectPatch ?? patch.effect;
+    return {
+      ...base,
+      ...patch,
+      effect: ep ? ({ ...base.effect, ...ep } as PetEffect) : { ...base.effect },
+      visual: patch.visual ? { ...base.visual, ...patch.visual } : { ...base.visual },
+    };
+  } catch {
+    return { ...base, effect: { ...base.effect }, visual: { ...base.visual } };
+  }
 }
 
 // ─── Drop & shop economy ─────────────────────────────────────────────────────
 // Independent roll on every chest open: rolled in parallel with the brawler
 // drop, so a single chest may pop both a brawler and a pet.
+/** Minimum chance for a pet of the chest's tier (shown on card / info header). */
 export const CHEST_PET_DROP_CHANCE: Record<ChestRarity, number> = {
   common:         0.04,
   rare:           0.07,
@@ -178,6 +168,74 @@ export const CHEST_PET_DROP_CHANCE: Record<ChestRarity, number> = {
   legendary:      0.30,
   ultralegendary: 0.45,
 };
+
+export const PET_RARITY_LABEL: Record<PetRarity, string> = {
+  common:    "Обычный",
+  rare:      "Редкий",
+  epic:      "Эпический",
+  mythic:    "Мифический",
+  legendary: "Легендарный",
+};
+
+export const PET_RARITY_ORDER: PetRarity[] = ["common", "rare", "epic", "mythic", "legendary"];
+
+function petMaxNormalTier(chestRarity: ChestRarity): PetRarity {
+  if (chestRarity === "common") return "rare";
+  if (chestRarity === "mega") return "mythic";
+  if (chestRarity === "ultralegendary") return "legendary";
+  if (chestRarity === "legendary" || chestRarity === "mythic" || chestRarity === "epic" || chestRarity === "rare") {
+    return chestRarity;
+  }
+  return "legendary";
+}
+
+export function petFloorTier(chestRarity: ChestRarity): PetRarity {
+  if (chestRarity === "common") return "rare";
+  if (chestRarity === "mega") return "mythic";
+  if (chestRarity === "ultralegendary") return "legendary";
+  if (chestRarity === "legendary" || chestRarity === "mythic" || chestRarity === "epic" || chestRarity === "rare") {
+    return chestRarity;
+  }
+  return "legendary";
+}
+
+export function getChestPetTierChances(
+  chestRarity: ChestRarity,
+): Partial<Record<PetRarity, number>> {
+  return computeTierOpenChances(
+    PET_RARITY_ORDER,
+    chestRarity,
+    CHEST_PET_DROP_CHANCE[chestRarity],
+    petMaxNormalTier(chestRarity),
+    petFloorTier(chestRarity),
+  );
+}
+
+export function getPetRarityDropRows(
+  chestRarity: ChestRarity,
+): { rarity: PetRarity; label: string; pctLabel: string }[] {
+  const chances = getChestPetTierChances(chestRarity);
+  return tierDropRows(
+    PET_RARITY_ORDER,
+    chances,
+    petFloorTier(chestRarity),
+    CHEST_PET_DROP_CHANCE[chestRarity],
+    PET_RARITY_LABEL,
+  ).map(row => ({
+    rarity: row.tier as PetRarity,
+    label: row.label,
+    pctLabel: row.pctLabel,
+  }));
+}
+
+export function getChestPetFloorPctLabel(chestRarity: ChestRarity): string {
+  const floor = CHEST_PET_DROP_CHANCE[chestRarity];
+  return formatTierChancePct(floor, floor);
+}
+
+export function getPetFloorTierLabel(chestRarity: ChestRarity): string {
+  return PET_RARITY_LABEL[petFloorTier(chestRarity)];
+}
 
 // Which pet rarities each chest tier can roll. Higher chests still bias
 // toward higher-rarity pets but never gate them entirely behind a single
@@ -193,19 +251,9 @@ export const CHEST_PET_RARITY_WEIGHTS: Record<ChestRarity, Partial<Record<PetRar
 };
 
 export const PET_GEM_COST: Record<PetRarity, number> = {
-  common:    50,
-  rare:      150,
-  epic:      400,
-  mythic:    800,
-  legendary: 1500,
+  common:    25,
+  rare:      75,
+  epic:      200,
+  mythic:    400,
+  legendary: 750,
 };
-
-export const PET_RARITY_LABEL: Record<PetRarity, string> = {
-  common:    "Обычный",
-  rare:      "Редкий",
-  epic:      "Эпический",
-  mythic:    "Мифический",
-  legendary: "Легендарный",
-};
-
-export const PET_RARITY_ORDER: PetRarity[] = ["common", "rare", "epic", "mythic", "legendary"];

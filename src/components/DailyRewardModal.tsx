@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { motion } from "framer-motion";
+import { useI18n } from "../i18n";
 import {
   getCurrentProfile,
   canClaimDailyLadder,
@@ -7,14 +9,45 @@ import {
 } from "../utils/localStorageAPI";
 import { getRewardForDay, type DailyReward } from "../utils/dailyLadder";
 import { formatHmsShort } from "../utils/quests";
-import ChestVisual from "./ChestVisual";
+import DailyRewardVisual from "./DailyRewardVisual";
+import ModalCloseButton from "./ModalCloseButton";
 import RewardDropModal, { type RewardInfo } from "./RewardDropModal";
+import {
+  GLASS_THEMES, glassOverlayStyle, glassPanelStyle, glassRadialStyle,
+} from "../utils/glassModalTheme";
 
 interface Props {
   onClose: () => void;
 }
 
+const THEME = GLASS_THEMES.gold;
+
+function formatDailyRewardLabel(
+  reward: DailyReward,
+  t: (key: string, params?: Record<string, string | number>) => string,
+  compact = false,
+): string {
+  if (reward.type === "chest") {
+    const chestKey = reward.chestRarity === "mythic" ? "daily.chest.mythic"
+      : reward.chestRarity === "legendary" ? "daily.chest.legendary"
+      : reward.chestRarity === "mega" ? "daily.chest.mega"
+      : "daily.chest.epic";
+    return t(chestKey);
+  }
+  if (reward.type === "gems") {
+    return t(compact ? "daily.compactGems" : "daily.reward.gems", { count: reward.amount });
+  }
+  if (reward.type === "powerPoints") {
+    return t(compact ? "daily.compactPower" : "daily.reward.power", { count: reward.amount });
+  }
+  if (reward.type === "xp") {
+    return t(compact ? "daily.compactPassXp" : "daily.reward.passXp", { count: reward.amount });
+  }
+  return t(compact ? "daily.compactCoins" : "daily.reward.coins", { count: reward.amount });
+}
+
 export default function DailyRewardModal({ onClose }: Props) {
+  const { t } = useI18n();
   const [profile, setProfile] = useState(getCurrentProfile());
   const [, setTick] = useState(0);
   const [msg, setMsg] = useState<string | null>(null);
@@ -47,184 +80,150 @@ export default function DailyRewardModal({ onClose }: Props) {
         label: r.reward.label,
       });
     } else {
-      setMsg(r.error || "Ошибка");
+      setMsg(r.error || t("common.error"));
       setTimeout(() => setMsg(null), 2200);
     }
   };
 
   return (
     <>
-    <div
+    <motion.div
       onClick={onClose}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
       style={{
         position: "fixed", inset: 0, zIndex: 90,
-        background: "rgba(0,0,0,0.78)",
-        backdropFilter: "blur(8px)",
+        ...glassOverlayStyle,
         display: "flex", alignItems: "center", justifyContent: "center",
         padding: 20,
       }}
     >
       <style>{`
-        @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
-        @keyframes pop { from { transform: scale(0.94); opacity: 0 } to { transform: scale(1); opacity: 1 } }
         @keyframes bonusGlow {
-          0%, 100% { box-shadow: 0 0 25px rgba(255,215,0,0.4); }
-          50%      { box-shadow: 0 0 55px rgba(255,215,0,0.85); }
+          0%, 100% { box-shadow: 0 0 25px rgba(255,215,0,0.35); }
+          50%      { box-shadow: 0 0 55px rgba(255,215,0,0.65); }
         }
       `}</style>
-      <div
+      <motion.div
         onClick={(e) => e.stopPropagation()}
+        initial={{ opacity: 0, scale: 0.96, y: 12 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.96, y: 12 }}
+        transition={{ duration: 0.22 }}
         style={{
-          width: "min(720px, 95vw)",
-          maxHeight: "92vh",
+          ...glassPanelStyle(THEME, { width: "min(720px, 95vw)", maxHeight: "min(92vh, 900px)" }),
           overflowY: "auto",
-          background: "linear-gradient(180deg, #1a0a3a 0%, #050020 100%)",
-          border: "2px solid #FFD700",
-          borderRadius: 22,
-          padding: 24,
-          color: "white",
-          boxShadow: "0 30px 80px rgba(0,0,0,0.7), 0 0 80px rgba(255,215,0,0.4)",
-          animation: "pop 0.2s ease",
-          fontFamily: "'Segoe UI', Arial, sans-serif",
-          position: "relative",
         }}
       >
-        <button
-          onClick={onClose}
-          style={{
-            position: "absolute", top: 14, right: 14,
-            background: "rgba(0,0,0,0.4)", border: "1px solid rgba(255,255,255,0.2)",
-            borderRadius: 10, padding: "5px 11px",
-            color: "white", cursor: "pointer", fontWeight: 800, fontSize: 14,
-          }}
-        >✕</button>
+        <div style={glassRadialStyle(THEME)} />
+        <ModalCloseButton onClick={onClose} style={{ top: 10, right: 10, zIndex: 2 }} />
 
-        <div style={{
-          fontSize: 26, fontWeight: 900, letterSpacing: 2,
-          background: "linear-gradient(135deg, #FFD700, #FF8A00)",
-          WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
-          marginBottom: 4,
-        }}>
-          🎁 ЕЖЕДНЕВНЫЕ ПРИЗЫ
-        </div>
-        <div style={{ fontSize: 12, color: "rgba(255,255,255,0.55)", marginBottom: 16 }}>
-          Заходите каждый день и забирайте награды по нарастающей.
-        </div>
-
-        {/* Today block */}
-        <div style={{
-          background: `linear-gradient(135deg, ${todayReward.color}33, rgba(0,0,0,0.4))`,
-          border: `2px solid ${canClaim ? "#FFD700" : "rgba(255,255,255,0.12)"}`,
-          borderRadius: 18,
-          padding: 18,
-          display: "grid",
-          gridTemplateColumns: "120px 1fr 150px",
-          gap: 16, alignItems: "center",
-          animation: canClaim ? "bonusGlow 2s ease-in-out infinite" : undefined,
-        }}>
-          <div style={{ display: "flex", justifyContent: "center" }}>
-            {todayReward.type === "chest" && todayReward.chestRarity ? (
-              <ChestVisual rarity={todayReward.chestRarity} size={100} animated />
-            ) : (
-              <div style={{
-                fontSize: 64, lineHeight: 1,
-                filter: `drop-shadow(0 6px 18px ${todayReward.color}88)`,
-              }}>
-                {todayReward.icon}
-              </div>
-            )}
-          </div>
-          <div>
-            <div style={{
-              fontSize: 11, color: canClaim ? "#FFD700" : "rgba(255,255,255,0.5)",
-              fontWeight: 800, letterSpacing: 2, marginBottom: 4,
-            }}>
-              {canClaim ? "✦ СЕГОДНЯ — НАГРАДА ЖДЁТ" : "СЕГОДНЯ"}  · ДЕНЬ {todayDay}
-            </div>
-            <div style={{ fontSize: 22, fontWeight: 900, color: todayReward.color, lineHeight: 1.1 }}>
-              {todayReward.label}
-            </div>
-            {!canClaim && (
-              <div style={{ marginTop: 6, fontSize: 11, color: "rgba(255,255,255,0.5)" }}>
-                Следующая награда через <span style={{ color: "#FFD700", fontWeight: 700 }}>{formatHmsShort(left)}</span>
-              </div>
-            )}
-          </div>
-          <button
-            onClick={handleClaim}
-            disabled={!canClaim}
-            style={{
-              background: canClaim
-                ? "linear-gradient(135deg, #FF9800, #FFD700)"
-                : "rgba(255,255,255,0.06)",
-              border: "none", borderRadius: 12,
-              padding: "12px 0",
-              color: canClaim ? "#000" : "rgba(255,255,255,0.4)",
-              fontWeight: 900, fontSize: 13, letterSpacing: 2,
-              cursor: canClaim ? "pointer" : "default",
-            }}
-          >
-            {canClaim ? "ЗАБРАТЬ" : "ПОЛУЧЕНО"}
-          </button>
-        </div>
-
-        {msg && (
+        <motion.div style={{ position: "relative", zIndex: 1 }}>
           <div style={{
-            margin: "12px 0 0", padding: "8px 14px",
-            background: "rgba(255,215,0,0.12)", border: "1px solid rgba(255,215,0,0.4)",
-            borderRadius: 10, color: "#FFD700", textAlign: "center",
-            fontWeight: 700, fontSize: 13,
-          }}>{msg}</div>
-        )}
+            fontSize: 26, fontWeight: 900, letterSpacing: 2,
+            background: "linear-gradient(135deg, #FFD700, #FF8A00)",
+            WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
+            marginBottom: 4,
+          }}>
+            {t("daily.title")}
+          </div>
+          <div style={{ fontSize: 12, color: "rgba(255,255,255,0.55)", marginBottom: 16 }}>
+            {t("daily.subtitle")}
+          </div>
 
-        {/* Upcoming 5 days */}
-        <div style={{ marginTop: 22, fontSize: 11, color: "rgba(255,255,255,0.5)", letterSpacing: 2, fontWeight: 800 }}>
-          СЛЕДУЮЩИЕ 5 ДНЕЙ
-        </div>
-        <div style={{
-          marginTop: 10,
-          display: "grid",
-          gridTemplateColumns: "repeat(5, 1fr)",
-          gap: 10,
-        }}>
-          {upcoming.map(({ day, reward }, i) => (
-            <div key={day} style={{
-              background: "rgba(255,255,255,0.04)",
-              border: `1px solid ${reward.color}44`,
-              borderRadius: 12, padding: "10px 8px",
-              textAlign: "center",
-              opacity: 1 - i * 0.08,
-            }}>
-              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.4)", letterSpacing: 1, fontWeight: 800 }}>
-                +{i + 1} ДН.
-              </div>
-              <div style={{
-                fontSize: 11, color: reward.color, fontWeight: 700, marginTop: 2,
-              }}>
-                ДЕНЬ {((day - 1) % 30) + 1}
-              </div>
-              <div style={{
-                margin: "8px auto 6px", height: 60,
-                display: "flex", alignItems: "center", justifyContent: "center",
-              }}>
-                {reward.type === "chest" && reward.chestRarity ? (
-                  <ChestVisual rarity={reward.chestRarity} size={50} animated={false} />
-                ) : (
-                  <div style={{ fontSize: 32, filter: `drop-shadow(0 2px 6px ${reward.color}88)` }}>
-                    {reward.icon}
-                  </div>
-                )}
-              </div>
-              <div style={{
-                fontSize: 11, color: reward.color, fontWeight: 800, lineHeight: 1.2,
-              }}>
-                {reward.label.replace("кристаллов", "крист.").replace("очков прокачки", "ОП").replace("опыта Star Pass", "опыта")}
-              </div>
+          <div style={{
+            background: `linear-gradient(160deg, ${todayReward.color}28, rgba(30,12,50,0.35))`,
+            border: `1px solid ${canClaim ? "rgba(255,213,79,0.55)" : "rgba(255,255,255,0.12)"}`,
+            borderRadius: "var(--r-lg)",
+            padding: 18,
+            display: "grid",
+            gridTemplateColumns: "120px 1fr 150px",
+            gap: 16, alignItems: "center",
+            animation: canClaim ? "bonusGlow 2s ease-in-out infinite" : undefined,
+            backdropFilter: "blur(6px)",
+          }}>
+            <div style={{ display: "flex", justifyContent: "center" }}>
+              <DailyRewardVisual reward={todayReward} size={100} animated={canClaim} />
             </div>
-          ))}
-        </div>
-      </div>
-    </div>
+            <div>
+              <motion.div style={{
+                fontSize: 11, color: canClaim ? "#FFD700" : "rgba(255,255,255,0.5)",
+                fontWeight: 800, letterSpacing: 2, marginBottom: 4,
+              }}>
+                {canClaim ? t("daily.todayWaiting") : t("daily.today")}  · {t("daily.dayLabel", { day: todayDay })}
+              </motion.div>
+              <div style={{ fontSize: 22, fontWeight: 900, color: todayReward.color, lineHeight: 1.1 }}>
+                {formatDailyRewardLabel(todayReward, t)}
+              </div>
+              {!canClaim && (
+                <div style={{ marginTop: 6, fontSize: 11, color: "rgba(255,255,255,0.5)" }}>
+                  {t("daily.nextIn", { time: formatHmsShort(left) })}
+                </div>
+              )}
+            </div>
+            <button
+              onClick={handleClaim}
+              disabled={!canClaim}
+              className={`ui-btn ui-btn--block ui-btn--lg ${canClaim ? "ui-btn--primary" : "ui-btn--ghost"}`}
+              style={{ letterSpacing: "0.2em" }}
+            >
+              {canClaim ? t("common.claim") : t("daily.claimed")}
+            </button>
+          </div>
+
+          {msg && (
+            <div className="ui-glass" style={{
+              margin: "12px 0 0", padding: "10px 14px",
+              border: "1px solid var(--bd-gold)",
+              color: "var(--c-gold-3)", textAlign: "center",
+              fontWeight: 800, fontSize: 13.5,
+            }}>{msg}</div>
+          )}
+
+          <div style={{ marginTop: 22, fontSize: 11, color: "rgba(255,255,255,0.5)", letterSpacing: 2, fontWeight: 800 }}>
+            {t("daily.upcoming")}
+          </div>
+          <div style={{
+            marginTop: 10,
+            display: "grid",
+            gridTemplateColumns: "repeat(5, 1fr)",
+            gap: 10,
+          }}>
+            {upcoming.map(({ day, reward }, i) => (
+              <div key={day} className="ui-card" style={{
+                background: `linear-gradient(160deg, ${reward.color}22, rgba(30,12,50,0.32))`,
+                border: `1px solid ${reward.color}55`,
+                borderRadius: "var(--r-md)", padding: "10px 8px",
+                textAlign: "center",
+                opacity: 1 - i * 0.08,
+                backdropFilter: "blur(6px)",
+              }}>
+                <div style={{ fontSize: 10, color: "rgba(255,255,255,0.4)", letterSpacing: 1, fontWeight: 800 }}>
+                  {t("daily.inDays", { count: i + 1 })}
+                </div>
+                <motion.div style={{
+                  fontSize: 11, color: reward.color, fontWeight: 700, marginTop: 2,
+                }}>
+                  {t("daily.dayLabel", { day: ((day - 1) % 30) + 1 })}
+                </motion.div>
+                <div style={{
+                  margin: "8px auto 6px", height: 60,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}>
+                  <DailyRewardVisual reward={reward} size={50} animated={false} />
+                </div>
+                <div style={{
+                  fontSize: 11, color: reward.color, fontWeight: 800, lineHeight: 1.2,
+                }}>
+                  {formatDailyRewardLabel(reward, t, true)}
+                </div>
+              </div>
+            ))}
+          </div>
+        </motion.div>
+      </motion.div>
+    </motion.div>
 
     {pendingReward && (
       <RewardDropModal

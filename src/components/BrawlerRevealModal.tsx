@@ -10,7 +10,10 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
 import { BRAWLERS, BRAWLER_RARITY_LABEL } from "../entities/BrawlerData";
+import { brawlerName, brawlerRarityLabel } from "../i18n";
 import { fixCharacterSkinnedMeshes } from "../utils/gltfSkinnedMeshFix";
+import { useI18n } from "../i18n";
+import { applyBrawlerNormTransform, brawlerGlbPath, computeBrawlerNormTransform } from "../game/brawler3DScale";
 
 // ── Model registry ────────────────────────────────────────────────────────────
 export const MODEL_URLS: Record<string, { url: string; anim: string; animIdx?: number }> = {
@@ -20,10 +23,21 @@ export const MODEL_URLS: Record<string, { url: string; anim: string; animIdx?: n
   kenji:   { url: "models/kenji.glb",   anim: "Walking", animIdx: 2 },
   hana:    { url: "models/hana.glb",    anim: "Walking", animIdx: 2 },
   goro:    { url: "models/goro.glb",    anim: "Running" },
-  sora:    { url: "models/sora.glb",    anim: "Walking", animIdx: 1 },
+  sora:    { url: "models/sora.glb",    anim: "Running", animIdx: 0 },
   rin:     { url: "models/rin.glb",     anim: "Running" },
   taro:    { url: "models/taro.glb",    anim: "Walking", animIdx: 2 },
   zafkiel: { url: "models/zafkiel.glb", anim: "Walking", animIdx: 2 },
+  verdeletta: { url: "models/verdeletta.glb", anim: "Walking", animIdx: 2 },
+  lumina: { url: brawlerGlbPath("lumina"), anim: "Walking", animIdx: 1 },
+  oliver: { url: brawlerGlbPath("oliver"), anim: "Walking", animIdx: 1 },
+  callista: { url: brawlerGlbPath("callista"), anim: "Walking", animIdx: 1 },
+  airin: { url: brawlerGlbPath("airin"), anim: "Walking", animIdx: 1 },
+  elian: { url: brawlerGlbPath("elian"), anim: "Walking", animIdx: 1 },
+  silven: { url: brawlerGlbPath("silven"), anim: "Walking", animIdx: 1 },
+  vittoria: { url: brawlerGlbPath("vittoria"), anim: "Walking", animIdx: 2 },
+  octavia: { url: brawlerGlbPath("octavia"), anim: "Walking", animIdx: 1 },
+  zephyrin: { url: brawlerGlbPath("zephyrin"), anim: "Walking", animIdx: 1 },
+  mirabel: { url: brawlerGlbPath("mirabel"), anim: "Walking", animIdx: 1 },
 };
 
 // ── GLTF cache (module-level, persists across remounts) ───────────────────────
@@ -31,6 +45,7 @@ interface CachedGLTF {
   scene: THREE.Group;
   animations: THREE.AnimationClip[];
   normScale: number;
+  normScaleY: number;
   normOffX: number;
   normOffY: number;
   normOffZ: number;
@@ -45,19 +60,11 @@ export function loadGLTFCached(url: string): Promise<CachedGLTF> {
       const scene = gltf.scene;
       fixMaterials(scene);
       fixCharacterSkinnedMeshes(scene);
-      const box = new THREE.Box3().setFromObject(scene);
-      const sz = new THREE.Vector3();
-      box.getSize(sz);
-      const center = new THREE.Vector3();
-      box.getCenter(center);
       const TARGET_H = 2.7;
-      const normScale = sz.y > 0.001 ? TARGET_H / sz.y : 1;
+      const t = computeBrawlerNormTransform(scene, TARGET_H, url);
       resolve({
         scene, animations: gltf.animations ?? [],
-        normScale,
-        normOffX: -center.x * normScale,
-        normOffY: -box.min.y * normScale,
-        normOffZ: -center.z * normScale,
+        ...t,
       });
     }, undefined, (err) => { gltfCache.delete(url); reject(err); });
   });
@@ -158,6 +165,8 @@ export interface BrawlerRevealModalProps {
   onDone: () => void;
   index?: number;
   total?: number;
+  /** Duplicate from chest → same 3D reveal, different headline. */
+  duplicate?: boolean;
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -166,7 +175,9 @@ export default function BrawlerRevealModal({
   onDone,
   index = 0,
   total = 1,
+  duplicate = false,
 }: BrawlerRevealModalProps) {
+  const { t } = useI18n();
   const mountRef   = useRef<HTMLDivElement>(null);
   const phaseRef   = useRef<RevealPhase>("running_in");
   const onDoneRef  = useRef(onDone);
@@ -245,9 +256,9 @@ export default function BrawlerRevealModal({
     scene.add(glowLight);
 
     const rootGroup = new THREE.Group();
-    // Start far away (small due to perspective). π rotation so models face the camera.
+    // Start far away; yaw=0 matches main-menu preview (face toward camera).
     rootGroup.position.z = -22;
-    rootGroup.rotation.y = Math.PI;
+    rootGroup.rotation.y = 0;
     scene.add(rootGroup);
 
     // ── Run-toward-camera state ───────────────────────────────────────────────
@@ -291,11 +302,11 @@ export default function BrawlerRevealModal({
           run.phaseTime = 0;
         }
       } else if (cur === "spinning") {
-        // Snap to center if we got here via user skip
+        // Face the player — idle animation only, no Y-axis spin.
         rootGroup.position.z = 0;
+        rootGroup.rotation.y = 0;
         run.floatT += dt;
         rootGroup.position.y = Math.sin(run.floatT * 1.5) * 0.14;
-        rootGroup.rotation.y += dt * 1.15;
       } else if (cur === "running_out") {
         if (!run.runOutStarted) {
           run.runOutStarted = true;
@@ -330,7 +341,7 @@ export default function BrawlerRevealModal({
         if (cancelled) return;
         const model = cloneSkinned(cached.scene) as THREE.Group;
         fixMaterials(model);
-        model.scale.setScalar(cached.normScale);
+        applyBrawlerNormTransform(model, cached);
         // rootGroup has rotation.y = π so local-X maps to world-X negated.
         // Force local X = 0 so the model is exactly at world X = 0 (screen center).
         model.position.set(0, cached.normOffY, 0);
@@ -350,12 +361,15 @@ export default function BrawlerRevealModal({
       cancelAnimationFrame(rafId);
       if (renderer.domElement.parentNode === mount) mount.removeChild(renderer.domElement);
       renderer.dispose();
+      const gl = renderer.getContext();
+      const ext = gl.getExtension("WEBGL_lose_context");
+      ext?.loseContext();
     };
   }, [brawlerId, brawler]);
 
   if (!brawler) return null;
 
-  const rarityLabel  = BRAWLER_RARITY_LABEL[brawler.rarity];
+  const rarityLabel  = brawlerRarityLabel(brawler.rarity, BRAWLER_RARITY_LABEL[brawler.rarity]);
   const isSpinning   = phase === "spinning";
   const isRunningOut = phase === "running_out";
 
@@ -407,7 +421,7 @@ export default function BrawlerRevealModal({
         textTransform: "uppercase", zIndex: 8, whiteSpace: "nowrap",
         animation: "headlineIn 0.7s cubic-bezier(0.22,1,0.36,1) 0.15s both",
       }}>
-        🎉 НОВЫЙ БОЕЦ!
+        {duplicate ? t("reveal.duplicate") : t("reveal.newBrawler")}
       </div>
 
       {/* ── Rotating beam background ── */}
@@ -502,13 +516,13 @@ export default function BrawlerRevealModal({
           color: "white",
           textShadow: `0 0 40px ${brawler.color}, 0 0 80px ${brawler.color}66, 0 5px 0 rgba(0,0,0,0.9)`,
         }}>
-          {brawler.name.toUpperCase()}
+          {brawlerName(brawler.id, brawler.name).toUpperCase()}
         </div>
         <div style={{
           fontSize: 13, color: "rgba(255,255,255,0.5)",
           letterSpacing: 3, textTransform: "uppercase",
         }}>
-          {brawler.role}
+          {duplicate ? t("reveal.freeStar") : brawler.role}
         </div>
       </div>
 
@@ -521,7 +535,7 @@ export default function BrawlerRevealModal({
           animation: "tapHint 2.5s ease-in-out infinite",
           zIndex: 7, pointerEvents: "none",
         }}>
-          Нажмите для продолжения
+          {t("chest.tapContinue")}
         </div>
       )}
 
@@ -536,7 +550,7 @@ export default function BrawlerRevealModal({
           borderRadius: 8, padding: "6px 14px",
           zIndex: 7, pointerEvents: "none",
         }}>
-          Пропустить
+          {t("common.skip")}
         </div>
       )}
     </div>

@@ -1,5 +1,8 @@
 import { useEffect, useRef } from "react";
 import type { InputHandler } from "../game/InputHandler";
+import { bitmapPxToClient } from "../utils/canvasObjectFitCover";
+import { usePlatformLayout } from "../platform";
+import { useI18n } from "../i18n";
 
 interface PlayerInfo {
   attackRange: number;
@@ -7,6 +10,10 @@ interface PlayerInfo {
   brawlerId: string;
   playerX?: number;
   playerY?: number;
+  camX?: number;
+  camY?: number;
+  oliverMemoryCount?: number;
+  onOliverCycleMemory?: () => void;
 }
 
 interface MobileControlsProps {
@@ -17,8 +24,11 @@ interface MobileControlsProps {
   getPlayerInfo: () => PlayerInfo | null;
 }
 
-const STICK_BASE = 56;          // base ring radius (px) → 112px diameter (≈20% smaller)
-const STICK_THUMB = 28;         // thumb radius (px)
+const STICK_BASE = 56;
+const STICK_THUMB = 28;
+const STICK_EDGE_X = 28;
+const STICK_EDGE_Y = 36;
+const SUPER_STICK_SIZE = 42;
 const TAP_THRESHOLD = 0.15;     // normalized distance below which a release is a "tap" (auto-aim)
 const PLACED_AREA_MAX_WORLD = 300; // max world distance to drop a placed-area super
 
@@ -36,6 +46,14 @@ function emptyStick(): JoystickState {
 }
 
 export default function MobileControls({ getInput, getPlayerInfo }: MobileControlsProps) {
+  const { t } = useI18n();
+  const { battle, tier, width, shortSide } = usePlatformLayout();
+  const isDesktop = tier === "desktop" || (width >= 1024 && shortSide > 520);
+  const stickBase = isDesktop ? STICK_BASE : battle.stickBase;
+  const stickThumb = isDesktop ? STICK_THUMB : battle.stickThumb;
+  const edgeX = isDesktop ? STICK_EDGE_X : battle.edgeInset;
+  const edgeY = isDesktop ? STICK_EDGE_Y : battle.edgeInset;
+  const superSize = isDesktop ? SUPER_STICK_SIZE : battle.superStickSize;
   const rootRef = useRef<HTMLDivElement>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement>(null);
   const moveStick = useRef<JoystickState>(emptyStick());
@@ -67,8 +85,20 @@ export default function MobileControls({ getInput, getPlayerInfo }: MobileContro
             gameRect.width / info.canvas.width,
             gameRect.height / info.canvas.height,
           );
-          const screenX = gameRect.left + gameRect.width / 2;
-          const screenY = gameRect.top + gameRect.height / 2;
+          let screenX = gameRect.left + gameRect.width / 2;
+          let screenY = gameRect.top + gameRect.height / 2;
+          if (
+            typeof info.playerX === "number" && typeof info.playerY === "number" &&
+            typeof info.camX === "number" && typeof info.camY === "number"
+          ) {
+            const p = bitmapPxToClient(
+              info.canvas,
+              info.playerX - info.camX,
+              info.playerY - info.camY,
+            );
+            screenX = p.x;
+            screenY = p.y;
+          }
 
           if (
             attackStick.current.pointerId !== null &&
@@ -111,8 +141,8 @@ export default function MobileControls({ getInput, getPlayerInfo }: MobileContro
       const stick = which === "move" ? moveStick.current
         : which === "attack" ? attackStick.current
         : superStick.current;
-      const offsetX = stick.dx * (STICK_BASE - STICK_THUMB / 2);
-      const offsetY = stick.dy * (STICK_BASE - STICK_THUMB / 2);
+      const offsetX = stick.dx * (stickBase - stickThumb / 2);
+      const offsetY = stick.dy * (stickBase - stickThumb / 2);
       el.style.transform = `translate(calc(-50% + ${offsetX}px), calc(-50% + ${offsetY}px))`;
     });
   };
@@ -147,7 +177,7 @@ export default function MobileControls({ getInput, getPlayerInfo }: MobileContro
     const rawDx = e.clientX - stick.originX;
     const rawDy = e.clientY - stick.originY;
     const mag = Math.hypot(rawDx, rawDy);
-    const norm = Math.min(1, mag / STICK_BASE);
+    const norm = Math.min(1, mag / stickBase);
     const dx = mag === 0 ? 0 : (rawDx / mag) * norm;
     const dy = mag === 0 ? 0 : (rawDy / mag) * norm;
     stick.dx = dx;
@@ -159,9 +189,9 @@ export default function MobileControls({ getInput, getPlayerInfo }: MobileContro
       if (which === "move") {
         input.setMovementJoystick(dx, dy);
       } else if (which === "attack") {
-        input.setAttackJoystick(true, Math.atan2(dy, dx));
+        input.setAttackJoystick(true, Math.atan2(dy, dx), norm);
       } else {
-        input.setSuperJoystick(true, Math.atan2(dy, dx));
+        input.setSuperJoystick(true, Math.atan2(dy, dx), norm);
       }
     }
     refreshThumbs();
@@ -185,7 +215,7 @@ export default function MobileControls({ getInput, getPlayerInfo }: MobileContro
       } else if (which === "attack") {
         const info = getPlayerInfo();
         if (stick.magnitude > TAP_THRESHOLD) {
-          input.setAttackJoystick(true, Math.atan2(stick.dy, stick.dx));
+          input.setAttackJoystick(true, Math.atan2(stick.dy, stick.dx), stick.magnitude);
           input.triggerAttack(info?.playerX, info?.playerY);
           requestAnimationFrame(() => input.setAttackJoystick(false, 0));
         } else {
@@ -195,12 +225,12 @@ export default function MobileControls({ getInput, getPlayerInfo }: MobileContro
       } else {
         const info = getPlayerInfo();
         if (stick.magnitude > TAP_THRESHOLD) {
-          input.setSuperJoystick(true, Math.atan2(stick.dy, stick.dx));
-          input.triggerSuper(info?.playerX, info?.playerY);
+          input.setSuperJoystick(true, Math.atan2(stick.dy, stick.dx), stick.magnitude);
+          input.triggerSuper(info?.playerX, info?.playerY, stick.magnitude);
           requestAnimationFrame(() => input.setSuperJoystick(false, 0));
         } else {
           input.setSuperJoystick(false, 0);
-          input.triggerSuper();
+          input.triggerSuper(info?.playerX, info?.playerY, 0);
         }
       }
     }
@@ -222,7 +252,7 @@ export default function MobileControls({ getInput, getPlayerInfo }: MobileContro
     posStyle: React.CSSProperties,
     sizeOverride?: number,
   ) => {
-    const radius = sizeOverride ?? STICK_BASE;
+    const radius = sizeOverride ?? stickBase;
     return (
       <div
         key={which}
@@ -254,8 +284,8 @@ export default function MobileControls({ getInput, getPlayerInfo }: MobileContro
             left: "50%",
             top: "50%",
             transform: "translate(-50%, -50%)",
-            width: STICK_THUMB * 2,
-            height: STICK_THUMB * 2,
+            width: stickThumb * 2,
+            height: stickThumb * 2,
             borderRadius: "50%",
             background: `radial-gradient(circle at 35% 30%, ${thumbColor}, ${baseColor})`,
             border: `2px solid ${glow}`,
@@ -289,20 +319,49 @@ export default function MobileControls({ getInput, getPlayerInfo }: MobileContro
 
       <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
         {stickEl(
-          "move", "Движение", "🏃", "#1565C0", "#42A5F5", "#90CAF9",
-          { left: 28, bottom: 36, pointerEvents: "auto" },
+          "move", t("settings.controls.mobile.move"), "🏃", "#1565C0", "#42A5F5", "#90CAF9",
+          { left: edgeX, bottom: edgeY, pointerEvents: "auto" },
         )}
         {stickEl(
-          "attack", "Атака", "🎯", "#B71C1C", "#FF5252", "#FFCDD2",
-          { right: 28, bottom: 36, pointerEvents: "auto" },
+          "attack", t("settings.controls.mobile.attack"), "🎯", "#B71C1C", "#FF5252", "#FFCDD2",
+          { right: edgeX, bottom: edgeY, pointerEvents: "auto" },
         )}
         {stickEl(
-          "super", "Супер", "⚡", "#F9A825", "#FFD54F", "#FFF59D",
-          // Lowered: was at full STICK_BASE * 2 above the attack stick;
-          // now sits roughly one stick height above (closer to the attack stick).
-          { right: 28 + STICK_BASE * 2 + 10, bottom: 36 + STICK_BASE + 6, pointerEvents: "auto" },
-          42, // super button is noticeably smaller than the analog sticks
+          "super", t("settings.controls.mobile.super"), "⚡", "#F9A825", "#FFD54F", "#FFF59D",
+          {
+            right: isDesktop ? edgeX + stickBase * 2 + 10 : edgeX + stickBase * 2 + 8,
+            bottom: isDesktop ? edgeY + stickBase + 6 : edgeY + stickBase + 4,
+            pointerEvents: "auto",
+          },
+          superSize,
         )}
+        {(() => {
+          const info = getPlayerInfo();
+          if (!info || info.brawlerId !== "oliver" || (info.oliverMemoryCount ?? 0) < 2) return null;
+          return (
+            <button
+              type="button"
+              onPointerDown={(e) => { e.stopPropagation(); info.onOliverCycleMemory?.(); }}
+              style={{
+                position: "absolute",
+                right: isDesktop ? edgeX + stickBase * 2 + 48 : edgeX + stickBase * 2 + 48,
+                bottom: isDesktop ? edgeY + stickBase + 44 : edgeY + stickBase + 44,
+                width: 36,
+                height: 36,
+                borderRadius: "50%",
+                border: "2px solid #42A5F5",
+                background: "linear-gradient(160deg, #795548, #5D4037)",
+                color: "#FFD54F",
+                fontSize: 18,
+                fontWeight: 900,
+                pointerEvents: "auto",
+                boxShadow: "0 0 14px rgba(66,165,245,0.55)",
+              }}
+              title="Switch copied super"
+              aria-label="Switch copied super"
+            >↻</button>
+          );
+        })()}
       </div>
     </div>
   );
@@ -396,6 +455,19 @@ function drawAttackIndicator(
       const halfArc = Math.PI / 6; // ±30° → 60° total
       ctx.fillStyle = FILL;
       ctx.strokeStyle = STROKE;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.arc(0, 0, range, -halfArc, halfArc);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      break;
+    }
+    case "vittoria": {
+      const halfArc = Math.PI / 5;
+      ctx.fillStyle = "rgba(183, 28, 28, 0.35)";
+      ctx.strokeStyle = "rgba(255, 82, 82, 0.95)";
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(0, 0);
@@ -520,6 +592,7 @@ function drawLineProjectile(
 //   goro   — NO indicator (instant self-buff).
 //   sora   — placed circle r=200, max 400, with meteor dots inside.
 //   rin    — placed circle r=100, max 300.
+//   zafkiel — placed circle r=120, max 300.
 //   taro   — placed turret outline 40x40 (max 200 from player).
 // =====================================================================
 function drawSuperIndicator(
@@ -530,7 +603,7 @@ function drawSuperIndicator(
   cssW: number, cssH: number,
 ) {
   // Self-buff supers: never draw a preview at all.
-  if (brawlerId === "ronin" || brawlerId === "goro") return;
+  if (brawlerId === "ronin" || brawlerId === "goro" || brawlerId === "vittoria") return;
 
   ctx.save();
   ctx.translate(px, py);
@@ -577,12 +650,21 @@ function drawSuperIndicator(
     case "kenji":
     case "hana":
     case "sora":
-    case "rin": {
+    case "rin":
+    case "zafkiel":
+    case "lumina":
+    case "oliver":
+    case "callista":
+    case "airin":
+    case "elian":
+    case "silven":
+    case "octavia":
+    case "zephyrin": {
       const radiusByBrawler: Record<string, number> = {
-        yuki: 140, kenji: 110, hana: 160, sora: 200, rin: 100,
+        yuki: 140, kenji: 110, hana: 160, sora: 200, rin: 100, zafkiel: 120, lumina: 120, oliver: 120, callista: 100, airin: 110, elian: 120, silven: 110, octavia: 100, zephyrin: 100, mirabel: 110,
       };
       const maxDistByBrawler: Record<string, number> = {
-        yuki: 300, kenji: 300, hana: 300, sora: 400, rin: 300,
+        yuki: 300, kenji: 300, hana: 300, sora: 400, rin: 300, zafkiel: 300, lumina: 300, oliver: 300, callista: 200, airin: 225, elian: 300, silven: 250, octavia: 200, zephyrin: 200, mirabel: 225,
       };
       const r = radiusByBrawler[brawlerId] * scale;
       const maxDist = maxDistByBrawler[brawlerId] * scale;
@@ -591,8 +673,14 @@ function drawSuperIndicator(
       drawAimLine(ctx, dist);
       ctx.translate(dist, 0);
       ctx.rotate(-angle);
-      ctx.fillStyle = "rgba(200, 210, 220, 0.4)";
-      ctx.strokeStyle = STROKE;
+      const fillByBrawler: Record<string, string> = {
+        zafkiel: "rgba(186, 104, 200, 0.28)",
+      };
+      const strokeByBrawler: Record<string, string> = {
+        zafkiel: "rgba(255, 215, 64, 0.9)",
+      };
+      ctx.fillStyle = fillByBrawler[brawlerId] ?? "rgba(200, 210, 220, 0.4)";
+      ctx.strokeStyle = strokeByBrawler[brawlerId] ?? STROKE;
       ctx.lineWidth = 2;
       ctx.setLineDash([10, 6]);
       ctx.beginPath();

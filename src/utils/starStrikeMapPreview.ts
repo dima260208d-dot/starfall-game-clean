@@ -6,7 +6,7 @@ const CENTER_Y = 1100;
 type TileId = 0 | 1 | 3 | 11;
 
 const TILE_COLOR: Record<TileId, string> = {
-  0: "#5a8c44", // grass
+  0: "#75A743", // grass (BinbunGrass palette)
   1: "#8B6060", // wall
   3: "#4CAF50", // bush
   11: "#78909C", // sand wall

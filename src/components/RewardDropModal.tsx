@@ -1,12 +1,18 @@
 import { createPortal } from "react-dom";
 import ChestItemScene from "./ChestItemScene";
 import ChestVisual from "./ChestVisual";
+import PinIcon from "./PinIcon";
 import type { ChestRarity } from "../utils/chests";
+import { getProfileIconImage, profileIconRewardFrameStyle } from "../utils/profileIconUtils";
+import { useI18n } from "../i18n";
 
 export interface RewardInfo {
-  type: "coins" | "gems" | "powerPoints" | "chest" | "xp";
+  type: "coins" | "gems" | "powerPoints" | "chest" | "xp" | "pin" | "profileIcon";
   amount: number;
   chestRarity?: ChestRarity;
+  pinId?: string;
+  iconId?: string;
+  goldenPinFrame?: boolean;
   label: string;
 }
 
@@ -19,14 +25,16 @@ const GLOW: Record<string, string> = {
   coins:       "#FFD700",
   gems:        "#40C4FF",
   powerPoints: "#CE93D8",
+  profileIcon: "#CE93D8",
   chest:       "#FF9800",
   xp:          "#FFD700",
 };
 
 export default function RewardDropModal({ reward, onDone }: Props) {
+  const { t } = useI18n();
   // Keep drop animation, but cap particle count to reduce lag.
   const is3D = reward.type === "coins" || reward.type === "gems" || reward.type === "powerPoints";
-  const glow  = GLOW[reward.type] ?? "#FFD700";
+  const glow  = reward.type === "pin" ? "#CE93D8" : (GLOW[reward.type] ?? "#FFD700");
 
   const modal = (
     <div
@@ -57,7 +65,7 @@ export default function RewardDropModal({ reward, onDone }: Props) {
         textShadow: `0 0 30px ${glow}CC, 0 2px 8px rgba(0,0,0,0.6)`,
         animation: "rdmPopUp 0.35s ease",
       }}>
-        🎁 ПОЛУЧЕНО!
+        {t("reward.received")}
       </div>
 
       {/* 3D physics drop for currency rewards */}
@@ -66,6 +74,26 @@ export default function RewardDropModal({ reward, onDone }: Props) {
           <ChestItemScene
             type={reward.type as "coins" | "gems" | "powerPoints"}
             amount={Math.min(reward.amount, 8)}
+          />
+        </div>
+      )}
+
+      
+      {reward.type === "pin" && reward.pinId && (
+        <div style={{ animation: "rdmPopUp 0.45s 0.05s ease both", marginBottom: 20 }}>
+          <PinIcon pinId={reward.pinId} size={120} glow animated />
+        </div>
+      )}
+
+      {reward.type === "profileIcon" && reward.iconId && (
+        <div style={{ animation: "rdmPopUp 0.45s 0.05s ease both", marginBottom: 20 }}>
+          <img
+            src={getProfileIconImage(reward.iconId)}
+            alt=""
+            style={profileIconRewardFrameStyle(120, {
+              border: `3px solid ${glow}`,
+              boxShadow: `0 0 28px ${glow}88`,
+            })}
           />
         </div>
       )}
@@ -115,7 +143,7 @@ export default function RewardDropModal({ reward, onDone }: Props) {
         animation: "rdmHintPulse 1.6s 0.6s infinite",
         letterSpacing: 1,
       }}>
-        нажмите для продолжения
+        {t("chest.tapContinue")}
       </div>
     </div>
   );

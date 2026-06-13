@@ -3,6 +3,8 @@ import {
   getStarGuardianDaysRemaining, isStarGuardianActive,
   isMainDailyAvailable, isSecondaryDailyAvailable, isSpecialDailyAvailable,
 } from "../utils/subscription";
+import { useI18n } from "../i18n";
+import StarGuardianIcon from "./StarGuardianIcon";
 
 interface Props {
   onClick: () => void;
@@ -10,6 +12,7 @@ interface Props {
 }
 
 export default function StarGuardianBadge({ onClick, compact = false }: Props) {
+  const { t } = useI18n();
   const [active, setActive] = useState(isStarGuardianActive());
   const [days, setDays] = useState(getStarGuardianDaysRemaining());
   const [hasReward, setHasReward] = useState(
@@ -17,14 +20,14 @@ export default function StarGuardianBadge({ onClick, compact = false }: Props) {
   );
 
   useEffect(() => {
-    const t = setInterval(() => {
+    const timer = setInterval(() => {
       setActive(isStarGuardianActive());
       setDays(getStarGuardianDaysRemaining());
       setHasReward(
         isMainDailyAvailable() || isSecondaryDailyAvailable() || isSpecialDailyAvailable()
       );
     }, 1000);
-    return () => clearInterval(t);
+    return () => clearInterval(timer);
   }, []);
 
   if (!active) return null;
@@ -32,7 +35,7 @@ export default function StarGuardianBadge({ onClick, compact = false }: Props) {
   return (
     <button
       onClick={onClick}
-      title="Star Guardian — забрать ежедневные награды"
+      title={t("sg.badgeTitle")}
       style={{
         position: "relative",
         display: "inline-flex", alignItems: "center", gap: compact ? 5 : 8,
@@ -45,13 +48,34 @@ export default function StarGuardianBadge({ onClick, compact = false }: Props) {
         fontSize: compact ? 11 : 13,
         cursor: "pointer",
         boxShadow: "0 0 18px rgba(255,215,64,0.35)",
+        overflow: "visible",
         animation: hasReward ? "starGuardianPulse 1.4s ease-in-out infinite" : undefined,
       }}
     >
-      <span style={{ fontSize: compact ? 14 : 16 }}>⭐</span>
-      <span style={{ letterSpacing: 0.6 }}>{compact ? `${days}д` : `STAR GUARDIAN ${days}д`}</span>
+      <span
+        aria-hidden
+        style={{
+          position: "relative",
+          width: compact ? 18 : 22,
+          height: compact ? 18 : 22,
+          flexShrink: 0,
+          overflow: "visible",
+          display: "inline-block",
+        }}
+      >
+        <StarGuardianIcon
+          size={compact ? 72 : 88}
+          style={{
+            position: "absolute",
+            left: "50%",
+            top: "50%",
+            transform: "translate(-50%, -50%)",
+          }}
+        />
+      </span>
+      <span style={{ letterSpacing: 0.6 }}>{compact ? t("sg.badgeDaysCompact", { days }) : t("sg.badgeDaysFull", { days })}</span>
       {hasReward && (
-        <span style={{
+        <span className="no-ui-shear" style={{
           position: "absolute", top: -5, right: -5,
           width: 14, height: 14, borderRadius: "50%",
           background: "#FF1744",

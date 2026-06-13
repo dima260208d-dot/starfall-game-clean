@@ -1,23 +1,33 @@
+import { translate as tr } from "../i18n";
 import { Brawler } from "../entities/Brawler";
 import { applyZafkielStarEffectsOnHit } from "../utils/zafkielStars";
+import { applyVerdelettaOnHit } from "../utils/verdelettaStars";
+import { applyLuminaOnHit } from "../utils/luminaStars";
+import { applyMirabelOnHit } from "../utils/mirabelMechanics";
+import { handleVerdelettaShadowProjectileHit } from "../utils/verdelettaShadows";
 import { Bot } from "../entities/Bot";
-import { BRAWLERS, getBrawlerById, pickBotStats } from "../entities/BrawlerData";
-import { createCrystalsMap, createTileGridMap, GameMap, renderMap, renderTileGrid } from "../game/MapRenderer";
-import { getPublishedMap, OV } from "../utils/mapEditorAPI";
-import { TileGrid, TILE_CELL_SIZE, GRID_SIZE, paintMountainBorderRing } from "../game/TileMap";
-import { Projectile, updateProjectiles, renderProjectiles } from "../entities/Projectile";
+import { BRAWLERS, getBrawlerById, isMeleeBrawler, pickBotStats } from "../entities/BrawlerData";
+import { createCrystalsMap, createTileGridMap, GameMap } from "../game/MapRenderer";
+import { OV } from "../utils/mapEditorAPI";
+import { getActiveMap } from "../utils/mapSchedule";
+import { TileGrid, TILE_CELL_SIZE, GRID_SIZE, paintMountainBorderRing, BATTLE_MAP_RIM_CELLS } from "../game/TileMap";
+import { Projectile, updateProjectiles, renderProjectiles, projectileSuperChargeOpts } from "../entities/Projectile";
 import { Camera } from "../game/Camera";
 import { InputHandler } from "../game/InputHandler";
 import { updateDamageNumbers, renderDamageNumbers, clearDamageNumbers, spawnDamageNumber } from "../utils/damageNumbers";
 import { updateEffects, renderEffects, clearEffects } from "../utils/effects";
 import { angleTo, autoAimAngle, autoAimTarget, distance, randomInt } from "../utils/helpers";
-import { recordGameResult, getCurrentUsername, getCurrentProfile } from "../utils/localStorageAPI";
-import { getPetById } from "../entities/PetData";
-import { resetMatchStats, getMatchStats } from "../utils/matchStats";
+import { resolvePlayerAttackAngle, tickHeldPlayerAttack, wrapCallistaAttackAim, wrapCallistaSuperAim } from "../utils/battleAttackAim";
+import { getCurrentUsername, getCurrentProfile, applyProfilePetToBrawler } from "../utils/localStorageAPI";
+import { applyPartySharedBattleResult, createPartyAllyBot, getPartyAllyEntries } from "../utils/social/partyBattle";
+import { resetMatchStats, getMatchStats, participantFromBrawler } from "../utils/matchStats";
 import { renderPlayerHUD } from "./sharedHUD";
-import { getSafeCanvas, getGemCanvas } from "../utils/powerModelCache";
+import { getSafeCanvas, getGemCanvas, getSafeGLBTemplate } from "../utils/powerModelCache";
 import { fillBattleCanvasBg, renderBattleScreenFX } from "../game/battleScreenFX";
+import { isBattle3DActive } from "../game/battle3DWorld";
+import { botAIContext, snapBrawlerSpawn } from "../ai/aiBotObjectives";
 import { isDevBattleWorldFrozen } from "../game/battleDevPause";
+import { drawTallTilesYsortedWithBrawlers } from "../game/tileGridBrawlerDepthPass";
 
 interface Safe {
   x: number;
@@ -64,13 +74,22 @@ export class ClashHeist {
     this.spriteLoaded = spriteLoaded;
     const playerStats = getBrawlerById(playerBrawlerId) || BRAWLERS[0];
     this.player = new Brawler(playerStats, playerLevel, 600, 1750, "blue", true);
-    this.player.setIdentity(getCurrentUsername() ?? "Игрок", false);
-    this.player.setEquippedPet(getPetById(getCurrentProfile()?.equippedPetId) ?? null);
+    this.player.setIdentity(getCurrentUsername() ?? tr("battle.player"), false);
+    applyProfilePetToBrawler(this.player);
     resetMatchStats();
 
     const allStats = pickBotStats(playerBrawlerId, 5);
-    this.allies.push(new Bot(allStats[0], randomInt(1, 4), 600, 1300, "blue"));
-    this.allies.push(new Bot(allStats[1], randomInt(1, 4), 600, 2200, "blue"));
+    const partyAllies = getPartyAllyEntries();
+    const allySpawns = [{ x: 600, y: 1300 }, { x: 600, y: 2200 }];
+    for (let i = 0; i < 2; i++) {
+      const entry = partyAllies[i];
+      const pos = allySpawns[i];
+      if (entry) {
+        this.allies.push(createPartyAllyBot(entry, pos.x, pos.y, "blue"));
+      } else {
+        this.allies.push(new Bot(allStats[i], randomInt(1, 4), pos.x, pos.y, "blue"));
+      }
+    }
     this.enemies.push(new Bot(allStats[2], randomInt(1, 5), 2900, 1300, "red"));
     this.enemies.push(new Bot(allStats[3], randomInt(1, 5), 2900, 1750, "red"));
     this.enemies.push(new Bot(allStats[4], randomInt(1, 5), 2900, 2200, "red"));
@@ -84,15 +103,18 @@ export class ClashHeist {
     this.input = new InputHandler(canvas, onAttack, onSuper);
 
     // ── Load published map if one exists ──────────────────────────────────
-    const pubMap = getPublishedMap("heist");
+    const pubMap = getActiveMap("heist");
     if (pubMap && pubMap.cells && pubMap.cells.length === GRID_SIZE * GRID_SIZE) {
       const tileGrid: TileGrid = {
         cells: new Uint8Array(GRID_SIZE * GRID_SIZE),
         destroyed: new Uint8Array(GRID_SIZE * GRID_SIZE),
         width: GRID_SIZE, height: GRID_SIZE, cellSize: TILE_CELL_SIZE,
+        rotations: pubMap.rotations && pubMap.rotations.length === GRID_SIZE * GRID_SIZE
+          ? new Uint8Array(pubMap.rotations)
+          : undefined,
       };
       for (let i = 0; i < pubMap.cells.length; i++) tileGrid.cells[i] = pubMap.cells[i];
-      paintMountainBorderRing(tileGrid, 10);
+      paintMountainBorderRing(tileGrid, BATTLE_MAP_RIM_CELLS);
       this.map = createTileGridMap(tileGrid, pubMap.name);
       this.camera = new Camera(CAM_W, CAM_H, this.map.width, this.map.height);
       if (pubMap.overlays && pubMap.overlays.length === GRID_SIZE * GRID_SIZE) {
@@ -115,19 +137,33 @@ export class ClashHeist {
         if (redSpawns[0])  { this.enemies[0].x = redSpawns[0].x; this.enemies[0].y = redSpawns[0].y; }
         if (redSpawns[1])  { this.enemies[1].x = redSpawns[1].x; this.enemies[1].y = redSpawns[1].y; }
         if (redSpawns[2])  { this.enemies[2].x = redSpawns[2].x; this.enemies[2].y = redSpawns[2].y; }
+        const grid = this.map.tileGrid;
+        snapBrawlerSpawn(this.player, grid);
+        for (const a of this.allies) snapBrawlerSpawn(a, grid);
+        for (const e of this.enemies) snapBrawlerSpawn(e, grid);
       }
     }
   }
 
   handleAttack(): void {
     if (!this.player.canAttack()) return;
-    const mouseAngle = angleTo(this.player.x, this.player.y, this.input.state.mouseWorldX, this.input.state.mouseWorldY);
-    const angle = this.input.attackJoystick.active ? mouseAngle : autoAimAngle(this.player, this.enemies, mouseAngle);
-    this.player.angle = angle;
-    const isMelee = ["goro", "ronin", "taro"].includes(this.player.stats.id);
+    const cam = { x: this.camera.x, y: this.camera.y, w: CAM_W, h: CAM_H, zoom: GAME_ZOOM };
+    const angle = resolvePlayerAttackAngle(
+      this.player,
+      this.enemies,
+      [this.player, ...this.allies, ...this.enemies],
+      this.input,
+      cam,
+      this.map.crates,
+    );
     const allBrawlers = [this.player, ...this.allies, ...this.enemies];
+    const callistaAim = wrapCallistaAttackAim(
+      this.player, angle, this.enemies, allBrawlers, this.input, cam, this.map.crates,
+    );
+    this.player.angle = callistaAim.angle;
+    const isMelee = isMeleeBrawler(this.player.stats.id);
     if (isMelee) {
-      this.player.meleeAttack(allBrawlers);
+      this.player.meleeAttack(allBrawlers, { crates: this.map.crates });
       const enemySafe = this.safes.find(s => s.team === "red");
       if (enemySafe) {
         const d = distance(this.player.x, this.player.y, enemySafe.x, enemySafe.y);
@@ -137,7 +173,7 @@ export class ClashHeist {
         }
       }
     } else {
-      const projs = this.player.shoot(angle);
+      const projs = this.player.shoot(callistaAim.angle, allBrawlers, callistaAim.aimX, callistaAim.aimY, { crates: this.map.crates });
       this.projectiles.push(...projs);
     }
   }
@@ -145,15 +181,19 @@ export class ClashHeist {
   handleSuper(): void {
     if (!this.player.canUseSuper()) return;
     const allBrawlers = [this.player, ...this.allies, ...this.enemies];
-    const autoTarget = this.input.superJoystick.active
-      ? null
-      : autoAimTarget(this.player, this.enemies, 1.0);
-    const aimX = autoTarget ? autoTarget.x : this.input.state.mouseWorldX;
-    const aimY = autoTarget ? autoTarget.y : this.input.state.mouseWorldY;
+    const cam = { x: this.camera.x, y: this.camera.y, w: CAM_W, h: CAM_H, zoom: GAME_ZOOM };
+    const callistaSuper = wrapCallistaSuperAim(
+      this.player, this.enemies, allBrawlers, this.input, cam, this.map.crates,
+    );
+    const autoTarget = callistaSuper ? null : (
+      this.input.superJoystick.active ? null : autoAimTarget(this.player, this.enemies, 1.0)
+    );
+    const aimX = callistaSuper ? callistaSuper.x : (autoTarget ? autoTarget.x : this.input.state.mouseWorldX);
+    const aimY = callistaSuper ? callistaSuper.y : (autoTarget ? autoTarget.y : this.input.state.mouseWorldY);
     const mouseAngle = angleTo(this.player.x, this.player.y, aimX, aimY);
-    this.player.angle = this.input.superJoystick.active
-      ? mouseAngle
-      : autoAimAngle(this.player, this.enemies, mouseAngle, 1.0);
+    this.player.angle = callistaSuper
+      ? callistaSuper.angle
+      : (this.input.superJoystick.active ? mouseAngle : autoAimAngle(this.player, this.enemies, mouseAngle, 1.0));
     this.player.activateSuper(allBrawlers, this.map, this.projectiles, aimX, aimY);
   }
 
@@ -169,6 +209,7 @@ export class ClashHeist {
 
     this.camera.follow(this.player.x, this.player.y);
     this.input.updateWorldMouse(this.camera.x, this.camera.y, this.player.x, this.player.y, GAME_ZOOM);
+    tickHeldPlayerAttack(this.input, this.player, () => this.handleAttack());
     this.player.angle = angleTo(this.player.x, this.player.y, this.input.state.mouseWorldX, this.input.state.mouseWorldY);
 
     const allBrawlers = [this.player, ...this.allies, ...this.enemies];
@@ -180,7 +221,7 @@ export class ClashHeist {
         const targetSafe = this.safes.find(s => s.team !== bot.team && s.hp > 0);
         if (targetSafe) bot.forcedTarget = { x: targetSafe.x, y: targetSafe.y };
         bot.update(sim, this.map);
-        bot.updateAI(sim, allBrawlers, this.map, this.projectiles);
+        bot.updateAI(sim, allBrawlers, this.map, this.projectiles, this.map.tileGrid ?? undefined, botAIContext(this.map, "heist"));
 
         if (targetSafe) {
           const d = distance(bot.x, bot.y, targetSafe.x, targetSafe.y);
@@ -193,7 +234,10 @@ export class ClashHeist {
       }
     }
 
-    updateProjectiles(this.projectiles, sim, this.map);
+    updateEffects(sim, [this.player, ...this.allies, ...this.enemies], this.projectiles, this.map.tileGrid ?? undefined, {
+      crates: this.map.crates,
+    });
+    updateProjectiles(this.projectiles, sim, this.map, undefined, { crates: this.map.crates });
     this.handleProjectileHits(allBrawlers, fr);
     this.projectiles = this.projectiles.filter(p => p.active);
 
@@ -236,11 +280,11 @@ export class ClashHeist {
     }
     if (enemySafe.hp <= 0) {
       this.over = true; this.won = true;
-      if (!this.resultRecorded) { const ms = getMatchStats(); recordGameResult({ won: true, mode: "heist", brawlerId: this.player.stats.id, place: 1, ...ms }); this.resultRecorded = true; }
+      if (!this.resultRecorded) { const ms = getMatchStats(); applyPartySharedBattleResult({ won: true, mode: "heist", brawlerId: this.player.stats.id, place: 1, ...ms }); this.resultRecorded = true; }
     }
     if (playerSafe.hp <= 0) {
       this.over = true; this.won = false;
-      if (!this.resultRecorded) { const ms = getMatchStats(); recordGameResult({ won: false, mode: "heist", brawlerId: this.player.stats.id, place: 2, ...ms }); this.resultRecorded = true; }
+      if (!this.resultRecorded) { const ms = getMatchStats(); applyPartySharedBattleResult({ won: false, mode: "heist", brawlerId: this.player.stats.id, place: 2, ...ms }); this.resultRecorded = true; }
     }
     // Update crystal particles
     for (let i = this.crystalParticles.length - 1; i >= 0; i--) {
@@ -253,7 +297,6 @@ export class ClashHeist {
       if (p.life <= 0) this.crystalParticles.splice(i, 1);
     }
     updateDamageNumbers(sim);
-    updateEffects(sim, [this.player, ...this.allies, ...this.enemies]);
   }
 
   private spawnCrystalExplosion(x: number, y: number): void {
@@ -299,10 +342,14 @@ export class ClashHeist {
         const d = distance(proj.x, proj.y, b.x, b.y);
         if (d < proj.radius + b.radius) {
           const attacker = allBrawlers.find(bw => bw.id === proj.ownerId) || null;
-          b.takeDamage(proj.damage, attacker);
+          b.takeDamage(proj.damage, attacker, projectileSuperChargeOpts(proj, attacker));
           if (proj.slow) b.addStatus("slow", 1, 0.3);
           if (proj.poison) b.addStatus("poison", 3, 100);
           applyZafkielStarEffectsOnHit(attacker as any, b as any, proj, { width: this.map.width, height: this.map.height });
+          applyVerdelettaOnHit(attacker as any, b as any, proj, { width: this.map.width, height: this.map.height });
+          applyLuminaOnHit(attacker as any, b as any, proj, allBrawlers);
+          applyMirabelOnHit(attacker as any, b as any, proj, allBrawlers);
+          handleVerdelettaShadowProjectileHit(proj, b, allBrawlers, this.map.width, this.map.height);
           proj.hitIds.add(b.id);
           if (!proj.piercing) { proj.active = false; break; }
         }
@@ -314,14 +361,26 @@ export class ClashHeist {
     fillBattleCanvasBg(ctx);
     ctx.save();
     ctx.scale(GAME_ZOOM, GAME_ZOOM);
-    renderMap(ctx, this.map, this.camera.x, this.camera.y, CAM_W, CAM_H, this.frame);
-    if (this.map.tileGrid) renderTileGrid(ctx, this.map.tileGrid, this.camera.x, this.camera.y, CAM_W, CAM_H, this.player.x, this.player.y, false);
-    this.renderSafes(ctx);
-    this.renderCrystalParticles(ctx);
     const allBrawlers = [this.player, ...this.allies, ...this.enemies];
     const _friendlies = [this.player, ...this.allies].filter(b => b.alive).map(b => ({ x: b.x, y: b.y }));
-    for (const b of allBrawlers) b.render(ctx, this.camera.x, this.camera.y, this.spriteLoaded, this.player.team, _friendlies);
-    if (this.map.tileGrid) renderTileGrid(ctx, this.map.tileGrid, this.camera.x, this.camera.y, CAM_W, CAM_H, this.player.x, this.player.y, true);
+    this.renderSafes(ctx);
+    this.renderCrystalParticles(ctx);
+    if (this.map.tileGrid) {
+      drawTallTilesYsortedWithBrawlers(
+        ctx,
+        this.map.tileGrid,
+        this.camera.x,
+        this.camera.y,
+        CAM_W,
+        CAM_H,
+        this.player.x,
+        this.player.y,
+        allBrawlers,
+        { spriteLoaded: this.spriteLoaded, viewerTeam: this.player.team, friendlies: _friendlies },
+      );
+    } else {
+      for (const b of allBrawlers) b.render(ctx, this.camera.x, this.camera.y, this.spriteLoaded, this.player.team, _friendlies);
+    }
     renderProjectiles(ctx, this.projectiles, this.camera.x, this.camera.y, this.frame);
     renderEffects(ctx, this.camera.x, this.camera.y, this.frame);
     renderDamageNumbers(ctx, this.camera.x, this.camera.y);
@@ -366,7 +425,10 @@ export class ClashHeist {
   }
 
   private renderSafes(ctx: CanvasRenderingContext2D): void {
-    const safeSprite = getSafeCanvas();
+    const use3d = isBattle3DActive();
+    const safe3dLive = use3d && !!getSafeGLBTemplate();
+    const draw2dSafeBody = !safe3dLive;
+    const safeSprite = draw2dSafeBody ? getSafeCanvas() : null;
     for (const safe of this.safes) {
       if (safe.hp <= 0) continue;
       const sx = safe.x - this.camera.x;
@@ -378,39 +440,37 @@ export class ClashHeist {
 
       ctx.save();
 
-      // Drop shadow
-      ctx.fillStyle = "rgba(0,0,0,0.45)";
-      ctx.beginPath();
-      ctx.ellipse(sx + 5, sy + H / 2 + 10, 60, 10, 0, 0, Math.PI * 2);
-      ctx.fill();
+      if (draw2dSafeBody) {
+        ctx.fillStyle = "rgba(0,0,0,0.45)";
+        ctx.beginPath();
+        ctx.ellipse(sx + 5, sy + H / 2 + 10, 60, 10, 0, 0, Math.PI * 2);
+        ctx.fill();
 
-      ctx.shadowColor = teamGlow;
-      ctx.shadowBlur = 22;
+        ctx.shadowColor = teamGlow;
+        ctx.shadowBlur = 22;
 
-      if (safeSprite) {
-        // 3-D GLB sprite — rendered slightly larger than the footprint
-        const D = W * 2.1;
-        ctx.globalAlpha = hpRatio < 0.25 ? 0.55 : 1;
-        ctx.drawImage(safeSprite, sx - D / 2, sy - D / 2, D, D);
-        ctx.globalAlpha = 1;
-        // Team color tint overlay
-        ctx.fillStyle = isBlue ? "rgba(25,100,210,0.18)" : "rgba(210,30,30,0.18)";
-        ctx.fillRect(sx - D / 2, sy - D / 2, D, D);
-      } else {
-        // Canvas 2D fallback while GLB loads
+        if (safeSprite) {
+          const D = W * 2.1;
+          ctx.globalAlpha = hpRatio < 0.25 ? 0.55 : 1;
+          ctx.drawImage(safeSprite, sx - D / 2, sy - D / 2, D, D);
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = isBlue ? "rgba(25,100,210,0.18)" : "rgba(210,30,30,0.18)";
+          ctx.fillRect(sx - D / 2, sy - D / 2, D, D);
+        } else {
+          ctx.shadowBlur = 0;
+          const bodyGrad = ctx.createLinearGradient(sx - W/2, sy - H/2, sx + W/2, sy + H/2);
+          bodyGrad.addColorStop(0, "#546E7A");
+          bodyGrad.addColorStop(1, "#263238");
+          ctx.fillStyle = bodyGrad;
+          ctx.fillRect(sx - W/2, sy - H/2, W, H);
+          ctx.fillStyle = "#FFD700";
+          ctx.font = `bold ${Math.round(W * 0.44)}px Arial`;
+          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.fillText("🔒", sx, sy);
+        }
+
         ctx.shadowBlur = 0;
-        const bodyGrad = ctx.createLinearGradient(sx - W/2, sy - H/2, sx + W/2, sy + H/2);
-        bodyGrad.addColorStop(0, "#546E7A");
-        bodyGrad.addColorStop(1, "#263238");
-        ctx.fillStyle = bodyGrad;
-        ctx.fillRect(sx - W/2, sy - H/2, W, H);
-        ctx.fillStyle = "#FFD700";
-        ctx.font = `bold ${Math.round(W * 0.44)}px Arial`;
-        ctx.textAlign = "center"; ctx.textBaseline = "middle";
-        ctx.fillText("🔒", sx, sy);
       }
-
-      ctx.shadowBlur = 0;
 
       // Damage cracks
       if (hpRatio < 0.6) {
@@ -476,9 +536,9 @@ export class ClashHeist {
     ctx.font = "bold 11px Arial";
     ctx.fillStyle = "#40C4FF";
     ctx.textAlign = "center";
-    ctx.fillText("ВАШ СЕЙФ", scoreX + 70, 20);
+    ctx.fillText(tr("battle.yourSafe"), scoreX + 70, 20);
     ctx.fillStyle = "#FF5252";
-    ctx.fillText("СЕЙФ ВРАГА", scoreX + 210, 20);
+    ctx.fillText(tr("battle.enemySafe"), scoreX + 210, 20);
 
     const blueHp = Math.max(0, blue.hp / blue.maxHp);
     const redHp = Math.max(0, red.hp / red.maxHp);
@@ -501,9 +561,9 @@ export class ClashHeist {
     const fakeTrophies = (name: string) => 300 + ((name.charCodeAt(0) * 37 + (name.charCodeAt(1) || 5) * 13) % 1700);
     const profile = getCurrentProfile();
     return [
-      { brawlerId: this.player.stats.id, displayName: this.player.displayName || "Игрок", team: "blue", isPlayer: true, level: this.player.level, trophies: profile?.trophies ?? 0 },
-      ...this.allies.map(b => ({ brawlerId: b.stats.id, displayName: b.displayName || "Бот", team: "blue", isPlayer: false, level: b.level, trophies: fakeTrophies(b.displayName || "B") })),
-      ...this.enemies.map(b => ({ brawlerId: b.stats.id, displayName: b.displayName || "Бот", team: "red", isPlayer: false, level: b.level, trophies: fakeTrophies(b.displayName || "B") })),
+      participantFromBrawler(this.player, { team: "blue", isPlayer: true, trophies: profile?.trophies ?? 0, defaultName: tr("battle.player") }),
+      ...this.allies.map(b => participantFromBrawler(b, { team: "blue", isPlayer: false, trophies: fakeTrophies(b.displayName || "B"), defaultName: tr("battle.bot") })),
+      ...this.enemies.map(b => participantFromBrawler(b, { team: "red", isPlayer: false, trophies: fakeTrophies(b.displayName || "B"), defaultName: tr("battle.bot") })),
     ];
   }
 

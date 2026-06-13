@@ -3,6 +3,9 @@ import { BRAWLERS } from "../entities/BrawlerData";
 
 export const BOSS_RAID_IDS = BRAWLERS.map(b => b.id);
 
+/** Максимальный номер уровня рейда (см. ClashBossRaid). */
+export const BOSS_RAID_MAX_LEVEL = 10;
+
 export function defaultBossRaidSlice(): BossRaidProfileSlice {
   return { byBoss: {} };
 }

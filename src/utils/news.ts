@@ -197,6 +197,11 @@ export function getUnreadNewsCount(username: string | undefined | null): number 
   return getNews().filter(n => !seen.has(n.id)).length;
 }
 
+export function isNewsUnread(username: string | undefined | null, newsId: string): boolean {
+  if (!username) return false;
+  return !getSeenNewsIds(username).includes(newsId);
+}
+
 // ── YouTube helpers ──────────────────────────────────────────────────────
 export function extractYouTubeId(input: string): string | null {
   const trimmed = input.trim();

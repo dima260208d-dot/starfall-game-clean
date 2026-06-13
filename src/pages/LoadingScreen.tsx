@@ -1,18 +1,24 @@
 import { useEffect, useRef, useState } from "react";
+import { useI18n } from "../i18n";
 
 interface Props {
   onDone: () => void;
   duration?: number;
   label?: string;
   progress?: number;
+  /** Если false — только фон и шапка, без полосы и процентов (например первый запуск). */
+  showProgressBar?: boolean;
 }
 
 export default function LoadingScreen({
   onDone,
   duration,
-  label = "ЗАГРУЗКА",
+  label,
   progress: externalProgress,
+  showProgressBar = true,
 }: Props) {
+  const { t } = useI18n();
+  const displayLabel = label ?? t("loading.default");
   const hasExternal = externalProgress !== undefined;
   const minDuration = duration ?? (hasExternal ? 1500 : 4500);
   const [timerProgress, setTimerProgress] = useState(0);
@@ -52,9 +58,9 @@ export default function LoadingScreen({
   return (
     <div style={{
       position: "fixed", inset: 0,
-      background: "#0a0018",
+      background: "#06031a",
       overflow: "hidden", zIndex: 1000,
-      fontFamily: "'Segoe UI', Arial, sans-serif",
+      fontFamily: "var(--app-font-sans)",
     }}>
       {/* Battle scene — full-screen generated artwork */}
       <img
@@ -103,48 +109,51 @@ export default function LoadingScreen({
         </div>
       </div>
 
-      {/* Progress bar — bottom center */}
-      <div style={{
-        position: "absolute", left: "50%", bottom: 36,
-        transform: "translateX(-50%)",
-        width: "min(620px, 80vw)", textAlign: "center", zIndex: 5,
-      }}>
+      {/* Progress bar — bottom center (optional) */}
+      {showProgressBar && (
         <div style={{
-          display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12,
-        }}>
-          <span style={{ fontSize: 13, letterSpacing: 5, color: "rgba(255,255,255,0.88)", fontWeight: 800 }}>
-            {label}
-          </span>
-          <span style={{
-            fontSize: 32, fontWeight: 900,
-            background: "linear-gradient(135deg, #FFD700, #FF5252)",
-            WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
-            letterSpacing: 1, fontVariantNumeric: "tabular-nums",
-          }}>
-            {percent}%
-          </span>
-        </div>
-        <div style={{
-          width: "100%", height: 24, borderRadius: 99,
-          background: "rgba(10,4,25,0.85)", overflow: "hidden",
-          border: "2px solid rgba(255,255,255,0.45)",
-          boxShadow: "0 0 28px rgba(120,40,200,0.55), inset 0 2px 8px rgba(0,0,0,0.85)",
+          position: "absolute", left: "50%", bottom: 36,
+          transform: "translateX(-50%)",
+          width: "min(620px, 80vw)", textAlign: "center", zIndex: 5,
         }}>
           <div style={{
-            width: `${percent}%`, height: "100%",
-            background: "linear-gradient(90deg, #7B2FBE, #FF5252 55%, #FFD700)",
-            boxShadow: "0 0 22px rgba(255,215,0,0.85)",
-            position: "relative",
-            transition: hasExternal ? "width 0.3s ease" : undefined,
+            display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12,
+          }}>
+            <span style={{ fontSize: 13, letterSpacing: 5, color: "rgba(255,255,255,0.88)", fontWeight: 800 }}>
+              {displayLabel}
+            </span>
+            <span style={{
+              fontSize: 32, fontWeight: 900,
+              background: "linear-gradient(135deg, #ffe57f 0%, #ffb300 35%, #d500f9 100%)",
+              WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
+              letterSpacing: "0.06em", fontVariantNumeric: "tabular-nums",
+              filter: "drop-shadow(0 4px 18px rgba(213,0,249,0.5))",
+            }}>
+              {percent}%
+            </span>
+          </div>
+          <div style={{
+            width: "100%", height: 24, borderRadius: 999,
+            background: "rgba(10,4,25,0.85)", overflow: "hidden",
+            border: "1px solid rgba(255,255,255,0.32)",
+            boxShadow: "0 0 28px rgba(123,47,190,0.55), inset 0 2px 10px rgba(0,0,0,0.85)",
           }}>
             <div style={{
-              position: "absolute", inset: 0,
-              background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent)",
-              animation: "shimmer 1.4s linear infinite",
-            }} />
+              width: `${percent}%`, height: "100%",
+              background: "linear-gradient(90deg, #7B2FBE 0%, #d500f9 50%, #ffd54f 100%)",
+              boxShadow: "0 0 24px rgba(255,213,79,0.85)",
+              position: "relative",
+              transition: hasExternal ? "width 0.3s ease" : undefined,
+            }}>
+              <div style={{
+                position: "absolute", inset: 0,
+                background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.45), transparent)",
+                animation: "shimmer 1.4s linear infinite",
+              }} />
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       <style>{`
         @keyframes titleGlow {

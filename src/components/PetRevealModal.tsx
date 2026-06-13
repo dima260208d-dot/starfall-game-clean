@@ -7,6 +7,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import PetSvg from "./PetSvg";
 import { getPetById, PET_RARITY_LABEL } from "../entities/PetData";
+import { petName, petRarityLabel, petEffectLabel } from "../i18n";
+import { useI18n } from "../i18n";
 
 interface Props {
   petId: string;
@@ -61,6 +63,7 @@ const STYLES = `
 type Phase = "in" | "idle" | "out";
 
 export default function PetRevealModal({ petId, onDone, index = 0, total = 1 }: Props) {
+  const { t } = useI18n();
   const pet = getPetById(petId);
   const [phase, setPhase] = useState<Phase>("in");
   const [showFlash, setShowFlash] = useState(false);
@@ -106,7 +109,7 @@ export default function PetRevealModal({ petId, onDone, index = 0, total = 1 }: 
 
   if (!pet) return null;
 
-  const rarityLabel = PET_RARITY_LABEL[pet.rarity];
+  const rarityLabel = petRarityLabel(pet.rarity, PET_RARITY_LABEL[pet.rarity]);
   const isIdle = phase === "idle";
   const isOut  = phase === "out";
 
@@ -156,7 +159,7 @@ export default function PetRevealModal({ petId, onDone, index = 0, total = 1 }: 
         textTransform: "uppercase", zIndex: 8, whiteSpace: "nowrap",
         animation: "headlineIn 0.7s cubic-bezier(0.22,1,0.36,1) 0.15s both",
       }}>
-        🎉 Новый питомец!
+        {t("reveal.newPet")}
       </div>
 
       {/* Spinning rays */}
@@ -236,14 +239,14 @@ export default function PetRevealModal({ petId, onDone, index = 0, total = 1 }: 
           color: "white", textAlign: "center",
           textShadow: `0 0 36px ${pet.color}, 0 0 72px ${pet.color}55, 0 5px 0 rgba(0,0,0,0.9)`,
         }}>
-          {pet.name.toUpperCase()}
+          {petName(pet.id, pet.name).toUpperCase()}
         </div>
         <div style={{
           fontSize: 12, color: "rgba(255,255,255,0.6)",
           letterSpacing: 2, textTransform: "uppercase",
           maxWidth: 460, textAlign: "center", padding: "0 16px",
         }}>
-          {pet.effectLabel}
+          {petEffectLabel(pet.id, pet.effectLabel)}
         </div>
       </div>
 
@@ -255,7 +258,7 @@ export default function PetRevealModal({ petId, onDone, index = 0, total = 1 }: 
           animation: "tapHint 2.5s ease-in-out infinite",
           zIndex: 7, pointerEvents: "none",
         }}>
-          Нажмите для продолжения
+          {t("chest.tapContinue")}
         </div>
       )}
     </div>

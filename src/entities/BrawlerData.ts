@@ -1,4 +1,12 @@
-import type { ChestRarity } from "../utils/chests";
+import { CHEST_RARITY_ORDER, type ChestRarity } from "../utils/chests";
+import {
+  computeTierOpenChances,
+  formatTierChancePct,
+  tierDropRows,
+} from "../utils/chestDropChances";
+
+/** Максимальный уровень прокачки бойца (включительно). */
+export const MAX_BRAWLER_LEVEL = 11;
 
 export interface BrawlerStats {
   id: string;
@@ -50,29 +58,147 @@ export const BRAWLER_GEM_COST: Record<ChestRarity, number> = {
   ultralegendary: 5000,
 };
 
-// Per-chest chance to drop a brawler (instead of a normal reward roll).
-// Higher rarity chests have a higher chance to drop brawlers.
+/** Minimum displayed / configured chance for a brawler of the chest's own tier. */
 export const CHEST_BRAWLER_DROP_CHANCE: Record<ChestRarity, number> = {
-  common:         0.03,   //  3%
-  rare:           0.05,   //  5%
-  epic:           0.08,   //  8%
-  mega:           0.12,   // 12%
-  mythic:         0.15,   // 15%
-  legendary:      0.20,   // 20%
-  ultralegendary: 0.37,   // 37% (mythic 20% + legendary 12% + ultralegendary 5%)
+  common:         0.025,
+  rare:           0.05,
+  epic:           0.10,
+  mega:           0.15,
+  mythic:         0.17,
+  legendary:      0.25,
+  ultralegendary: 0.37,
 };
 
-// Brawler rarity tiers that can drop from each chest type.
-// Higher tier chests can drop brawlers of equal or lower rarity.
+/** Brawler tiers that exist in-game (no «обычный» персонаж). */
+export const BRAWLER_DROP_RARITIES: ChestRarity[] = CHEST_RARITY_ORDER.filter(
+  r => r !== "common",
+);
+
+function brawlerMaxNormalTier(chestRarity: ChestRarity): ChestRarity {
+  if (chestRarity === "common") return "rare";
+  return chestRarity;
+}
+
+function brawlerFloorTier(chestRarity: ChestRarity): ChestRarity {
+  if (chestRarity === "common") return "rare";
+  return chestRarity;
+}
+
+/** Per-tier open chance for this chest (brawler rarities only). */
+export function getChestBrawlerTierChances(
+  chestRarity: ChestRarity,
+): Partial<Record<ChestRarity, number>> {
+  const floor = CHEST_BRAWLER_DROP_CHANCE[chestRarity];
+  return computeTierOpenChances(
+    BRAWLER_DROP_RARITIES,
+    chestRarity,
+    floor,
+    brawlerMaxNormalTier(chestRarity),
+    brawlerFloorTier(chestRarity),
+  );
+}
+
+// Relative weights inside a tier when several brawlers share it (fallback).
 export const CHEST_BRAWLER_RARITY_WEIGHTS: Record<ChestRarity, Partial<Record<ChestRarity, number>>> = {
   common:         { common: 1 },
   rare:           { common: 0.85, rare: 0.15 },
   epic:           { common: 0.6, rare: 0.3, epic: 0.1 },
   mega:           { common: 0.5, rare: 0.3, epic: 0.15, mega: 0.05 },
   mythic:         { common: 0.4, rare: 0.25, epic: 0.2, mega: 0.1, mythic: 0.05 },
-  legendary:      { epic: 0.5, mega: 0.3, legendary: 0.2 },
-  ultralegendary: { mythic: 0.63, legendary: 0.32, ultralegendary: 0.05 },
+  legendary:      { common: 0.35, rare: 0.25, epic: 0.2, mega: 0.12, legendary: 0.08 },
+  ultralegendary: {
+    common: 0.08, rare: 0.1, epic: 0.12, mega: 0.14,
+    mythic: 0.28, legendary: 0.24, ultralegendary: 0.14,
+  },
 };
+
+/** Highest brawler tier in the normal band for this chest. */
+export function maxBrawlerTierIndexFromChest(chestRarity: ChestRarity): number {
+  return BRAWLER_DROP_RARITIES.indexOf(brawlerMaxNormalTier(chestRarity));
+}
+
+/** Any brawler tier may be rolled; chances are near-zero above the normal band. */
+export function brawlerCanDropFromChestTier(
+  _brawlerRarity: ChestRarity,
+  _chestRarity: ChestRarity,
+): boolean {
+  return true;
+}
+
+/** Weighted pick among brawlers using chest rarity table. */
+export function pickWeightedBrawlerFromPool<T extends { rarity: ChestRarity }>(
+  pool: T[],
+  chestRarity: ChestRarity,
+): T | null {
+  if (pool.length === 0) return null;
+  const weights = CHEST_BRAWLER_RARITY_WEIGHTS[chestRarity];
+  let total = 0;
+  const entries: { item: T; w: number }[] = [];
+  for (const item of pool) {
+    const w = weights[item.rarity] ?? 0;
+    if (w <= 0) continue;
+    total += w;
+    entries.push({ item, w });
+  }
+  if (total <= 0 || entries.length === 0) {
+    return pool[Math.floor(Math.random() * pool.length)];
+  }
+  let roll = Math.random() * total;
+  for (const { item, w } of entries) {
+    roll -= w;
+    if (roll <= 0) return item;
+  }
+  return entries[entries.length - 1].item;
+}
+
+/** Floor chance: brawler of the chest's own tier (shown on chest card). */
+export function getChestBrawlerFloorChance(chestRarity: ChestRarity): number {
+  return CHEST_BRAWLER_DROP_CHANCE[chestRarity];
+}
+
+/** One roll: returns brawler rarity tier for this chest open, or null. */
+export function rollChestBrawlerTier(chestRarity: ChestRarity): ChestRarity | null {
+  const chances = getChestBrawlerTierChances(chestRarity);
+  const entries = BRAWLER_DROP_RARITIES
+    .filter(r => (chances[r] ?? 0) > 0)
+    .map(r => ({ rarity: r, chance: chances[r]! }));
+  if (entries.length === 0) return null;
+  const rawTotal = entries.reduce((s, e) => s + e.chance, 0);
+  const total = Math.min(0.99, rawTotal);
+  if (Math.random() >= total) return null;
+  let roll = Math.random() * rawTotal;
+  for (const e of entries) {
+    roll -= e.chance;
+    if (roll <= 0) return e.rarity;
+  }
+  return entries[entries.length - 1].rarity;
+}
+
+/** Per-tier open chance rows for chest info UI. */
+export function getBrawlerRarityDropRows(
+  chestRarity: ChestRarity,
+): { rarity: ChestRarity; label: string; pctLabel: string }[] {
+  const chances = getChestBrawlerTierChances(chestRarity);
+  const floorTier = brawlerFloorTier(chestRarity);
+  return tierDropRows(
+    BRAWLER_DROP_RARITIES,
+    chances,
+    floorTier,
+    CHEST_BRAWLER_DROP_CHANCE[chestRarity],
+    BRAWLER_RARITY_LABEL,
+  ).map(row => ({
+    rarity: row.tier as ChestRarity,
+    label: row.label,
+    pctLabel: row.pctLabel,
+  }));
+}
+
+export function getChestBrawlerFloorPctLabel(chestRarity: ChestRarity): string {
+  return formatTierChancePct(
+    CHEST_BRAWLER_DROP_CHANCE[chestRarity],
+    CHEST_BRAWLER_DROP_CHANCE[chestRarity],
+  );
+}
 
 // Backstory/lore for each brawler, shown on the character detail page.
 export const BRAWLER_LORE: Record<string, string> = {
@@ -86,9 +212,20 @@ export const BRAWLER_LORE: Record<string, string> = {
   rin:     "Рин выросла в зелёных джунглях среди ядовитых растений. Каждый её кинжал смазан личным составом яда, формулу которого не знает никто. Она появляется бесшумно, отравляет цель и исчезает в зарослях прежде, чем кто-то успеет среагировать.",
   taro:    "Таро — пожилой инженер, который собрал свой первый шагоход в шесть лет. Гаечный ключ в его руках — оружие пострашнее меча, а турели, что он расставляет на поле боя, держат позиции часами. Не недооценивайте старика.",
   zafkiel: "Зафкиэль — хранитель времени и пространства, последний из ордена Хроностражей. Он управляет потоками времени, возвращая врагов в прошлое или ускоряя их к неизбежной судьбе. Его Врата Вечности — точка, где прошлое и будущее сливаются в одно мгновение. Те, кто встаёт на его пути, обнаруживают, что их движения уже давно предрешены.",
+  verdeletta: "Верделетта — адский церемонимейстер. Она организует самые хаотичные и опасные торжества в преисподней. Её задача — развлекать грешников и демонов, но она давно вышла за рамки протокола. Верделетта устраивает «вечеринки» прямо в мире живых, приглашая всех без разбора. Её волшебный пистолет — не оружие, а инструмент приглашения. Те, кого она метит, становятся гостями её теневого бала. А тени... тени всегда находят тех, кто не заплатил за вход. Говорят, что увидеть свою тень, шевелящуюся отдельно — значит, Верделетта уже выбрала вас для следующего торжества. Отказаться нельзя. Потому что это ад.",
+  lumina: "Люмина — дочь падшего ангела и смертной женщины. Она не помнит небес, но её крылья светятся тоской по дому. Говорят, что её световые нити связывают не только врагов, но и потерянные души, помогая им найти покой. В бою она не убивает — она примиряет, запирая противников в золотой клетке правосудия.",
+  oliver: "Оливер — гениальный механик, чьи механические жуки — уменьшенные копии его умершего брата, превращённого в машину. Он научился копировать вражеские суперы, потому что считает, что любой дар можно использовать во благо. Однако его репликатор хранит и память о том, как жук-брат однажды спас ему жизнь.",
+  callista: "Каллиста — алхимик, которая взорвала свою лабораторию, пытаясь создать лекарство от всех болезней. После этого она носит очки с разноцветными линзами, потому что каждый свой реактив видит в новом свете. Её супер — взрывная смесь всех рецептов, которые она накопила. Она не знает, вылечит это или убьёт, но готова рискнуть ради науки.",
+  airin: "Айрин — бывший военный лётчик королевства стимпанк, которую предали и бросили в дымовой ловушке. Она выжила, но с тех пор носит очки на лбу и дымовые шашки. Её эвакуация спасает не только тела, но и души — она верит, что каждый заслуживает второго шанса. Даже врагам.",
+  silven: "Сильвен был обычным мальчиком-лешим, пока люди не выжгли его лес. Оставшись один, он отдал своё сердце древнему дубу, и тот ответил. Теперь Сильвен сажает деревья жизни везде, где проходит бой.",
+  vittoria: "Виттория — последняя из вампирского рода, уничтоженного охотниками. Она носит кастет с шипами не для убийства, а как память о брате, который заслонил её собой. Кровавая луна — её проклятие и благословение: чем больше жизней она забирает, тем дольше может сражаться. Но она мечтает лишь о том, чтобы однажды лечить, а не кусать.",
+  octavia: "Октавия — русалка-мутант из подземного озера, которое отравили алхимики. Её щупальца — результат экспериментов. Чернила, которые она оставляет, ядовиты для врагов, но для союзников они как туман, скрывающий их от опасности. Она ищет способ очистить воду, но пока что её ловушки с щупальцами хватают лишь тех, кто не верит в чудеса.",
+  zephyrin: "Зефирин — дух ветра, который устал быть невидимым. Она приняла форму девушки, чтобы почувствовать, что значит быть уязвимой. Её торнадо — это её попытки обнять мир, но они отбрасывают врагов прочь. В моменты неуязвимости она становится чистой воздушной субстанцией, недосягаемой для чужой боли. Она ищет того, кто сможет остановить её ветер.",
+  mirabel: "Мирабель выросла в библиотеке академии, где каждая книга шептала ей тайны. Она не стреляет огнём — она бросает искры знания, ускоряя союзников быстрее, чем враги успевают понять, что произошло. Её супер «Ускоренное обучение» превращает целую команду в мастеров, чьи следующие удары приходят дважды.",
 };
 
 export const BRAWLERS: BrawlerStats[] = [
+  // New playable brawlers: append here — they auto-enter getBotPool() for AI spawns.
   {
     id: "miya",
     name: "Мия",
@@ -116,7 +253,7 @@ export const BRAWLERS: BrawlerStats[] = [
   },
   {
     id: "ronin",
-    name: "Ronin",
+    name: "Ронин",
     role: "Танк",
     rarity: "epic",
     hp: 5500,
@@ -141,7 +278,7 @@ export const BRAWLERS: BrawlerStats[] = [
   },
   {
     id: "yuki",
-    name: "Yuki",
+    name: "Юки",
     role: "Поддержка",
     rarity: "mega",
     hp: 3200,
@@ -166,7 +303,7 @@ export const BRAWLERS: BrawlerStats[] = [
   },
   {
     id: "kenji",
-    name: "Kenji",
+    name: "Кендзи",
     role: "Контроллер",
     rarity: "epic",
     hp: 4000,
@@ -191,7 +328,7 @@ export const BRAWLERS: BrawlerStats[] = [
   },
   {
     id: "hana",
-    name: "Hana",
+    name: "Хана",
     role: "Хилер",
     rarity: "rare",
     hp: 3000,
@@ -216,7 +353,7 @@ export const BRAWLERS: BrawlerStats[] = [
   },
   {
     id: "goro",
-    name: "Goro",
+    name: "Горо",
     role: "Берсерк",
     rarity: "mythic",
     hp: 6200,
@@ -241,7 +378,7 @@ export const BRAWLERS: BrawlerStats[] = [
   },
   {
     id: "sora",
-    name: "Sora",
+    name: "Сора",
     role: "Маг",
     rarity: "mega",
     hp: 3400,
@@ -266,7 +403,7 @@ export const BRAWLERS: BrawlerStats[] = [
   },
   {
     id: "rin",
-    name: "Rin",
+    name: "Рин",
     role: "Отравитель",
     rarity: "legendary",
     hp: 3300,
@@ -291,7 +428,7 @@ export const BRAWLERS: BrawlerStats[] = [
   },
   {
     id: "taro",
-    name: "Taro",
+    name: "Таро",
     role: "Инженер",
     rarity: "rare",
     hp: 3700,
@@ -339,33 +476,374 @@ export const BRAWLERS: BrawlerStats[] = [
     spriteRow: 2,
     spriteCol: 0,
   },
+  {
+    id: "verdeletta",
+    name: "Верделетта",
+    role: "Контроллер/Призыватель",
+    rarity: "ultralegendary",
+    hp: 4000,
+    speed: 4.0,
+    regenRate: 330,
+    attackDamage: 600,
+    attackRange: 225,
+    attackCooldown: 1.2,
+    attackCharges: 3,
+    superCooldown: 20,
+    superChargePerHit: 25,
+    color: "#2E7D32",
+    secondaryColor: "#1B5E20",
+    accentColor: "#69F0AE",
+    description: "Адский церемонимейстер; устраивает «вечеринки» в мире живых и зовёт всех на теневой бал",
+    attackName: "Адское приглашение",
+    superName: "Бал сатаны",
+    attackDesc: "Выстрел из волшебного пистолета — не атака, а пригласительный билет. Пуля летит на ~225 ед. (4.5 клетки), наносит 600 урона и накладывает Адскую Метку на 2 сек.: на цели вспыхивает зелёная руна, а рядом с Верделеттой материализуется обычная тень-гостья (1200 HP, дальний бой, 350 урона). 3 заряда, перезарядка 1.2 сек. Супер заряжается только её собственными попаданиями — 4 прямых выстрела до полного заряда. На карте одновременно не больше 6 теней; при превышении исчезает самая старая.",
+    superDesc: "Верделетта объявляет открытие главного зала преисподней и призывает 3 тени-распорядителя (4500 HP, 600 урона, дальний бой). Они медленнее гостей, но мощнее и держат дистанцию, стреляя теневыми болтами. Каждая тень идёт по своей траектории и не сбивается в кучу. Если распорядитель убивает врага — на месте жертвы появляется ещё один распорядитель. Суммарный лимит — 6 теней на поле. Удары теней не заряжают супер Верделетты.",
+    spriteRow: 2,
+    spriteCol: 1,
+  },
+  {
+    id: "lumina",
+    name: "Люмина",
+    role: "Поддержка",
+    rarity: "mythic",
+    hp: 3800,
+    speed: 4.2,
+    regenRate: 330,
+    attackDamage: 1200,
+    attackRange: 250,
+    attackCooldown: 1.5,
+    attackCharges: 2,
+    superCooldown: 22,
+    superChargePerHit: 20,
+    color: "#ECEFF1",
+    secondaryColor: "#FFD54F",
+    accentColor: "#FFFFFF",
+    description: "Мифическая девушка со светящимися крыльями; связывает врагов золотыми нитями",
+    attackName: "Световая нить",
+    superName: "Божественное заточение",
+    attackDesc: "Тонкий золотистый луч из груди бьёт первого врага на 5 клеток (1200 урона), затем ищет второго в радиусе 4 клеток и связывает их золотой цепью на 3 сек.: 100 урона/сек и невидимая стена не дальше 3 клеток. 2 заряда, перезарядка 1.5 сек. Супер заряжается за 5 попаданий или 3 успешные связки.",
+    superDesc: "Над областью (радиус 120px) появляется мерцающий золотой купол с рунами на 4 сек. Внутри все замедлены на 50%, не могут выйти и связываются золотыми нитями. Урон не наносит.",
+    spriteRow: 2,
+    spriteCol: 2,
+  },
+  {
+    id: "oliver",
+    name: "Оливер",
+    role: "Инженер",
+    rarity: "mythic",
+    hp: 4000,
+    speed: 4.0,
+    regenRate: 355,
+    attackDamage: 132,
+    attackRange: 250,
+    attackCooldown: 1.6,
+    attackCharges: 2,
+    superCooldown: 22,
+    superChargePerHit: 20,
+    color: "#795548",
+    secondaryColor: "#FFD54F",
+    accentColor: "#42A5F5",
+    description: "Мальчик с русыми волосами, круглыми очками и механическими жуками",
+    attackName: "Рой механических жуков",
+    superName: "Репликатор",
+    attackDesc: "Оливер выпускает 5 бронзовых жуков из руки: каждый ищет ближайшего врага в радиусе 5 клеток и наносит 220 урона при контакте. Жуки живут 3 сек., летят по прямой. Дальность 5 клеток, 2 заряда, перезарядка 1.6 сек. Супер заряжается за 5 попаданий.",
+    superDesc: "Оливер запоминает последний супер любого врага и копирует его с теми же параметрами в выбранном направлении. Память не стирается — можно копить. Перезарядка супера 22 сек.",
+    spriteRow: 2,
+    spriteCol: 3,
+  },
+  {
+    id: "callista",
+    name: "Каллиста",
+    role: "Поддержка",
+    rarity: "epic",
+    hp: 4700,
+    speed: 4.0,
+    regenRate: 355,
+    attackDamage: 750,
+    attackRange: 200,
+    attackCooldown: 1.3,
+    attackCharges: 3,
+    superCooldown: 22,
+    superChargePerHit: 20,
+    color: "#43A047",
+    secondaryColor: "#FFFFFF",
+    accentColor: "#A5D6A7",
+    description: "Эпическая алхимик с зелёными волосами, очками-конвертерами и колбами на поясе",
+    attackName: "Случайный реактив",
+    superName: "Взрывная смесь",
+    attackDesc: "Бросок колбы по дуге на 4 клетки: случайный эффект в зоне 100px — кислота 750 урона, заморозка −40% на 2с, яд 350/сек 4с или лечение союзников 800 HP. 3 заряда, CD 1.3 сек. Супер: 5 попаданий.",
+    superDesc: "Большая колба создаёт зону 120px на 4 сек. с сразу всеми четырьмя эффектами одновременно.",
+    spriteRow: 2,
+    spriteCol: 4,
+  },
+  {
+    id: "elian",
+    name: "Элиан",
+    role: "Маг",
+    rarity: "legendary",
+    hp: 3700,
+    speed: 4.0,
+    regenRate: 350,
+    attackDamage: 500,
+    attackRange: 300,
+    attackCooldown: 1.4,
+    attackCharges: 3,
+    superCooldown: 22,
+    superChargePerHit: 25,
+    color: "#1565C0",
+    secondaryColor: "#FFD54F",
+    accentColor: "#E3F2FD",
+    description: "Легендарный юноша в пальто со звёздами",
+    attackName: "Звёздный заряд",
+    superName: "Гравитационная аномалия",
+    attackDesc: "Медленный голубой шар до 6 клеток: урон и радиус взрыва растут с дистанцией (500/700/1000, радиус 60/70/130). 3 заряда, CD 1.4 сек. Супер: 4 попадания.",
+    superDesc: "Тёмно-синяя воронка на 5 клеток: 3 сек. притягивает врагов в 150px (2 клетки/сек), затем взрыв на 600 урона. Притяжение не оглушает, но мешает двигаться.",
+    spriteRow: 2,
+    spriteCol: 6,
+  },
+  {
+    id: "airin",
+    name: "Айрин",
+    role: "Стрелок",
+    rarity: "epic",
+    hp: 4000,
+    speed: 4.3,
+    regenRate: 360,
+    attackDamage: 800,
+    attackRange: 225,
+    attackCooldown: 1.3,
+    attackCharges: 3,
+    superCooldown: 22,
+    superChargePerHit: 100 / 6,
+    color: "#37474F",
+    secondaryColor: "#78909C",
+    accentColor: "#B0BEC5",
+    description: "Эпическая лётчица в стимпанк-стиле с дымовыми шашками",
+    attackName: "Дымовая метка",
+    superName: "Эвакуация",
+    attackDesc: "Бросок металлической капсулы по дуге на 4.5 клетки: взрыв создаёт дым 150px — 800 урона и обзор врагов сокращается до 2 клеток на 2 сек. 3 заряда, CD 1.3 сек. Супер: 6 попаданий.",
+    superDesc: "Серебряный знак над Айрин: союзники в радиусе 200px телепортируются к ней, с них снимаются все отрицательные эффекты.",
+    spriteRow: 2,
+    spriteCol: 5,
+  },
+  {
+    id: "silven",
+    name: "Сильвен",
+    role: "Контроллер",
+    rarity: "epic",
+    hp: 4200,
+    speed: 3.8,
+    regenRate: 365,
+    attackDamage: 950,
+    attackRange: 250,
+    attackCooldown: 1.4,
+    attackCharges: 2,
+    superCooldown: 22,
+    superChargePerHit: 20,
+    color: "#558B2F",
+    secondaryColor: "#33691E",
+    accentColor: "#AED581",
+    description: "Эпический мальчик-леший с корнями вместо ног",
+    attackName: "Колючий плющ",
+    superName: "Древо жизни",
+    attackDesc: "Зелёная лоза по земле до 5 клеток: 950 урона, −30% на 1 сек. Если враг уже замедлен — обездвиживает на 1.5 сек. (может атаковать). 2 заряда, CD 1.4 сек. Супер: 5 попаданий.",
+    superDesc: "Сажает дерево жизни на 3 клетки: 1000 HP, лечит союзников в 150px на 100 HP/сек, пока не разрушат.",
+    spriteRow: 2,
+    spriteCol: 7,
+  },
+  {
+    id: "vittoria",
+    name: "Виттория",
+    role: "Берсерк",
+    rarity: "epic",
+    hp: 3900,
+    speed: 4.4,
+    regenRate: 350,
+    attackDamage: 750,
+    attackRange: 125,
+    attackCooldown: 1.1,
+    attackCharges: 3,
+    superCooldown: 22,
+    superChargePerHit: 14.3,
+    color: "#6A1B9A",
+    secondaryColor: "#212121",
+    accentColor: "#CE93D8",
+    description: "Эпическая вампирша с шипованным кастетом",
+    attackName: "Укус вампира",
+    superName: "Кровавая луна",
+    attackDesc: "Выпад кастетом на 2.5 клетки: 750 урона и лечит на 30% от урона. 3 заряда, CD 1.1 сек. Супер: 7 попаданий.",
+    superDesc: "На 5 сек. атаки лечат на 80% урона, +23% скорости и +25% урона. Глаза светятся красным под багровой луной.",
+    spriteRow: 2,
+    spriteCol: 8,
+  },
+  {
+    id: "octavia",
+    name: "Октавия",
+    role: "Контроллер",
+    rarity: "epic",
+    hp: 4800,
+    speed: 4.1,
+    regenRate: 360,
+    attackDamage: 200,
+    attackRange: 250,
+    attackCooldown: 1.3,
+    attackCharges: 2,
+    superCooldown: 22,
+    superChargePerHit: 20,
+    color: "#EC407A",
+    secondaryColor: "#F8BBD0",
+    accentColor: "#F48FB1",
+    description: "Эпическая русалка-мутант с щупальцами вместо ног",
+    attackName: "Чернильная завеса",
+    superName: "Ловушка с щупальцами",
+    attackDesc: "Чёрно-фиолетовый шар: полоса чернил 60×120px на 4 сек. Союзники в чернилах невидимы для врагов (кроме атак), враги: 100 урона/сек и −30% скорости. 2 заряда, CD 1.3 сек. Супер: 5 попаданий.",
+    superDesc: "В точке (4 клетки) вырываются розовые щупальца: зона 100px, корень 1.5 сек и 600 урона при захвате. Зона 3 сек без новых захватов.",
+    spriteRow: 2,
+    spriteCol: 9,
+  },
+  {
+    id: "zephyrin",
+    name: "Зефирин",
+    role: "Маг",
+    rarity: "legendary",
+    hp: 3800,
+    speed: 4.3,
+    regenRate: 355,
+    attackDamage: 900,
+    attackRange: 250,
+    attackCooldown: 1.2,
+    attackCharges: 3,
+    superCooldown: 22,
+    superChargePerHit: 20,
+    color: "#AB47BC",
+    secondaryColor: "#E1BEE7",
+    accentColor: "#FFFFFF",
+    description: "Легендарная девушка из ветра с полупрозрачным платьем",
+    attackName: "Вихрь",
+    superName: "Неуязвимость",
+    attackDesc: "Серо-белый торнадо летит по прямой до 5 клеток: 900 урона и отбрасывает врагов на 2 клетки. Проходит сквозь врагов. 3 заряда, CD 1.2 сек. Супер: 5 попаданий.",
+    superDesc: "На 4 сек. полная неуязвимость к урону и эффектам, но без атак и супера. Скорость +50%. После окончания — эффекты звёзд.",
+    spriteRow: 2,
+    spriteCol: 10,
+  },
+  {
+    id: "mirabel",
+    name: "Мирабель",
+    role: "Поддержка",
+    rarity: "rare",
+    hp: 3500,
+    speed: 4.2,
+    regenRate: 360,
+    attackDamage: 950,
+    attackRange: 225,
+    attackCooldown: 1.2,
+    attackCharges: 3,
+    superCooldown: 22,
+    superChargePerHit: 100 / 6,
+    color: "#E53935",
+    secondaryColor: "#FFCDD2",
+    accentColor: "#FF7043",
+    description: "Редкая девочка с волшебной книгой; искры знаний ускоряют союзников",
+    attackName: "Искра знаний",
+    superName: "Ускоренное обучение",
+    attackDesc: "Из книги вылетает жёлтая искра на 4.5 клетки: 950 урона. При попадании союзники в радиусе 100px от врага получают −0.3 сек. перезарядки атак. 3 заряда, CD 1.2 сек. Супер: 6 попаданий.",
+    superDesc: "Над союзниками в радиусе 500px появляется светящаяся книга: 5 сек. следующая атака каждого двойная (два снаряда с полным уроном), бафф сгорает после выстрела.",
+    spriteRow: 2,
+    spriteCol: 11,
+  },
 ];
 
-export function pickBotStats(playerBrawlerId: string, count: number): BrawlerStats[] {
-  // Exclude ultra-legendary from bot pool (too rare / complex for bots)
-  const pool = BRAWLERS.filter(b => b.id !== playerBrawlerId && b.rarity !== "ultralegendary");
-  // Fisher-Yates shuffle
-  const shuffled = [...pool];
+/** Brawlers that use meleeAttack() instead of projectiles. */
+export const MELEE_BRAWLER_IDS: readonly string[] = ["goro", "ronin", "taro", "vittoria"];
+
+export function isMeleeBrawler(id: string): boolean {
+  return MELEE_BRAWLER_IDS.includes(id);
+}
+
+function shuffleBrawlers<T>(arr: T[]): T[] {
+  const shuffled = [...arr];
   for (let i = shuffled.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
   }
+  return shuffled;
+}
+
+/**
+ * Playable brawlers eligible as AI bots/allies. Add new fighters to `BRAWLERS` only —
+ * they join this pool automatically with equal spawn weight.
+ */
+export function getBotPool(...excludeIds: string[]): BrawlerStats[] {
+  const exclude = new Set(excludeIds.filter(Boolean));
+  return BRAWLERS
+    .filter(b => !exclude.has(b.id))
+    .map(b => getBrawlerById(b.id) ?? b);
+}
+
+/** Fisher–Yates shuffle; cycles if `count` exceeds pool size. */
+export function pickBotStats(playerBrawlerId: string, count: number): BrawlerStats[] {
+  const pool = getBotPool(playerBrawlerId);
+  if (pool.length === 0) {
+    const fallback = getBrawlerById(BRAWLERS[0].id) ?? BRAWLERS[0];
+    return Array.from({ length: count }, () => fallback);
+  }
+  const shuffled = shuffleBrawlers(pool);
   const result: BrawlerStats[] = [];
   for (let i = 0; i < count; i++) {
-    result.push(shuffled[i % shuffled.length]);
+    result.push(shuffled[i % shuffled.length]!);
   }
   return result;
 }
 
+/** Unique brawler ids first; repeats only if the pool is smaller than `count`. */
+export function pickUniqueBotIds(excludeIds: string[], count: number): string[] {
+  const pool = getBotPool(...excludeIds);
+  if (pool.length === 0) {
+    return Array.from({ length: count }, () => BRAWLERS[0].id);
+  }
+  const shuffled = shuffleBrawlers(pool);
+  const out: string[] = [];
+  for (let i = 0; i < count; i++) {
+    out.push(shuffled[i % shuffled.length].id);
+  }
+  return out;
+}
+
+export function pickRandomBotStats(...excludeIds: string[]): BrawlerStats {
+  const pool = getBotPool(...excludeIds);
+  return pool[Math.floor(Math.random() * pool.length)] ?? getBrawlerById(BRAWLERS[0].id) ?? BRAWLERS[0];
+}
+
 export function getBrawlerById(id: string): BrawlerStats | undefined {
-  return BRAWLERS.find((b) => b.id === id);
+  const base = BRAWLERS.find((b) => b.id === id);
+  if (!base) return undefined;
+  if (typeof localStorage === "undefined") return { ...base };
+  try {
+    const raw = localStorage.getItem("clash_character_balance_v1");
+    if (!raw) return { ...base };
+    const parsed = JSON.parse(raw) as { brawlers?: Record<string, Partial<BrawlerStats>> };
+    const patch = parsed.brawlers?.[id];
+    return patch ? { ...base, ...patch } : { ...base };
+  } catch {
+    return { ...base };
+  }
 }
 
 export function getScaledStats(brawler: BrawlerStats, level: number) {
-  const lvl = Math.max(1, Math.min(10, level));
+  const lvl = Math.max(1, Math.min(MAX_BRAWLER_LEVEL, level));
+  let hpScale = 0.05;
+  let dmgScale = 0.03;
+  try {
+    const raw = typeof localStorage !== "undefined" ? localStorage.getItem("clash_character_balance_v1") : null;
+    if (raw) {
+      const e = (JSON.parse(raw) as { economy?: { scaleHpPerLevel?: number; scaleDmgPerLevel?: number } }).economy;
+      if (e?.scaleHpPerLevel != null && Number.isFinite(e.scaleHpPerLevel)) hpScale = e.scaleHpPerLevel;
+      if (e?.scaleDmgPerLevel != null && Number.isFinite(e.scaleDmgPerLevel)) dmgScale = e.scaleDmgPerLevel;
+    }
+  } catch { /* ignore */ }
   return {
-    hp: Math.floor(brawler.hp * (1 + 0.05 * (lvl - 1))),
-    attackDamage: Math.floor(brawler.attackDamage * (1 + 0.03 * (lvl - 1))),
+    hp: Math.floor(brawler.hp * (1 + hpScale * (lvl - 1))),
+    attackDamage: Math.floor(brawler.attackDamage * (1 + dmgScale * (lvl - 1))),
     speed: brawler.speed,
     regenRate: brawler.regenRate,
     attackCooldown: brawler.attackCooldown,

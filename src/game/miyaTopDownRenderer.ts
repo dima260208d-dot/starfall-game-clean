@@ -3,7 +3,11 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
 import { fixCharacterSkinnedMeshes } from "../utils/gltfSkinnedMeshFix";
 import { applyCanvasBitmapDrawPolicy, applyGLTFTexturePolicy } from "../utils/texturePolicy";
+import { registerWebGLCleanup } from "../utils/devWebGLRecovery";
 import { getGameRenderDt } from "./frameClock";
+import { configureCharacterBattleOrtho } from "./battleGroundView";
+import { applyBrawlerNormTransform, brawlerGlbUrl, computeBrawlerNormTransform } from "./brawler3DScale";
+import { type AttackClipTune, tuneAttackClip } from "./attackClipTune";
 
 /** Force correct material settings on all meshes (mirrors Brawler3DModel). */
 function fixMaterials(root: THREE.Object3D, renderer?: THREE.WebGLRenderer | null): void {
@@ -30,24 +34,47 @@ const SIZE = 512;
 const MODEL_TARGET_H = 3.2;
 
 // Exact animation clip names per character (extracted from the GLB files).
-interface CharAnimNames {
+export interface CharAnimNames {
   idle: string; idleIdx?: number;
   run: string;  runIdx?: number;
   attack: string; attackIdx?: number;
+  /** Freeze idle clip on frame 0 in live 3D battle scene. */
+  freezeIdle?: boolean;
   /**
    * When idle & run resolve to the same AnimationAction (same GLB clip), don’t stop/reset
    * between still and run — unpause + this time scale. Use for “Walking as jog” (e.g. Rin legs).
    */
   sharedLocomotionRunScale?: number;
+  /**
+   * Attack clip plays once (cast animations like Lumina mage spell).
+   */
+  attackLoopOnce?: boolean;
+  /** Separate super cast clip (e.g. Octavia tentacle summon). */
+  super?: string;
+  superIdx?: number;
+  superLoopOnce?: boolean;
+  /** Trim / scale attack clip so melee VFX range matches gameplay hitbox. */
+  attackClipTune?: AttackClipTune;
 }
 
 const CHAR_ANIM_NAMES: Record<string, CharAnimNames> = {
   miya:    { idle: "Walking",         idleIdx: 3, run: "Running", runIdx: 1, attack: "Attack",              attackIdx: 0 },
-  sora:    { idle: "Walking",         idleIdx: 1, run: "Running", runIdx: 0, attack: "mage_soell_cast_2",   attackIdx: 2 },
+  // sora.glb (new model): clip names mislabeled —
+  //   "Running"         → stroll / idle walk
+  //   "Walking"         → actual run cycle
+  //   "mage_soell_cast_4" → attack
+  sora:    {
+    idle: "Running", idleIdx: 0,
+    run: "Walking", runIdx: 1,
+    attack: "mage_soell_cast_4", attackIdx: 2,
+  },
   // goro/rin: name-only — exact GLB clip names found by THREE.js loader (no idx to avoid ordering ambiguity)
   goro:    { idle: "Running",                     run: "Running",            attack: "Double_Combo_Attack"              },
-  // Mislabeled motion: Left_Slash = move, Walking = slash. Still = frozen idle frame 0 like Zafkiel (Walking), not looping locomotion.
-  rin:     { idle: "Walking", run: "Left_Slash", attack: "Walking" },
+  // rin.glb clip names are mislabeled in the export:
+  //   "Running"    → stroll (used for run after idle/run swap)
+  //   "Left_Slash" → actual run (used for idle/stand after idle/run swap)
+  //   "Walking"    → attack slash
+  rin:     { idle: "Left_Slash", idleIdx: 0, run: "Running", runIdx: 1, attack: "Walking", attackIdx: 2 },
   ronin:   { idle: "Walking",         idleIdx: 2, run: "Running", runIdx: 0, attack: "Step_Step_Turn_Kick", attackIdx: 1 },
   hana:    { idle: "Walking",         idleIdx: 2, run: "Running", runIdx: 1, attack: "Archery_Shot_3",      attackIdx: 0 },
   kenji:   { idle: "Walking",         idleIdx: 2, run: "Running", runIdx: 1, attack: "Axe_Spin_Attack",     attackIdx: 0 },
@@ -55,7 +82,106 @@ const CHAR_ANIM_NAMES: Record<string, CharAnimNames> = {
   taro:    { idle: "Walking",         idleIdx: 2, run: "Running", runIdx: 1, attack: "Archery_Shot_1",      attackIdx: 0 },
   // GLB clips: 0 Running, 1 Thrust_Slash, 2 Walking (no Archery_Shot_* — that name was Hana-only).
   zafkiel: { idle: "Walking",         idleIdx: 2, run: "Running", runIdx: 0, attack: "Thrust_Slash", attackIdx: 1 },
+  verdeletta: { idle: "Walking", idleIdx: 2, run: "Running", runIdx: 0, attack: "Walk_Forward_While_Shooting", attackIdx: 1 },
+  lumina: { idle: "Walking", idleIdx: 1, run: "Running", runIdx: 0, attack: "mage_soell_cast_3", attackIdx: 2, attackLoopOnce: true },
+  oliver: { idle: "Walking", idleIdx: 1, run: "Running", runIdx: 0, attack: "mage_soell_cast_3", attackIdx: 2, attackLoopOnce: true },
+  callista: { idle: "Walking", idleIdx: 1, run: "Running", runIdx: 0, attack: "mage_soell_cast_6", attackIdx: 2, attackLoopOnce: true },
+  airin: { idle: "Walking", idleIdx: 1, run: "Running", runIdx: 0, attack: "mage_soell_cast", attackIdx: 2, attackLoopOnce: true },
+  elian: { idle: "Walking", idleIdx: 1, run: "Running", runIdx: 0, attack: "mage_soell_cast", attackIdx: 2, attackLoopOnce: true },
+  silven: { idle: "Walking", idleIdx: 1, run: "Running", runIdx: 0, attack: "mage_soell_cast_2", attackIdx: 2, attackLoopOnce: true },
+  vittoria: {
+    idle: "Walking", idleIdx: 2, run: "Running", runIdx: 1,
+    attack: "Left_Jab_from_Guard", attackIdx: 0, attackLoopOnce: true,
+    attackClipTune: {
+      maxDuration: 0.38,
+      translationDeltaScale: 0.12,
+      translationBones: ["hips"],
+      armRotationDeltaScale: 0.62,
+      timeScale: 1.35,
+    },
+  },
+  octavia: {
+    idle: "Walking", idleIdx: 1, run: "Running", runIdx: 0,
+    attack: "mage_soell_cast_3", attackIdx: 2, attackLoopOnce: true,
+    attackClipTune: {
+      maxDuration: 0.52,
+      translationDeltaScale: 0.08,
+      translationBones: ["hips"],
+      armRotationDeltaScale: 0.5,
+      timeScale: 1.3,
+    },
+  },
+  mirabel: {
+    idle: "Walking", idleIdx: 1, run: "Running", runIdx: 0,
+    attack: "mage_soell_cast_3", attackIdx: 2, attackLoopOnce: true,
+    super: "mage_soell_cast_6", superIdx: 2, superLoopOnce: true,
+    attackClipTune: {
+      maxDuration: 0.48,
+      translationDeltaScale: 0.1,
+      translationBones: ["hips"],
+      armRotationDeltaScale: 0.55,
+      timeScale: 1.25,
+    },
+  },
+  zephyrin: {
+    idle: "Walking", idleIdx: 1, run: "Running", runIdx: 0,
+    attack: "mage_soell_cast_3", attackIdx: 2, attackLoopOnce: true,
+    super: "mage_soell_cast_3", superIdx: 2, superLoopOnce: true,
+    attackClipTune: {
+      maxDuration: 0.62,
+      translationDeltaScale: 0.14,
+      translationBones: ["hips", "spine"],
+      armRotationDeltaScale: 0.72,
+      timeScale: 1.55,
+    },
+  },
 };
+
+export function findCharAnimClip(clips: THREE.AnimationClip[], name: string, idx?: number): THREE.AnimationClip | null {
+  return findClip(clips, name, idx);
+}
+
+/** Freeze an action on frame 0 — visible standing pose without bind-pose glitches. */
+export function applyFrozenClipPose(
+  mixer: THREE.AnimationMixer,
+  action: THREE.AnimationAction | null | undefined,
+): boolean {
+  mixer.stopAllAction();
+  if (!action) return false;
+  action.reset();
+  action.enabled = true;
+  action.setEffectiveWeight(1);
+  action.setEffectiveTimeScale(0);
+  action.paused = false;
+  action.play();
+  action.time = 0;
+  // Double sample at t=0 so frame-0 pose fully overwrites prior run/attack bone state.
+  mixer.update(0);
+  action.time = 0;
+  mixer.update(1 / 60);
+  return true;
+}
+
+/** Start a looping locomotion / attack clip from a clean stop. */
+export function playLoopClipPose(
+  mixer: THREE.AnimationMixer,
+  action: THREE.AnimationAction | null | undefined,
+  timeScale = 1,
+): boolean {
+  if (!action) return false;
+  mixer.stopAllAction();
+  action.reset();
+  action.enabled = true;
+  action.setEffectiveWeight(1);
+  action.setEffectiveTimeScale(timeScale);
+  action.paused = false;
+  action.play();
+  return true;
+}
+
+function normalizeClipName(name: string): string {
+  return name.toLowerCase().replace(/[\s_-]+/g, "");
+}
 
 function findClip(clips: THREE.AnimationClip[], name: string, idx?: number): THREE.AnimationClip | null {
   // Prefer index only when it matches the expected clip name — GLB clip order differs per model
@@ -65,31 +191,22 @@ function findClip(clips: THREE.AnimationClip[], name: string, idx?: number): THR
   }
   const named = clips.find(c => c.name === name) ?? null;
   if (named) return named;
+  const want = normalizeClipName(name);
+  const fuzzy = clips.find(c => normalizeClipName(c.name) === want) ?? null;
+  if (fuzzy) return fuzzy;
   // Never return clips[idx] when its name !== name — that mis-binds run/attack when order differs from comments.
   return null;
 }
 
-const _bindPoseMat = new THREE.Matrix4();
-
 /** No clips — rest pose from glTF bind (battle “standing still”). */
-function resetSkinnedBindPose(root: THREE.Object3D): void {
+export function resetSkinnedBindPose(root: THREE.Object3D): void {
   root.traverse((obj) => {
     const m = obj as THREE.SkinnedMesh;
     if (!m.isSkinnedMesh || !m.skeleton) return;
     const sk = m.skeleton as THREE.Skeleton & { pose?: () => void };
-    if (typeof sk.pose === "function") {
-      sk.pose();
-    } else {
-      const { bones, boneInverses } = sk;
-      for (let i = 0; i < bones.length; i++) {
-        const bone = bones[i];
-        const inv = boneInverses[i];
-        if (!bone || !inv) continue;
-        _bindPoseMat.copy(inv).invert();
-        _bindPoseMat.decompose(bone.position, bone.quaternion, bone.scale);
-      }
-      sk.update();
-    }
+    // Only use Skeleton.pose() — manual boneInverses math breaks SkeletonUtils clones.
+    if (typeof sk.pose === "function") sk.pose();
+    sk.update();
   });
   root.updateMatrixWorld(true);
 }
@@ -137,17 +254,31 @@ function getSharedRenderer(): { renderer: THREE.WebGLRenderer; scene: THREE.Scen
   _sharedRenderer.setClearColor(0x000000, 0);
 
   _sharedScene = new THREE.Scene();
-  // 45° isometric elevation — matches the in-game ISO view.
-  // Frustum width/height must match (square) so a 512×512 render target does not
-  // anisotropically squash/stretch the model (was 3.6×3.4 → subtle vertical stretch).
-  _sharedCamera = new THREE.OrthographicCamera(-1.8, 1.8, 2.1, -1.5, 0.1, 30);
-  _sharedCamera.position.set(0, 6, 6);
-  _sharedCamera.up.set(0, 1, 0);
-  _sharedCamera.lookAt(0, 1.5, 0);
+  // Frustum + наклон камеры — общие с тайлами/подложкой (`battleGroundView.ts`).
+  _sharedCamera = new THREE.OrthographicCamera(0, 0, 0, 0, 0.1, 30);
+  configureCharacterBattleOrtho(_sharedCamera);
 
   _sharedRendererReady = true;
   return { renderer: _sharedRenderer, scene: _sharedScene, camera: _sharedCamera };
 }
+
+/**
+ * Освобождает разделяемый WebGL-контекст оффскрин-печки персонажей.
+ * GLB-шаблоны и AnimationClip'ы у каждого CharacterTopDownRenderer остаются —
+ * их использует живая 3D-сцена боя (`battle3DWorld`), которая работает на своём
+ * собственном рендерере. Можно безопасно вызывать сразу после активации 3D-боя.
+ */
+export function disposeCharBakerSharedRenderer(): void {
+  if (_sharedRenderer) {
+    try { _sharedRenderer.dispose(); } catch { /* ignore */ }
+  }
+  _sharedRenderer = null;
+  _sharedScene = null;
+  _sharedCamera = null;
+  _sharedRendererReady = false;
+}
+
+registerWebGLCleanup(disposeCharBakerSharedRenderer);
 
 // ── Per-character renderer ────────────────────────────────────────────────────
 
@@ -183,11 +314,6 @@ class CharacterTopDownRenderer {
     if (this.loading) return this.loading;
 
     this.loading = new Promise((resolve, reject) => {
-      // Make sure the shared WebGL renderer exists before loading.
-      if (!getSharedRenderer()) {
-        return reject(new Error("[CharTopDown] WebGL unavailable"));
-      }
-
       this.outputCanvas = document.createElement("canvas");
       this.outputCanvas.width = SIZE;
       this.outputCanvas.height = SIZE;
@@ -203,25 +329,20 @@ class CharacterTopDownRenderer {
         (gltf) => {
           this.modelTemplate = gltf.scene;
           this.clips = gltf.animations ?? [];
-          const shared = getSharedRenderer();
+          const shared =
+            _sharedRendererReady && _sharedRenderer && _sharedScene && _sharedCamera && !_sharedRenderer.getContext().isContextLost()
+              ? { renderer: _sharedRenderer, scene: _sharedScene, camera: _sharedCamera }
+              : null;
           fixMaterials(this.modelTemplate, shared?.renderer);
           fixCharacterSkinnedMeshes(this.modelTemplate);
 
-          const box = new THREE.Box3().setFromObject(this.modelTemplate);
-          const sz = new THREE.Vector3();
-          box.getSize(sz);
-          const c = new THREE.Vector3();
-          box.getCenter(c);
-          const scale = sz.y > 0.001 ? MODEL_TARGET_H / sz.y : 1;
-          this.modelTemplate.scale.setScalar(scale);
-          const box2 = new THREE.Box3().setFromObject(this.modelTemplate);
-          this.modelTemplate.position.set(-c.x * scale, -box2.min.y, -c.z * scale);
+          const t = computeBrawlerNormTransform(this.modelTemplate, MODEL_TARGET_H, modelUrl);
+          applyBrawlerNormTransform(this.modelTemplate, t);
 
           this.ready = true;
 
           // Warmup: pre-compile shaders for this model on the shared renderer.
           try {
-            const shared = getSharedRenderer();
             if (shared) {
               const warmModel = cloneSkinned(this.modelTemplate) as THREE.Object3D;
               shared.scene.add(new THREE.AmbientLight(0xffffff, 2.5));
@@ -236,6 +357,7 @@ class CharacterTopDownRenderer {
         undefined,
         (err) => {
           console.warn("[CharTopDown] failed to load", modelUrl, err);
+          this.loading = null;
           reject(err);
         },
       );
@@ -245,6 +367,22 @@ class CharacterTopDownRenderer {
   }
 
   isReady(): boolean { return this.ready; }
+
+  /** Клон загруженного GLB-шаблона (для живой 3D-сцены боя). */
+  cloneModelTemplate(): THREE.Object3D | null {
+    if (!this.ready || !this.modelTemplate) return null;
+    return cloneSkinned(this.modelTemplate) as THREE.Object3D;
+  }
+
+  /** Список анимационных клипов GLB (для AnimationMixer в живой 3D-сцене). */
+  getClips(): THREE.AnimationClip[] {
+    return this.clips;
+  }
+
+  /** Имена клипов для idle/run/attack — нужны для подбора AnimationAction в живой сцене. */
+  getAnimNames(): CharAnimNames {
+    return this.animNames;
+  }
 
   /**
    * Standing pose: idle clip frame 0 when available (natural “just standing”), else run/attack.
@@ -257,10 +395,9 @@ class CharacterTopDownRenderer {
       poseAction.reset();
       poseAction.setEffectiveWeight(1);
       poseAction.paused = false;
-      poseAction.setEffectiveTimeScale(1);
+      poseAction.setEffectiveTimeScale(0);
       poseAction.play();
       poseAction.time = 0;
-      poseAction.paused = true;
       inst.mixer.update(0.0001);
     } else {
       resetSkinnedBindPose(inst.model);
@@ -278,7 +415,10 @@ class CharacterTopDownRenderer {
 
     const idleClip   = findClip(this.clips, this.animNames.idle,   this.animNames.idleIdx);
     const runClip    = findClip(this.clips, this.animNames.run,    this.animNames.runIdx);
-    const attackClip = findClip(this.clips, this.animNames.attack, this.animNames.attackIdx);
+    let attackClip = findClip(this.clips, this.animNames.attack, this.animNames.attackIdx);
+    if (attackClip && this.animNames.attackClipTune) {
+      attackClip = tuneAttackClip(attackClip, this.animNames.attackClipTune);
+    }
 
     for (const [anim, clip] of [
       ["idle", idleClip] as const,
@@ -287,8 +427,13 @@ class CharacterTopDownRenderer {
     ]) {
       if (clip) {
         const a = mixer.clipAction(clip);
-        a.setLoop(THREE.LoopRepeat, Infinity);
-        a.clampWhenFinished = false;
+        if (anim === "attack" && this.animNames.attackLoopOnce) {
+          a.setLoop(THREE.LoopOnce, 1);
+          a.clampWhenFinished = true;
+        } else {
+          a.setLoop(THREE.LoopRepeat, Infinity);
+          a.clampWhenFinished = false;
+        }
         actions[anim] = a;
       }
     }
@@ -313,7 +458,9 @@ class CharacterTopDownRenderer {
     if (!this.ready || !this.outputCanvas || !this.outputCtx) return null;
 
     const shared = getSharedRenderer();
-    if (!shared) { this.ready = false; return null; }
+    // В живом 3D-бою оффскрин-контекст намеренно освобождён — GLB-шаблон
+    // остаётся ready, иначе ломается cloneModelTemplate() для всех бойцов.
+    if (!shared) return null;
 
     const inst = this.getOrCreateInstance(instanceId);
     if (!inst) return null;
@@ -372,7 +519,7 @@ class CharacterTopDownRenderer {
               a.reset();
               a.setEffectiveWeight(1);
               a.paused = false;
-              a.setEffectiveTimeScale(1);
+              a.setEffectiveTimeScale(this.animNames.attackClipTune?.timeScale ?? 1);
               a.play();
             }
             inst.currentAnim = "attack";
@@ -407,6 +554,7 @@ class CharacterTopDownRenderer {
     inst.model.updateMatrixWorld(true);
     shared.scene.add(inst.model);
 
+    configureCharacterBattleOrtho(shared.camera);
     shared.renderer.render(shared.scene, shared.camera);
 
     // Copy rendered frame from the shared WebGL canvas to this character's
@@ -422,7 +570,7 @@ class CharacterTopDownRenderer {
 // ── Lazy registry ─────────────────────────────────────────────────────────────
 
 /** Character IDs that have a 3D GLB model for in-battle rendering. */
-export const CHAR_3D_IDS = new Set(["miya", "ronin", "yuki", "kenji", "hana", "goro", "sora", "rin", "taro", "zafkiel"]);
+export const CHAR_3D_IDS = new Set(["miya", "ronin", "yuki", "kenji", "hana", "goro", "sora", "rin", "taro", "zafkiel", "verdeletta", "lumina", "oliver", "callista", "airin", "elian", "silven", "vittoria", "octavia", "zephyrin", "mirabel"]);
 
 let _base = "/";
 const rendererRegistry = new Map<string, CharacterTopDownRenderer>();
@@ -438,8 +586,9 @@ export function setRenderersBase(base: string): void {
  * loading screen) so that GLB downloads and shader compilation finish before
  * the game loop starts — eliminating the 2-D → 3-D pop and mid-game lag.
  */
-export function preloadCharRenderers(base: string): Promise<void> {
+export function preloadCharRenderers(base: string, onCharLoaded?: () => void): Promise<void> {
   setRenderersBase(base);
+  const b = base.endsWith("/") ? base : `${base}/`;
   const promises = Array.from(CHAR_3D_IDS).map(id => {
     let r = rendererRegistry.get(id);
     if (!r) {
@@ -447,9 +596,11 @@ export function preloadCharRenderers(base: string): Promise<void> {
       r = new CharacterTopDownRenderer(names);
       rendererRegistry.set(id, r);
     }
-    return r.init(`${base}models/${id}.glb`).catch(() => {
-      // Model failed to load — 2-D sprite fallback will be used in-game.
-    });
+    return r.init(brawlerGlbUrl(b, id))
+      .then(() => { onCharLoaded?.(); })
+      .catch(() => {
+        onCharLoaded?.();
+      });
   });
   return Promise.all(promises).then(() => {});
 }
@@ -470,7 +621,7 @@ export function getCharRenderer(id: string): CharacterTopDownRenderer | null {
   if (!r) {
     const names = CHAR_ANIM_NAMES[id] ?? { idle: "Walking", run: "Running", attack: "Attack" };
     r = new CharacterTopDownRenderer(names);
-    r.init(`${_base}models/${id}.glb`).catch(() => { /* fall back to 2D sprite */ });
+    r.init(brawlerGlbUrl(_base, id)).catch(() => { /* fall back to 2D sprite */ });
     rendererRegistry.set(id, r);
   }
   return r;

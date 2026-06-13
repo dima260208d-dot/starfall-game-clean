@@ -1,18 +1,31 @@
 import { useState } from "react";
 import {
-  getCurrentProfile, getAllProfiles, setCurrentUsername, addGems,
-  getControlMode, setControlMode, type ControlMode,
+  getCurrentProfile,
+  setCurrentUsername,
+  addGems,
+  getControlMode,
+  setControlMode,
+  isGuestProfile,
+  type ControlMode,
 } from "../utils/localStorageAPI";
 import { isAdminUnlocked, tryAdminLogin, lockAdmin } from "../utils/mapEditorAPI";
 import { getAstralSettings, updateAstralSettings, type AstralSettings } from "../utils/subscription";
+import { PageBg, PageBody, PageHeader } from "../components/PageChrome";
+import LanguagePicker from "../components/LanguagePicker";
+import { useI18n } from "../i18n";
+import { textOnTintedAccent } from "../utils/contrastText";
 
 interface SettingsPageProps {
   onBack: () => void;
   onSwitchProfile: () => void;
+  onOpenAccount?: () => void;
+  onRegister?: () => void;
 }
 
-export default function SettingsPage({ onBack, onSwitchProfile }: SettingsPageProps) {
+export default function SettingsPage({ onBack, onSwitchProfile, onOpenAccount, onRegister }: SettingsPageProps) {
+  const { t } = useI18n();
   const [profile] = useState(getCurrentProfile());
+  const guest = isGuestProfile(profile);
   const [msg, setMsg] = useState("");
   const [ctrl, setCtrl] = useState<ControlMode>(getControlMode());
   const [adminLogin, setAdminLogin] = useState("");
@@ -29,13 +42,13 @@ export default function SettingsPage({ onBack, onSwitchProfile }: SettingsPagePr
   const pickControlMode = (m: ControlMode) => {
     setControlMode(m);
     setCtrl(m);
-    setMsg(m === "mobile" ? "Управление: Телефон (джойстики)" : "Управление: ПК (клавиатура + мышь)");
+    setMsg(m === "mobile" ? t("settings.controls.msgMobile") : t("settings.controls.msgPc"));
     setTimeout(() => setMsg(""), 2500);
   };
 
   const handleAddGems = () => {
     addGems(100);
-setMsg("+100 кристаллов добавлено для теста!");
+    setMsg(t("settings.test.gemsAdded"));
     setTimeout(() => setMsg(""), 3000);
   };
 
@@ -44,125 +57,136 @@ setMsg("+100 кристаллов добавлено для теста!");
     onSwitchProfile();
   };
 
-  return (
-    <div
-      style={{
-        minHeight: "100%",
-        background: "linear-gradient(135deg, #122543 0%, #1b3761 50%, #2a4a7a 100%)",
-        display: "flex",
-        flexDirection: "column",
-        fontFamily: "'Segoe UI', Arial, sans-serif",
-        color: "white",
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "center", padding: "16px 24px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
-        <button
-          onClick={onBack}
-          style={{ background: "rgba(255,255,255,0.11)", border: "1px solid rgba(255,255,255,0.24)", borderRadius: 12, padding: "7px 16px", color: "rgba(255,255,255,0.88)", cursor: "pointer", fontSize: 13, fontWeight: 700 }}
-        >
-          ← Назад
-        </button>
-        <h2 style={{ flex: 1, textAlign: "center", margin: 0, fontSize: 22, fontWeight: 800, color: "#69F0AE" }}>Настройки</h2>
-        <div style={{ width: 80 }} />
-      </div>
+  const pcRows: [string, string][] = [
+    [t("settings.controls.pc.move"), t("settings.controls.pc.moveKeys")],
+    [t("settings.controls.pc.aim"), t("settings.controls.pc.aimKeys")],
+    [t("settings.controls.pc.attack"), t("settings.controls.pc.attackKeys")],
+    [t("settings.controls.pc.super"), t("settings.controls.pc.superKeys")],
+    [t("settings.controls.pc.exit"), t("settings.controls.pc.exitKeys")],
+  ];
 
-      <div style={{ flex: 1, padding: "40px 24px", maxWidth: 600, margin: "0 auto", width: "100%" }}>
-        <Section title="Профиль">
+  const mobileRows: [string, string][] = [
+    [t("settings.controls.mobile.move"), t("settings.controls.mobile.moveKeys")],
+    [t("settings.controls.mobile.attack"), t("settings.controls.mobile.attackKeys")],
+    [t("settings.controls.mobile.super"), t("settings.controls.mobile.superKeys")],
+    [t("settings.controls.mobile.aim"), t("settings.controls.mobile.aimKeys")],
+    [t("settings.controls.mobile.autoAim"), t("settings.controls.mobile.autoAimKeys")],
+  ];
+
+  const voiceKeys = [
+    "settings.astral.voice.star",
+    "settings.astral.voice.moon",
+    "settings.astral.voice.light",
+  ] as const;
+
+  return (
+    <PageBg variant="settings" style={{
+      display: "flex",
+      flexDirection: "column",
+      fontFamily: "var(--app-font-sans)",
+    }}>
+      <PageHeader onBack={onBack} title={t("settings.title")} />
+
+      <PageBody style={{ padding: "40px 24px", maxWidth: 600, margin: "0 auto", width: "100%" }}>
+        <Section title={t("settings.section.language")}>
+          <LanguagePicker />
+        </Section>
+
+        <Section title={t("settings.section.profile")}>
           {profile && (
-            <div style={{ background: "rgba(255,255,255,0.04)", borderRadius: 14, padding: 20, marginBottom: 12 }}>
-              <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>{profile.username}</div>
+            <div className="ui-card" style={{ padding: 20, marginBottom: 12 }}>
+              <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 6, letterSpacing: "0.02em" }}>{profile.username}</div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontSize: 14 }}>
-                <div style={{ color: "#FFD700" }}>Монеты: {profile.coins}</div>
-                <div style={{ color: "#40C4FF" }}>Кристаллы: {profile.gems}</div>
-                <div style={{ color: "#FFD700" }}>Очки силы: {profile.powerPoints}</div>
-                <div style={{ color: "rgba(255,255,255,0.5)" }}>Победы: {profile.totalWins}/{profile.totalGamesPlayed}</div>
+                <div style={{ color: "var(--c-gold-3)" }}>{t("settings.profile.coins", { count: profile.coins })}</div>
+                <div style={{ color: "var(--c-cyan-3)" }}>{t("settings.profile.gems", { count: profile.gems })}</div>
+                <div style={{ color: "var(--c-gold-3)" }}>{t("settings.profile.power", { count: profile.powerPoints })}</div>
+                <div style={{ color: "var(--t-3)" }}>{t("settings.profile.wins", { wins: profile.totalWins, games: profile.totalGamesPlayed })}</div>
               </div>
             </div>
           )}
-<Button onClick={handleSwitchProfile} color="#FF5252" label="Сменить профиль" />
+          <Button onClick={handleSwitchProfile} color="#40C4FF" label={t("settings.switchAccount")} />
+          {!guest && onOpenAccount && (
+            <Button onClick={onOpenAccount} color="#FFD54F" label={t("settings.manageAccount")} />
+          )}
+          {guest && onRegister && (
+            <Button onClick={onRegister} color="#FFD54F" label={t("accounts.registerGuest")} />
+          )}
         </Section>
 
-        <Section title="Режим управления">
+        <Section title={t("settings.section.controls")}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
             <ModeCard
               active={ctrl === "pc"}
               icon="🖥️"
-              title="ПК"
-              subtitle="Клавиатура + мышь"
+              title={t("settings.controls.pc")}
+              subtitle={t("settings.controls.pcSub")}
               onClick={() => pickControlMode("pc")}
               color="#40C4FF"
+              selectedLabel={t("common.selected")}
             />
             <ModeCard
               active={ctrl === "mobile"}
               icon="📱"
-              title="Телефон"
-              subtitle="Джойстики на экране"
+              title={t("settings.controls.mobile")}
+              subtitle={t("settings.controls.mobileSub")}
               onClick={() => pickControlMode("mobile")}
               color="#FFD54F"
+              selectedLabel={t("common.selected")}
             />
           </div>
 
-          <div style={{ background: "rgba(255,255,255,0.04)", borderRadius: 14, padding: 16 }}>
-            {(ctrl === "pc"
-              ? [
-                  ["Движение", "WASD или стрелки"],
-                  ["Прицел", "Мышь"],
-                  ["Атака", "ЛКМ или Пробел"],
-                  ["Супер", "ПКМ или E"],
-                  ["Выход", "ESC (кнопка справа сверху)"],
-                ]
-              : [
-                  ["Движение", "Синий джойстик справа"],
-                  ["Атака", "Красный джойстик слева"],
-                  ["Супер", "Жёлтый джойстик возле атаки"],
-                  ["Прицел", "Тяни джойстик в нужную сторону"],
-                  ["Авто-прицел", "Короткое нажатие на джойстик атаки/супера"],
-                ]
-            ).map(([action, key]) => (
-              <div key={action} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-                <span style={{ color: "rgba(255,255,255,0.6)", fontSize: 14 }}>{action}</span>
-                <span style={{ color: "white", fontWeight: 700, fontSize: 13, background: "rgba(255,255,255,0.1)", padding: "2px 10px", borderRadius: 6, textAlign: "right" }}>{key}</span>
+          <div className="ui-card" style={{ padding: 16 }}>
+            {(ctrl === "pc" ? pcRows : mobileRows).map(([action, key]) => (
+              <div key={action} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid var(--bd-1)" }}>
+                <span style={{ color: "var(--t-3)", fontSize: 14 }}>{action}</span>
+                <span className="ui-pill" style={{ color: "var(--t-1)", fontWeight: 800, fontSize: 12, padding: "3px 12px", letterSpacing: "0.04em" }}>{key}</span>
               </div>
             ))}
           </div>
         </Section>
 
-        <Section title="Режим разработчика">
+        <Section title={t("settings.section.dev")}>
           {adminUnlocked ? (
-            <div style={{ background: "rgba(255,215,0,0.06)", border: "1px solid rgba(255,215,0,0.25)", borderRadius: 14, padding: 16, marginBottom: 12 }}>
-              <div style={{ color: "#FFD54F", fontWeight: 800, fontSize: 14, marginBottom: 8 }}>🔓 Режим разработчика активен</div>
-              <div style={{ fontSize: 12, color: "rgba(255,255,255,0.5)", marginBottom: 12 }}>
-                Конструктор карт доступен в главном меню → три полосы
+            <div className="ui-card" style={{ background: "linear-gradient(160deg, rgba(255,213,79,0.16), rgba(8,4,24,0.78))", border: "1px solid var(--bd-gold)", padding: 16, marginBottom: 12, boxShadow: "var(--sh-glow-gold), var(--sh-sm)" }}>
+              <div style={{ color: "var(--c-gold-3)", fontWeight: 900, fontSize: 14, marginBottom: 8, letterSpacing: "0.04em" }}>{t("settings.dev.active")}</div>
+              <div style={{ fontSize: 12, color: "var(--t-3)", marginBottom: 12 }}>
+                {t("settings.dev.activeHint")}
               </div>
-              <Button onClick={() => { lockAdmin(); setAdminUnlocked(false); setMsg("Режим разработчика отключён"); setTimeout(() => setMsg(""), 2500); }} color="#FF5252" label="🔒 Выключить режим разработчика" />
+              <Button onClick={() => { lockAdmin(); setAdminUnlocked(false); setMsg(t("settings.dev.disabled")); setTimeout(() => setMsg(""), 2500); }} color="#FF5252" label={t("settings.dev.disable")} />
             </div>
           ) : (
             <>
               {!showDevForm ? (
-                <Button onClick={() => setShowDevForm(true)} color="#FFD54F" label="🔑 Войти как разработчик" />
+                <Button onClick={() => setShowDevForm(true)} color="#FFD54F" label={t("settings.dev.login")} />
               ) : (
-                <div style={{ background: "rgba(255,255,255,0.04)", borderRadius: 14, padding: 16 }}>
+                <div className="ui-card" style={{ padding: 16 }}>
                   <input
-                    placeholder="Логин" value={adminLogin} onChange={e => setAdminLogin(e.target.value)}
-                    style={{ width: "100%", boxSizing: "border-box", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.15)", color: "white", fontSize: 14, fontFamily: "inherit", outline: "none", marginBottom: 8 }}
+                    placeholder={t("settings.dev.loginField")}
+                    value={adminLogin}
+                    onChange={e => setAdminLogin(e.target.value)}
+                    className="ui-input"
+                    style={{ width: "100%", boxSizing: "border-box", marginBottom: 8 }}
                   />
                   <input
-                    placeholder="Пароль" type="password" value={adminPass}
+                    placeholder={t("settings.dev.passwordField")}
+                    type="password"
+                    value={adminPass}
                     onChange={e => setAdminPass(e.target.value)}
                     onKeyDown={e => {
                       if (e.key === "Enter") {
-                        if (tryAdminLogin(adminLogin, adminPass)) { setAdminUnlocked(true); setShowDevForm(false); setMsg("Режим разработчика активирован!"); setTimeout(() => setMsg(""), 3000); }
-                        else { setMsg("Неверный логин или пароль"); setTimeout(() => setMsg(""), 2500); }
+                        if (tryAdminLogin(adminLogin, adminPass)) { setAdminUnlocked(true); setShowDevForm(false); setMsg(t("settings.dev.activated")); setTimeout(() => setMsg(""), 3000); }
+                        else { setMsg(t("settings.dev.badCredentials")); setTimeout(() => setMsg(""), 2500); }
                       }
                     }}
-                    style={{ width: "100%", boxSizing: "border-box", padding: "10px 14px", borderRadius: 10, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.15)", color: "white", fontSize: 14, fontFamily: "inherit", outline: "none", marginBottom: 12 }}
+                    className="ui-input"
+                    style={{ width: "100%", boxSizing: "border-box", marginBottom: 12 }}
                   />
                   <div style={{ display: "flex", gap: 8 }}>
-                    <button onClick={() => setShowDevForm(false)} style={{ flex: 1, padding: "10px 0", borderRadius: 10, background: "rgba(255,82,82,0.12)", border: "1px solid rgba(255,82,82,0.3)", color: "#FF5252", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Отмена</button>
+                    <button onClick={() => setShowDevForm(false)} className="ui-btn ui-btn--secondary" style={{ flex: 1 }}>{t("common.cancel")}</button>
                     <button onClick={() => {
-                      if (tryAdminLogin(adminLogin, adminPass)) { setAdminUnlocked(true); setShowDevForm(false); setMsg("Режим разработчика активирован!"); setTimeout(() => setMsg(""), 3000); }
-                      else { setMsg("Неверный логин или пароль"); setTimeout(() => setMsg(""), 2500); }
-                    }} style={{ flex: 1, padding: "10px 0", borderRadius: 10, background: "rgba(255,215,0,0.12)", border: "1px solid rgba(255,215,0,0.3)", color: "#FFD54F", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Войти</button>
+                      if (tryAdminLogin(adminLogin, adminPass)) { setAdminUnlocked(true); setShowDevForm(false); setMsg(t("settings.dev.activated")); setTimeout(() => setMsg(""), 3000); }
+                      else { setMsg(t("settings.dev.badCredentials")); setTimeout(() => setMsg(""), 2500); }
+                    }} className="ui-btn ui-btn--primary" style={{ flex: 1 }}>{t("common.login")}</button>
                   </div>
                 </div>
               )}
@@ -170,52 +194,51 @@ setMsg("+100 кристаллов добавлено для теста!");
           )}
         </Section>
 
-        <Section title="Помощник Астрал">
-          <div style={{ background: "rgba(206,147,216,0.07)", border: "1px solid rgba(206,147,216,0.25)", borderRadius: 14, padding: 16, marginBottom: 12 }}>
+        <Section title={t("settings.section.astral")}>
+          <div className="ui-card" style={{ background: "linear-gradient(160deg, rgba(206,147,216,0.16), rgba(8,4,24,0.78))", border: "1px solid var(--bd-violet)", padding: 16, marginBottom: 12, boxShadow: "var(--sh-glow-violet), var(--sh-sm)" }}>
             <ToggleRow
-              label="Включить Астрала"
-              hint="Чат и помощник в меню. Расширенные функции (автобой, подсказки в бою, команды) — только со Star Guardian."
+              label={t("settings.astral.enable")}
+              hint={t("settings.astral.enableHint")}
               value={astral.enabled}
               onChange={(v) => toggleAstral({ enabled: v })}
             />
             <ToggleRow
-              label="Подсказки в бою"
-              hint="Виджет в углу с ситуативными советами (только при активной подписке)."
+              label={t("settings.astral.battleTips")}
+              hint={t("settings.astral.battleTipsHint")}
               value={astral.battleTipsEnabled}
               onChange={(v) => toggleAstral({ battleTipsEnabled: v })}
             />
             <ToggleRow
-              label="Напоминания в меню"
-              hint="Периодические подсказки про дневные награды и прокачку."
+              label={t("settings.astral.menuTips")}
+              hint={t("settings.astral.menuTipsHint")}
               value={astral.menuTipsEnabled}
               onChange={(v) => toggleAstral({ menuTipsEnabled: v })}
             />
             <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
-              {(["✨ Звезда", "🌙 Луна", "🌟 Свет"] as const).map((label, i) => (
-                <button key={i} onClick={() => toggleAstral({ voice: i as 0 | 1 | 2 })}
+              {voiceKeys.map((key, i) => (
+                <button key={key} onClick={() => toggleAstral({ voice: i as 0 | 1 | 2 })}
+                  className={`ui-btn ${astral.voice === i ? "ui-btn--primary" : "ui-btn--secondary"}`}
                   style={{
                     flex: 1, padding: "8px 6px",
-                    background: astral.voice === i ? "rgba(255,215,64,0.18)" : "rgba(255,255,255,0.04)",
-                    border: `1.5px solid ${astral.voice === i ? "#FFD740" : "rgba(255,255,255,0.1)"}`,
-                    borderRadius: 10, color: astral.voice === i ? "#FFD740" : "white",
-                    fontWeight: 700, cursor: "pointer", fontSize: 12,
-                  }}>{label}</button>
+                    fontSize: 12,
+                    letterSpacing: "0.04em",
+                  }}>{t(key)}</button>
               ))}
             </div>
           </div>
         </Section>
 
-        <Section title="Тестовые инструменты">
-          <Button onClick={handleAddGems} color="#40C4FF" label="+100 кристаллов (тест)" />
+        <Section title={t("settings.section.test")}>
+          <Button onClick={handleAddGems} color="#40C4FF" label={t("settings.test.addGems")} />
         </Section>
 
         {msg && (
-          <div style={{ textAlign: "center", padding: 14, background: "rgba(76,175,80,0.15)", border: "1px solid rgba(76,175,80,0.3)", borderRadius: 12, color: "#4CAF50", fontWeight: 700 }}>
+          <div className="ui-glass" style={{ textAlign: "center", padding: 14, color: "#69F0AE", fontWeight: 700, borderColor: "rgba(105,240,174,0.4)" }}>
             {msg}
           </div>
         )}
-      </div>
-    </div>
+      </PageBody>
+    </PageBg>
   );
 }
 
@@ -229,28 +252,34 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 function ModeCard({
-  active, icon, title, subtitle, onClick, color,
-}: { active: boolean; icon: string; title: string; subtitle: string; onClick: () => void; color: string }) {
+  active, icon, title, subtitle, onClick, color, selectedLabel,
+}: { active: boolean; icon: string; title: string; subtitle: string; onClick: () => void; color: string; selectedLabel: string }) {
   return (
     <button
       onClick={onClick}
+      className="ui-card is-interactive"
       style={{
-        background: active ? `${color}28` : "rgba(255,255,255,0.04)",
-        border: `2px solid ${active ? color : "rgba(255,255,255,0.08)"}`,
-        borderRadius: 14,
-        padding: "14px 12px",
-        color: "white",
+        background: active
+          ? `linear-gradient(160deg, ${color}33, rgba(8,4,24,0.85))`
+          : "linear-gradient(160deg, rgba(255,255,255,0.04), rgba(8,4,24,0.65))",
+        border: `1px solid ${active ? color : "var(--bd-1)"}`,
+        borderRadius: "var(--r-lg)",
+        padding: "16px 12px",
+        color: "var(--t-1)",
         cursor: "pointer",
         textAlign: "center",
-        boxShadow: active ? `0 0 18px ${color}55` : "none",
-        transition: "transform 0.12s",
+        boxShadow: active
+          ? `0 0 24px ${color}aa, var(--sh-md), inset 0 1px 0 rgba(255,255,255,0.08)`
+          : "var(--sh-sm)",
+        transition: "all var(--ease-mid)",
+        transform: active ? "translateY(-2px)" : "none",
       }}
     >
       <div style={{ fontSize: 32, lineHeight: 1 }}>{icon}</div>
-      <div style={{ marginTop: 6, fontWeight: 800, fontSize: 14, color: active ? color : "white" }}>{title}</div>
-      <div style={{ marginTop: 2, fontSize: 11, color: "rgba(255,255,255,0.55)" }}>{subtitle}</div>
+      <div style={{ marginTop: 8, fontWeight: 900, fontSize: 14, color: active ? color : "var(--t-1)", letterSpacing: "0.04em" }}>{title}</div>
+      <div style={{ marginTop: 4, fontSize: 11, color: "var(--t-3)" }}>{subtitle}</div>
       {active && (
-        <div style={{ marginTop: 6, fontSize: 10, fontWeight: 800, letterSpacing: 1, color }}>✓ ВЫБРАНО</div>
+        <div className="ui-eyebrow" style={{ marginTop: 8, color }}>{selectedLabel}</div>
       )}
     </button>
   );
@@ -262,27 +291,37 @@ function ToggleRow({ label, hint, value, onChange }: {
   return (
     <div style={{
       display: "flex", justifyContent: "space-between", alignItems: "center",
-      padding: "8px 0",
-      borderBottom: "1px solid rgba(255,255,255,0.06)",
+      padding: "10px 0",
+      borderBottom: "1px solid var(--bd-1)",
       gap: 14,
     }}>
       <div style={{ flex: 1 }}>
-        <div style={{ fontSize: 13, fontWeight: 700 }}>{label}</div>
-        {hint && <div style={{ fontSize: 11, color: "rgba(255,255,255,0.45)", marginTop: 2 }}>{hint}</div>}
+        <div style={{ fontSize: 13.5, fontWeight: 800, letterSpacing: "0.01em" }}>{label}</div>
+        {hint && <div style={{ fontSize: 11, color: "var(--t-3)", marginTop: 3, lineHeight: 1.4 }}>{hint}</div>}
       </div>
       <button onClick={() => onChange(!value)} style={{
         width: 50, height: 26, borderRadius: 13,
-        background: value ? "linear-gradient(135deg, #FFD740, #FFA000)" : "rgba(255,255,255,0.1)",
-        border: "1px solid rgba(255,255,255,0.18)",
+        background: value
+          ? "linear-gradient(135deg, var(--c-gold-3), var(--c-gold-2))"
+          : "rgba(0,0,0,0.4)",
+        border: `1px solid ${value ? "var(--bd-gold)" : "var(--bd-2)"}`,
         position: "relative", cursor: "pointer",
-        transition: "background 200ms",
+        transition: "all var(--ease-mid)",
+        boxShadow: value
+          ? "0 0 12px rgba(255,213,79,0.5), inset 0 1px 0 rgba(255,255,255,0.18)"
+          : "inset 0 1px 2px rgba(0,0,0,0.4)",
+        flexShrink: 0,
       }}>
         <div style={{
           position: "absolute", top: 2, left: value ? 26 : 2,
           width: 20, height: 20, borderRadius: "50%",
-          background: value ? "#3E2723" : "#FAFAFA",
-          transition: "left 200ms",
-          boxShadow: "0 1px 4px rgba(0,0,0,0.4)",
+          background: value
+            ? "linear-gradient(145deg, #FFF9C4, #FFD54F)"
+            : "#FAFAFA",
+          transition: "left 200ms, background 200ms, box-shadow 200ms",
+          boxShadow: value
+            ? "0 0 10px rgba(255,235,59,0.85), 0 2px 6px rgba(0,0,0,0.35)"
+            : "0 2px 6px rgba(0,0,0,0.45)",
         }} />
       </button>
     </div>
@@ -293,17 +332,17 @@ function Button({ onClick, color, label }: { onClick: () => void; color: string;
   return (
     <button
       onClick={onClick}
+      className="ui-btn ui-btn--block"
       style={{
-        width: "100%",
-        background: `${color}20`,
-        border: `1px solid ${color}40`,
-        borderRadius: 12,
+        ["--ui-shear-fill" as string]: `linear-gradient(135deg, ${color}44, ${color}18)`,
+        ["--ui-shear-border" as string]: color,
+        ["--ui-shear-text" as string]: textOnTintedAccent(color),
+        ["--ui-shear-shadow" as string]: `0 0 14px ${color}33, var(--sh-sm), inset 0 1px 0 rgba(255,255,255,0.08)`,
+        fontWeight: 800,
+        fontSize: 14,
         padding: "12px 0",
-        color,
-        fontWeight: 700,
-        fontSize: 15,
-        cursor: "pointer",
         marginBottom: 8,
+        letterSpacing: "0.04em",
       }}
     >
       {label}

@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
-import { generateMenuNotification, type MenuNotification } from "../ai/AstralAssistant";
+import type { MenuNotification } from "../ai/AstralAssistant";
+import { astralMenuNotification } from "../ai/astralBrain";
 import { getCurrentProfile } from "../utils/localStorageAPI";
 import { getAstralSettings, isStarGuardianActive } from "../utils/subscription";
+import { useI18n } from "../i18n";
 
 interface Props {
   onCta?: (screen: NonNullable<MenuNotification["cta"]>["screen"]) => void;
@@ -13,6 +15,7 @@ const MIN_INTERVAL_MS = 30000;
 const MAX_INTERVAL_MS = 90000;
 
 export default function AstralMenuPopup({ onCta }: Props) {
+  const { t } = useI18n();
   const [note, setNote] = useState<MenuNotification | null>(null);
   const [enabled, setEnabled] = useState(isStarGuardianActive() && getAstralSettings().menuTipsEnabled);
 
@@ -27,17 +30,25 @@ export default function AstralMenuPopup({ onCta }: Props) {
     if (!enabled) return;
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let busy = false;
 
     const nextDelay = () =>
       Math.floor(MIN_INTERVAL_MS + Math.random() * (MAX_INTERVAL_MS - MIN_INTERVAL_MS));
 
     const tryShow = () => {
-      if (!alive) return;
+      if (!alive || busy) return;
       const p = getCurrentProfile();
-      if (!p) return;
-      const n = generateMenuNotification(p);
-      if (n) setNote(n);
-      timer = setTimeout(tryShow, nextDelay());
+      if (!p) {
+        timer = setTimeout(tryShow, nextDelay());
+        return;
+      }
+      busy = true;
+      void astralMenuNotification(p).then(n => {
+        busy = false;
+        if (!alive) return;
+        if (n) setNote(n);
+        timer = setTimeout(tryShow, nextDelay());
+      });
     };
     timer = setTimeout(tryShow, FIRST_DELAY_MS);
     return () => {
@@ -65,7 +76,6 @@ export default function AstralMenuPopup({ onCta }: Props) {
       boxShadow: "0 8px 32px rgba(206,147,216,0.45)",
       color: "white",
       padding: 12,
-      animation: "astralPopupIn 360ms cubic-bezier(.2,.9,.3,1.4)",
       display: "flex", flexDirection: "column", gap: 10,
       fontFamily: "'Segoe UI', Arial, sans-serif",
     }}>
@@ -77,7 +87,7 @@ export default function AstralMenuPopup({ onCta }: Props) {
           alignItems: "center", justifyContent: "center", fontSize: 20,
         }}>✨</div>
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 10, fontWeight: 800, color: "#FFD740", letterSpacing: 1 }}>АСТРАЛ</div>
+          <div style={{ fontSize: 10, fontWeight: 800, color: "#FFD740", letterSpacing: 1 }}>{t("astral.name")}</div>
           <div style={{ fontSize: 13, lineHeight: 1.4 }}>{note.text}</div>
         </div>
         <button onClick={() => setNote(null)} style={{
@@ -94,12 +104,6 @@ export default function AstralMenuPopup({ onCta }: Props) {
           fontSize: 12.5,
         }}>{note.cta.label}</button>
       )}
-      <style>{`
-        @keyframes astralPopupIn {
-          0%   { opacity: 0; transform: translateY(20px) scale(0.92); }
-          100% { opacity: 1; transform: translateY(0)    scale(1); }
-        }
-      `}</style>
     </div>
   );
 }

@@ -1,120 +1,291 @@
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { GameMode, ShowdownFormat, StarStrikeFormat } from "../App";
-import { getCurrentProfile } from "../utils/localStorageAPI";
+import { useI18n, modeName } from "../i18n";
+import { getCurrentProfile, grantClashPassXp } from "../utils/localStorageAPI";
 import BossRaidLobbyCarousel from "../components/BossRaidLobbyCarousel";
+import SiegeLevelPanel from "../components/SiegeLevelPanel";
+import { PageBg, PageBody } from "../components/PageChrome";
+import MapThumbCanvas from "../components/MapThumbCanvas";
+import ModeIconImg from "../components/ModeIconImg";
+import PassXpFlyBurst from "../components/PassXpFlyBurst";
+import type { EditorMode } from "../utils/mapEditorAPI";
+import {
+  editorModeForGameMode,
+  formatCountdown,
+  getActiveMap,
+  getNextMapChange,
+  hasUnseenMap,
+  markMapSeen,
+} from "../utils/mapSchedule";
+import { publicAssetBase, getModeIconUrl } from "../utils/modeAssets";
+import {
+  getProfileRankedCups,
+  rankedLeagueIconUrl,
+  rankedStandingFromTotalCups,
+} from "../utils/rankedProgress";
+
+/** Отдельные иллюстрации только для боковых вкладок (не режимные превью карт). */
+const TAB_DECOR = {
+  regular: `${publicAssetBase}images/mode-select-tab-regular.png`,
+  ranked: `${publicAssetBase}images/mode-select-tab-ranked.png`,
+  boss: `${publicAssetBase}images/mode-select-tab-boss.png`,
+  monsters: `${publicAssetBase}images/mode-select-tab-monsters.png`,
+} as const;
+
+const RANKED_MODE_CARD_W = 360;
+
+const BARE_MODE_ICON_IDS = new Set<GameMode>(["monsterhide", "monsterInvasion", "teamHunt"]);
+
+const NEW_MAP_PASS_XP = 10;
+
+const REGULAR_MODE_CARD_W = 280;
+const REGULAR_MODE_CARD_H = 440;
+
+type ModeCategory = "regular" | "ranked" | "monsters" | "boss";
+
+function categoryForMode(modeId: string): ModeCategory {
+  if (modeId === "bossraid") return "boss";
+  if (modeId === "ranked") return "ranked";
+  if (modeId === "monsterhide" || modeId === "monsterInvasion" || modeId === "teamHunt") return "monsters";
+  return "regular";
+}
 
 interface ModeSelectProps {
   onSelect: (mode: GameMode, showdownFormat?: ShowdownFormat, starStrikeFormat?: StarStrikeFormat) => void;
+  selectedMode?: GameMode;
   selectedShowdownFormat: ShowdownFormat;
   selectedStarStrikeFormat: StarStrikeFormat;
   onBack: () => void;
   /** Выбор босса в ленте: возврат в лобби с режимом bossraid и выбранным боссом */
   onBossRaidLobbyPick?: (bossId: string) => void;
+  /** Редактор карт: выбор режима для создания карты */
+  mapEditorPick?: (mode: GameMode) => void;
+  onClashPass?: () => void;
 }
 
-const BASE = (import.meta as any).env?.BASE_URL ?? "/";
-
-/** Отдельные иллюстрации только для боковых вкладок (не режимные превью карт). */
-const TAB_DECOR = {
-  regular: `${BASE}images/mode-select-tab-pvp.svg`,
-  boss: `${BASE}images/mode-select-tab-boss.svg`,
-} as const;
-
-const modes: Array<{
+const MODE_DEFS: Array<{
   id: GameMode;
   name: string;
-  subtitle: string;
-  desc: string;
-  players: string;
-  iconImg: string;
+  subtitleKey: string;
+  descKey: string;
+  playersKey: string;
   color: string;
   gradient: string;
 }> = [
   {
     id: "starstrike",
     name: "Star Strike",
-    subtitle: "Звёздный мяч",
-    desc: "Командный футбол с мячом: ведение, пасы, рикошеты и голы. Побеждает команда, которая забьет 3 мяча.",
-    players: "3 на 3 или 5 на 5",
-    iconImg: `${BASE}images/mode-starstrike.svg`,
+    subtitleKey: "mode.starstrike.subtitle",
+    descKey: "mode.starstrike.desc",
+    playersKey: "mode.starstrike.players",
     color: "#66BB6A",
     gradient: "linear-gradient(135deg, #1B5E20, #66BB6A)",
   },
   {
     id: "showdown",
     name: "Star Battle",
-    subtitle: "Столкновение",
-    desc: "Газ сжимается, на карте ящики и банки усиления. Формат выбирается ниже: одиночное, парное или тройное.",
-    players: "10 или 12 участников",
-    iconImg: `${BASE}images/mode-showdown.png`,
+    subtitleKey: "mode.showdown.subtitle",
+    descKey: "mode.showdown.desc",
+    playersKey: "mode.showdown.players",
     color: "#FF5252",
     gradient: "linear-gradient(135deg, #B71C1C, #FF5252)",
   },
   {
     id: "crystals",
     name: "Crystal Carry",
-    subtitle: "Вынос кристаллов",
-    desc: "Несите кристаллы на свою базу. Кто первый соберёт 10 — побеждает!",
-    players: "3 на 3",
-    iconImg: `${BASE}images/mode-crystals.png`,
+    subtitleKey: "mode.crystals.subtitle",
+    descKey: "mode.crystals.desc",
+    playersKey: "mode.crystals.players",
     color: "#40C4FF",
     gradient: "linear-gradient(135deg, #0D47A1, #40C4FF)",
   },
   {
     id: "siege",
     name: "Star Siege",
-    subtitle: "Осада",
-    desc: "Защитите свою базу от 3 волн врагов!",
-    players: "4 против волн",
-    iconImg: `${BASE}images/mode-siege.png`,
+    subtitleKey: "mode.siege.subtitle",
+    descKey: "mode.siege.desc",
+    playersKey: "mode.siege.players",
     color: "#69F0AE",
     gradient: "linear-gradient(135deg, #1B5E20, #69F0AE)",
   },
   {
     id: "heist",
     name: "Fallen Crown",
-    subtitle: "Ограбление",
-    desc: "Уничтожьте сейф врага раньше, чем они уничтожат ваш!",
-    players: "3 на 3",
-    iconImg: `${BASE}images/mode-heist.png`,
+    subtitleKey: "mode.heist.subtitle",
+    descKey: "mode.heist.desc",
+    playersKey: "mode.heist.players",
     color: "#FFD700",
     gradient: "linear-gradient(135deg, #F57F17, #FFD700)",
   },
   {
     id: "gemgrab",
     name: "Crystal Void",
-    subtitle: "Ограбление кристаллов",
-    desc: "Соберите 10 камней и удержите их 15 секунд для победы!",
-    players: "3 на 3",
-    iconImg: `${BASE}images/mode-gemgrab.png`,
+    subtitleKey: "mode.gemgrab.subtitle",
+    descKey: "mode.gemgrab.desc",
+    playersKey: "mode.gemgrab.players",
     color: "#CE93D8",
     gradient: "linear-gradient(135deg, #4A148C, #CE93D8)",
   },
   {
     id: "megashowdown",
     name: "Mega Star Battle",
-    subtitle: "МЕГА-Столкновение",
-    desc: "Отряд из 3 бойцов в королевской битве. Меняйте бойцов в бою (кулдаун 3 сек). Награды ×1.5.",
-    players: "Отряд 3 на 5–10 врагов",
-    iconImg: `${BASE}images/mode-showdown.png`,
+    subtitleKey: "mode.megashowdown.subtitle",
+    descKey: "mode.megashowdown.desc",
+    playersKey: "mode.megashowdown.players",
     color: "#FFD54F",
     gradient: "linear-gradient(135deg, #B71C1C, #FFD54F)",
   },
+  {
+    id: "bounty",
+    name: "Star Hunt",
+    subtitleKey: "mode.bounty.subtitle",
+    descKey: "mode.bounty.desc",
+    playersKey: "mode.bounty.players",
+    color: "#FFE082",
+    gradient: "linear-gradient(135deg, #311B92, #FFE082)",
+  },
 ];
 
-type ModeCategory = "regular" | "boss";
+const MONSTER_MODE_DEFS: Array<{
+  id: GameMode;
+  name: string;
+  subtitleKey: string;
+  descKey: string;
+  playersKey: string;
+  color: string;
+  gradient: string;
+}> = [
+  {
+    id: "monsterhide",
+    name: "Monster Hide",
+    subtitleKey: "mode.monsterhide.subtitle",
+    descKey: "mode.monsterhide.desc",
+    playersKey: "mode.monsterhide.players",
+    color: "#AB47BC",
+    gradient: "linear-gradient(135deg, #4A148C, #AB47BC)",
+  },
+  {
+    id: "monsterInvasion",
+    name: "Monster Invasion",
+    subtitleKey: "mode.monsterInvasion.subtitle",
+    descKey: "mode.monsterInvasion.desc",
+    playersKey: "mode.monsterInvasion.players",
+    color: "#FF7043",
+    gradient: "linear-gradient(135deg, #BF360C, #FF7043)",
+  },
+  {
+    id: "teamHunt",
+    name: "Team Hunt",
+    subtitleKey: "mode.teamHunt.subtitle",
+    descKey: "mode.teamHunt.desc",
+    playersKey: "mode.teamHunt.players",
+    color: "#26C6DA",
+    gradient: "linear-gradient(135deg, #006064, #26C6DA)",
+  },
+];
 
-export default function ModeSelect({ onSelect, selectedShowdownFormat, selectedStarStrikeFormat, onBack, onBossRaidLobbyPick }: ModeSelectProps) {
+export default function ModeSelect({ onSelect, selectedMode, selectedShowdownFormat, selectedStarStrikeFormat, onBack, onBossRaidLobbyPick, mapEditorPick, onClashPass }: ModeSelectProps) {
+  const { t } = useI18n();
+  const regularModes = useMemo(
+    () =>
+      MODE_DEFS.map((m) => ({
+        ...m,
+        name: modeName(m.id, m.name),
+        subtitle: t(m.subtitleKey),
+        desc: t(m.descKey),
+        players: t(m.playersKey),
+      })),
+    [t],
+  );
+  const monsterModes = useMemo(
+    () =>
+      MONSTER_MODE_DEFS.map((m) => ({
+        ...m,
+        name: modeName(m.id, m.name),
+        subtitle: t(m.subtitleKey),
+        desc: t(m.descKey),
+        players: t(m.playersKey),
+      })),
+    [t],
+  );
+  const [category, setCategory] = useState<ModeCategory>(() => {
+    const modeId = selectedMode ?? getCurrentProfile()?.selectedMode ?? "showdown";
+    return categoryForMode(modeId);
+  });
+  const visibleModes = category === "monsters" ? monsterModes : regularModes;
   const [hovered, setHovered] = useState<number | null>(null);
   const [showdownFormat, setShowdownFormat] = useState<ShowdownFormat>(selectedShowdownFormat);
   const [starStrikeFormat, setStarStrikeFormat] = useState<StarStrikeFormat>(selectedStarStrikeFormat);
-  const [category, setCategory] = useState<ModeCategory>("regular");
   const [tabHover, setTabHover] = useState<ModeCategory | null>(null);
   const [tabPressed, setTabPressed] = useState<ModeCategory | null>(null);
+  const [revealedNew, setRevealedNew] = useState<Record<string, boolean>>({});
+  const [passFlyJobs, setPassFlyJobs] = useState<Array<{ id: number; count: number; modeId: string }>>([]);
+  const passFlyIdRef = useRef(0);
+  const [, setTick] = useState(0);
+  const passTargetRef = useRef<HTMLButtonElement>(null);
+  const modeCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const profile = getCurrentProfile();
+
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  const handleNewMap = (modeId: string, editorMode: EditorMode) => {
+    const active = getActiveMap(editorMode);
+    if (active) markMapSeen(editorMode, active.id);
+    grantClashPassXp(NEW_MAP_PASS_XP);
+    setRevealedNew(prev => ({ ...prev, [modeId]: true }));
+    const id = passFlyIdRef.current++;
+    setPassFlyJobs(jobs => [...jobs, { id, count: NEW_MAP_PASS_XP, modeId }]);
+  };
   const ownedCount = profile?.unlockedBrawlers?.length ?? 0;
   const effectiveShowdownFormat = showdownFormat;
-  const showBossTab = Boolean(onBossRaidLobbyPick);
+
+  const pickRegularMode = (modeId: GameMode) => {
+    if (mapEditorPick) {
+      if (!editorModeForGameMode(modeId)) return;
+      mapEditorPick(modeId);
+      return;
+    }
+    const editorMode = editorModeForGameMode(modeId);
+    if (editorMode) {
+      const active = getActiveMap(editorMode);
+      if (active) markMapSeen(editorMode, active.id);
+    }
+    if (modeId === "showdown") onSelect(modeId, effectiveShowdownFormat);
+    else if (modeId === "starstrike") onSelect(modeId, undefined, starStrikeFormat);
+    else onSelect(modeId);
+  };
+
+  const showBossTab = Boolean(onBossRaidLobbyPick || mapEditorPick);
+
+  const tabIconStyle = (key: ModeCategory): CSSProperties => ({
+    width: "100%",
+    height: 36,
+    display: "block",
+    objectFit: "contain",
+    background: "transparent",
+    transform: tabHover === key ? "scale(1.05)" : "scale(1)",
+    transition: "transform 0.28s ease",
+  });
+
+  const tabLabelStyle = (key: ModeCategory): CSSProperties => {
+    const activeColors: Record<ModeCategory, string> = {
+      regular: "#e1f5fe",
+      ranked: "#f8bbd0",
+      monsters: "#e1bee7",
+      boss: "#ffe082",
+    };
+    return {
+      fontSize: 9,
+      fontWeight: 800,
+      color: category === key ? activeColors[key] : "rgba(255,255,255,0.78)",
+      letterSpacing: 0.2,
+      lineHeight: 1.15,
+      textAlign: "center",
+    };
+  };
 
   const tabBase = (key: ModeCategory) => {
     const active = category === key;
@@ -153,15 +324,13 @@ export default function ModeSelect({ onSelect, selectedShowdownFormat, selectedS
   };
 
   return (
-    <div
+    <PageBg
+      variant="modeselect"
       style={{
-        minHeight: "100%",
-        background: "linear-gradient(135deg, #152745 0%, #243f69 50%, #355a90 100%)",
         display: "flex",
         flexDirection: "row",
         alignItems: "stretch",
-        fontFamily: "'Segoe UI', Arial, sans-serif",
-        position: "relative",
+        fontFamily: "var(--app-font-sans)",
       }}
     >
       <style>{`
@@ -172,6 +341,10 @@ export default function ModeSelect({ onSelect, selectedShowdownFormat, selectedS
         @keyframes modeTabGlow {
           0%, 100% { box-shadow: 0 0 10px rgba(255,213,79,0.16), inset 0 1px 0 rgba(255,255,255,0.06); }
           50% { box-shadow: 0 0 16px rgba(255,213,79,0.26), inset 0 1px 0 rgba(255,255,255,0.08); }
+        }
+        @keyframes newMapPulse {
+          0%, 100% { box-shadow: inset 0 0 0 2px rgba(255,255,255,0.5), 0 0 24px rgba(255,235,59,0.65); }
+          50% { box-shadow: inset 0 0 0 3px rgba(255,255,255,0.75), 0 0 40px rgba(255,235,59,0.95); }
         }
       `}</style>
 
@@ -201,39 +374,53 @@ export default function ModeSelect({ onSelect, selectedShowdownFormat, selectedS
           onMouseUp={() => setTabPressed(null)}
           style={tabBase("regular")}
         >
-          <div
-            style={{
-              height: 30,
-              borderRadius: 8,
-              overflow: "hidden",
-              border: "1px solid rgba(255,255,255,0.1)",
-              boxShadow: category === "regular" ? "0 0 8px rgba(64,196,255,0.2)" : undefined,
-            }}
-          >
-            <img
-              src={TAB_DECOR.regular}
-              alt=""
-              style={{
-                width: "100%",
-                height: "100%",
-                objectFit: "cover",
-                display: "block",
-                transform: tabHover === "regular" ? "scale(1.05)" : "scale(1)",
-                transition: "transform 0.28s ease",
-              }}
-            />
+          <img
+            src={TAB_DECOR.regular}
+            alt=""
+            className="ui-game-icon"
+            style={tabIconStyle("regular")}
+          />
+          <div style={tabLabelStyle("regular")}>
+            {t("mode.category.regular")}
           </div>
-          <div
-            style={{
-              fontSize: 9,
-              fontWeight: 800,
-              color: category === "regular" ? "#e1f5fe" : "rgba(255,255,255,0.78)",
-              letterSpacing: 0.2,
-              lineHeight: 1.15,
-              textAlign: "center",
-            }}
-          >
-            Обычные режимы
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setCategory("ranked")}
+          onMouseEnter={() => setTabHover("ranked")}
+          onMouseLeave={() => {
+            setTabHover(null);
+            setTabPressed(null);
+          }}
+          onMouseDown={() => setTabPressed("ranked")}
+          onMouseUp={() => setTabPressed(null)}
+          style={tabBase("ranked")}
+        >
+          <img src={TAB_DECOR.ranked} alt="" className="ui-game-icon" style={tabIconStyle("ranked")} />
+          <div style={tabLabelStyle("ranked")}>{t("ranked.tab")}</div>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setCategory("monsters")}
+          onMouseEnter={() => setTabHover("monsters")}
+          onMouseLeave={() => {
+            setTabHover(null);
+            setTabPressed(null);
+          }}
+          onMouseDown={() => setTabPressed("monsters")}
+          onMouseUp={() => setTabPressed(null)}
+          style={tabBase("monsters")}
+        >
+          <img
+            src={TAB_DECOR.monsters}
+            alt=""
+            className="ui-game-icon"
+            style={tabIconStyle("monsters")}
+          />
+          <div style={tabLabelStyle("monsters")}>
+            {t("mode.category.monsters")}
           </div>
         </button>
 
@@ -250,39 +437,14 @@ export default function ModeSelect({ onSelect, selectedShowdownFormat, selectedS
             onMouseUp={() => setTabPressed(null)}
             style={tabBase("boss")}
           >
-            <div
-              style={{
-                height: 30,
-                borderRadius: 8,
-                overflow: "hidden",
-                border: "1px solid rgba(255,213,79,0.22)",
-                boxShadow: category === "boss" ? "0 0 8px rgba(255,152,0,0.28)" : undefined,
-              }}
-            >
-              <img
-                src={TAB_DECOR.boss}
-                alt=""
-                style={{
-                  width: "100%",
-                  height: "100%",
-                  objectFit: "cover",
-                  display: "block",
-                  transform: tabHover === "boss" ? "scale(1.05)" : "scale(1)",
-                  transition: "transform 0.28s ease",
-                }}
-              />
-            </div>
-            <div
-              style={{
-                fontSize: 9,
-                fontWeight: 800,
-                color: category === "boss" ? "#ffe082" : "rgba(255,255,255,0.78)",
-                letterSpacing: 0.2,
-                lineHeight: 1.15,
-                textAlign: "center",
-              }}
-            >
-              Режимы с боссом
+            <img
+              src={TAB_DECOR.boss}
+              alt=""
+              className="ui-game-icon"
+              style={tabIconStyle("boss")}
+            />
+            <div style={tabLabelStyle("boss")}>
+              {t("mode.category.boss")}
             </div>
           </button>
         ) : null}
@@ -294,38 +456,23 @@ export default function ModeSelect({ onSelect, selectedShowdownFormat, selectedS
           flex: 1,
           display: "flex",
           flexDirection: "column",
-          alignItems: "center",
-          padding: category === "boss" ? "22px 12px 16px" : "40px 24px 48px",
           minWidth: 0,
-          position: "relative",
+          minHeight: 0,
         }}
       >
-        <button
-          onClick={onBack}
-          style={{
-            position: "absolute",
-            top: 20,
-            left: 24,
-            background: "rgba(255,255,255,0.07)",
-            border: "1px solid rgba(255,255,255,0.15)",
-            borderRadius: 10,
-            padding: "8px 18px",
-            color: "rgba(255,255,255,0.7)",
-            cursor: "pointer",
-            fontSize: 14,
-            fontWeight: 600,
-          }}
-        >
-          ← Назад
-        </button>
-
         <div
           style={{
-            textAlign: "center",
-            marginBottom: category === "boss" ? 8 : 40,
-            marginTop: category === "boss" ? 4 : 8,
+            flexShrink: 0,
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            padding: category === "boss" ? "14px 20px 8px" : "16px 24px 10px",
+            borderBottom: "1px solid rgba(255,255,255,0.08)",
+            background: "linear-gradient(180deg, rgba(0,0,0,0.35) 0%, rgba(0,0,0,0.12) 100%)",
           }}
         >
+          <button onClick={onBack} className="ui-back-btn">← {t("common.back")}</button>
+          <div style={{ flex: 1, textAlign: "center" }}>
           <h1
             style={{
               fontSize: category === "boss" ? 30 : 42,
@@ -338,7 +485,7 @@ export default function ModeSelect({ onSelect, selectedShowdownFormat, selectedS
               margin: 0,
             }}
           >
-            {category === "boss" ? "Бой с боссом" : "Выбор режима"}
+            {category === "boss" ? t("mode.boss.title") : category === "monsters" ? t("mode.monsters.title") : mapEditorPick ? t("drawer.mapEditor") : t("mode.select.title")}
           </h1>
           <p
             style={{
@@ -351,55 +498,147 @@ export default function ModeSelect({ onSelect, selectedShowdownFormat, selectedS
               marginRight: "auto",
             }}
           >
-            {category === "boss"
-              ? "Пять бойцов против одного босса — без кубков за матч, награды за первые уровни."
-              : "Выберите режим боя, чтобы начать"}
+            {category === "boss" ? t("mode.boss.subtitle") : category === "monsters" ? t("mode.monsters.subtitle") : mapEditorPick ? t("drawer.mapEditor.sub") : t("mode.select.subtitle")}
           </p>
+          </div>
+          {onClashPass && (
+            <button
+              ref={passTargetRef}
+              type="button"
+              onClick={onClashPass}
+              className="ui-btn ui-btn--ghost"
+              style={{
+                letterSpacing: "0.08em",
+                fontSize: 11,
+                padding: "8px 12px",
+                borderColor: "rgba(206,147,216,0.45)",
+                color: "#CE93D8",
+              }}
+            >
+              ⭐ STAR PASS
+            </button>
+          )}
         </div>
 
-        {category === "regular" ? (
+        <PageBody style={{
+          flex: 1,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: category === "regular" || category === "monsters" ? "stretch" : "center",
+          padding: category === "boss" ? "12px 12px 16px" : category === "regular" || category === "monsters" ? "16px 12px 20px" : "24px 24px 48px",
+          width: "100%",
+          minHeight: 0,
+          overflow: category === "regular" || category === "monsters" ? "hidden" : undefined,
+        }}>
+        {category === "ranked" ? (
+          <RankedModeCard
+            profile={profile}
+            onSelect={() => {
+              if (mapEditorPick) return;
+              onSelect("ranked");
+            }}
+          />
+        ) : category === "regular" || category === "monsters" ? (
           <div
+            className="ui-scroll-hidden"
             style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
-              gap: 20,
-              maxWidth: 1000,
               width: "100%",
+              flex: 1,
+              minHeight: 0,
+              overflowX: "auto",
+              overflowY: "hidden",
+              padding: "4px 4px 8px",
+              scrollSnapType: "x mandatory",
+              WebkitOverflowScrolling: "touch",
             }}
           >
-            {modes.map((mode, i) => {
-              const locked = mode.id === "megashowdown" && ownedCount < 3;
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "row",
+                alignItems: "flex-start",
+                gap: 16,
+                width: "max-content",
+                height: REGULAR_MODE_CARD_H,
+                padding: "0 4px",
+              }}
+            >
+            {visibleModes.map((mode, i) => {
+              const locked = !mapEditorPick && mode.id === "megashowdown" && ownedCount < 3;
+              const editorMode = editorModeForGameMode(mode.id);
+              const nextChange = editorMode ? getNextMapChange(editorMode) : null;
+              const showNew = Boolean(editorMode && hasUnseenMap(editorMode) && !revealedNew[mode.id]);
+              const activeMap = editorMode ? getActiveMap(editorMode) : null;
               return (
                 <div
-                  key={i}
+                  key={mode.id}
+                  ref={el => { modeCardRefs.current[mode.id] = el; }}
                   onMouseOver={() => setHovered(i)}
                   onMouseOut={() => setHovered(null)}
+                  className="ui-card"
                   style={{
-                    background: hovered === i ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.04)",
-                    border: `1px solid ${hovered === i ? mode.color + "60" : "rgba(255,255,255,0.08)"}`,
-                    borderRadius: 20,
-                    padding: 28,
+                    flex: `0 0 ${REGULAR_MODE_CARD_W}px`,
+                    width: REGULAR_MODE_CARD_W,
+                    height: REGULAR_MODE_CARD_H,
+                    boxSizing: "border-box",
+                    display: "flex",
+                    flexDirection: "column",
+                    scrollSnapAlign: "start",
+                    background: hovered === i
+                      ? `linear-gradient(160deg, ${mode.color}30, rgba(8,4,24,0.78))`
+                      : "linear-gradient(160deg, rgba(255,255,255,0.06), rgba(8,4,24,0.55))",
+                    border: `1px solid ${showNew ? "#FFEB3B" : hovered === i ? mode.color : "var(--bd-1)"}`,
+                    borderRadius: "var(--r-xl)",
+                    padding: 20,
                     cursor: locked ? "not-allowed" : "pointer",
                     transform: hovered === i && !locked ? "translateY(-4px)" : "none",
-                    transition: "all 0.25s",
-                    boxShadow: hovered === i && !locked ? `0 10px 40px ${mode.color}20` : "none",
+                    transition: "all var(--ease-mid)",
+                    boxShadow: showNew
+                      ? "0 0 28px rgba(255,235,59,0.5), var(--sh-sm)"
+                      : hovered === i && !locked
+                        ? `0 14px 44px ${mode.color}66, var(--sh-md), inset 0 1px 0 rgba(255,255,255,0.10)`
+                        : "var(--sh-sm), inset 0 1px 0 rgba(255,255,255,0.06)",
                     position: "relative",
                     overflow: "hidden",
                     opacity: locked ? 0.55 : 1,
+                    backdropFilter: "blur(12px) saturate(1.15)",
+                    WebkitBackdropFilter: "blur(12px) saturate(1.15)",
                   }}
                   onClick={() => {
                     if (locked) return;
-                    if (mode.id === "showdown") {
-                      onSelect(mode.id, effectiveShowdownFormat);
-                    } else if (mode.id === "starstrike") {
-                      onSelect(mode.id, undefined, starStrikeFormat);
-                    } else {
-                      onSelect(mode.id);
+                    if (mapEditorPick) {
+                      if (!editorModeForGameMode(mode.id)) return;
+                      mapEditorPick(mode.id);
+                      return;
                     }
+                    if (showNew && editorMode) {
+                      handleNewMap(mode.id, editorMode);
+                      return;
+                    }
+                    pickRegularMode(mode.id);
                   }}
                 >
-                  <div style={{ width: 80, height: 80, marginBottom: 12, position: "relative" }}>
-                    <img src={mode.iconImg} alt={mode.name} style={{ width: "100%", height: "100%", objectFit: "contain", borderRadius: 16, filter: `drop-shadow(0 0 12px ${mode.color}88)` }} />
+                  {nextChange && (
+                    <div style={{
+                      flexShrink: 0,
+                      textAlign: "center",
+                      fontSize: 10,
+                      fontWeight: 800,
+                      color: "#FFD54F",
+                      marginBottom: 8,
+                    }}>
+                      {t("mode.newMapIn", { time: formatCountdown(nextChange.ms) })}
+                    </div>
+                  )}
+                  <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+                  <div style={{ marginBottom: 10, position: "relative", flexShrink: 0 }}>
+                    <ModeIconImg
+                      modeId={mode.id}
+                      alt={mode.name}
+                      size={108}
+                      color={mode.color}
+                      bare={BARE_MODE_ICON_IDS.has(mode.id)}
+                    />
                     {mode.id === "megashowdown" && (
                       <div
                         style={{
@@ -418,35 +657,48 @@ export default function ModeSelect({ onSelect, selectedShowdownFormat, selectedS
                   </div>
                   <div
                     style={{
-                      fontSize: 22,
+                      fontSize: 20,
                       fontWeight: 900,
-                      color: mode.color,
+                      color: "#fff",
                       marginBottom: 2,
                       letterSpacing: 1,
+                      flexShrink: 0,
                     }}
                   >
                     {mode.name}
                   </div>
-                  <div style={{ fontSize: 13, color: "rgba(255,255,255,0.7)", marginBottom: 2, fontWeight: 700 }}>
+                  <div style={{ fontSize: 12, color: "rgba(255,255,255,0.7)", marginBottom: 2, fontWeight: 700, flexShrink: 0 }}>
                     {mode.subtitle}
                   </div>
-                  <div style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", marginBottom: 10, letterSpacing: 1 }}>
+                  <div style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", marginBottom: 8, letterSpacing: 1, flexShrink: 0 }}>
                     {mode.players}
                   </div>
-                  <p style={{ color: "rgba(255,255,255,0.6)", fontSize: 14, margin: 0, lineHeight: 1.5 }}>
+                  <p
+                    style={{
+                      color: "rgba(255,255,255,0.6)",
+                      fontSize: 13,
+                      margin: 0,
+                      lineHeight: 1.45,
+                      flexShrink: 0,
+                      overflow: "hidden",
+                      display: "-webkit-box",
+                      WebkitLineClamp: 2,
+                      WebkitBoxOrient: "vertical",
+                    }}
+                  >
                     {mode.desc}
                   </p>
-                  {mode.id === "showdown" && (
-                    <div style={{ marginTop: 14 }}>
+                  {(!mapEditorPick && mode.id === "showdown") && (
+                    <div style={{ marginTop: 10, flexShrink: 0 }}>
                       <div style={{ fontSize: 11, color: "rgba(255,255,255,0.5)", marginBottom: 8, letterSpacing: 1.2, fontWeight: 700 }}>
-                        ФОРМАТ БОЯ
+                        {t("mode.format.battle")}
                       </div>
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                         {(
                           [
-                            { id: "solo", label: "Одиночное", players: "10 игроков" },
-                            { id: "duo", label: "Парное", players: "5 команд (2x5)" },
-                            { id: "trio", label: "Тройное", players: "4 команды (3x4)" },
+                            { id: "solo", label: t("mode.format.solo"), players: t("mode.format.soloPlayers") },
+                            { id: "duo", label: t("mode.format.duo"), players: t("mode.format.duoPlayers") },
+                            { id: "trio", label: t("mode.format.trio"), players: t("mode.format.trioPlayers") },
                           ] as const
                         ).map((f) => {
                           const active = effectiveShowdownFormat === f.id;
@@ -458,14 +710,13 @@ export default function ModeSelect({ onSelect, selectedShowdownFormat, selectedS
                                 setShowdownFormat(f.id);
                               }}
                               style={{
-                                background: active ? "rgba(255,82,82,0.22)" : "rgba(255,255,255,0.06)",
-                                border: `1px solid ${active ? "#FF5252" : "rgba(255,255,255,0.16)"}`,
-                                borderRadius: 10,
-                                color: active ? "#FF9E9E" : "rgba(255,255,255,0.7)",
                                 padding: "6px 10px",
                                 fontSize: 11,
                                 fontWeight: 800,
                                 cursor: "pointer",
+                                ["--ui-shear-fill" as string]: active ? "rgba(255,82,82,0.28)" : "rgba(255,255,255,0.06)",
+                                ["--ui-shear-border" as string]: active ? "#FF5252" : "rgba(255,255,255,0.16)",
+                                ["--ui-shear-text" as string]: active ? "#ffffff" : "rgba(255,255,255,0.85)",
                               }}
                               title={f.players}
                             >
@@ -476,16 +727,16 @@ export default function ModeSelect({ onSelect, selectedShowdownFormat, selectedS
                       </div>
                     </div>
                   )}
-                  {mode.id === "starstrike" && (
-                    <div style={{ marginTop: 14 }}>
+                  {(!mapEditorPick && mode.id === "starstrike") && (
+                    <div style={{ marginTop: 10, flexShrink: 0 }}>
                       <div style={{ fontSize: 11, color: "rgba(255,255,255,0.5)", marginBottom: 8, letterSpacing: 1.2, fontWeight: 700 }}>
-                        ФОРМАТ КОМАНД
+                        {t("mode.format.team")}
                       </div>
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                         {(
                           [
-                            { id: "3v3", label: "3 на 3" },
-                            { id: "5v5", label: "5 на 5" },
+                            { id: "3v3", label: t("mode.format.3v3") },
+                            { id: "5v5", label: t("mode.format.5v5") },
                           ] as const
                         ).map((f) => {
                           const active = starStrikeFormat === f.id;
@@ -497,14 +748,13 @@ export default function ModeSelect({ onSelect, selectedShowdownFormat, selectedS
                                 setStarStrikeFormat(f.id);
                               }}
                               style={{
-                                background: active ? "rgba(102,187,106,0.24)" : "rgba(255,255,255,0.06)",
-                                border: `1px solid ${active ? "#66BB6A" : "rgba(255,255,255,0.16)"}`,
-                                borderRadius: 10,
-                                color: active ? "#B9F6CA" : "rgba(255,255,255,0.7)",
                                 padding: "6px 10px",
                                 fontSize: 11,
                                 fontWeight: 800,
                                 cursor: "pointer",
+                                ["--ui-shear-fill" as string]: active ? "rgba(102,187,106,0.28)" : "rgba(255,255,255,0.06)",
+                                ["--ui-shear-border" as string]: active ? "#66BB6A" : "rgba(255,255,255,0.16)",
+                                ["--ui-shear-text" as string]: active ? "#ffffff" : "rgba(255,255,255,0.85)",
                               }}
                             >
                               {f.label}
@@ -515,58 +765,174 @@ export default function ModeSelect({ onSelect, selectedShowdownFormat, selectedS
                     </div>
                   )}
 
-                  {locked ? (
+                  {(!mapEditorPick && mode.id === "siege") && (
+                    <div style={{ marginTop: 8, flex: 1, minHeight: 0, overflow: "hidden" }}>
+                      <SiegeLevelPanel compact />
+                    </div>
+                  )}
+
+                  {locked && (
                     <div
                       style={{
-                        marginTop: 20,
+                        marginTop: "auto",
+                        flexShrink: 0,
                         background: "rgba(0,0,0,0.45)",
                         border: "1px solid rgba(255,255,255,0.18)",
                         borderRadius: 10,
-                        padding: "10px 20px",
+                        padding: "8px 12px",
                         color: "#FFD54F",
                         fontWeight: 800,
-                        fontSize: 12,
+                        fontSize: 11,
                         letterSpacing: 0.5,
                         textAlign: "center",
                       }}
                     >
-                      🔒 Нужно 3 бойца (у вас {ownedCount})
+                      {t("mode.locked", { count: ownedCount })}
                     </div>
-                  ) : (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (mode.id === "showdown") {
-                          onSelect(mode.id, effectiveShowdownFormat);
-                        } else if (mode.id === "starstrike") {
-                          onSelect(mode.id, undefined, starStrikeFormat);
-                        } else {
-                          onSelect(mode.id);
-                        }
-                      }}
+                  )}
+                  </div>
+                  {showNew && editorMode && (
+                    <div
+                      role="presentation"
+                      onClick={(e) => { e.stopPropagation(); handleNewMap(mode.id, editorMode); }}
                       style={{
-                        marginTop: 20,
-                        background: mode.gradient,
-                        border: "none",
-                        borderRadius: 10,
-                        padding: "10px 24px",
-                        color: "white",
-                        fontWeight: 800,
-                        fontSize: 14,
+                        position: "absolute",
+                        inset: 0,
+                        borderRadius: "var(--r-xl)",
+                        background: "linear-gradient(155deg, rgba(255,244,117,0.96) 0%, rgba(255,213,0,0.98) 45%, rgba(255,193,7,0.96) 100%)",
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: 8,
                         cursor: "pointer",
-                        letterSpacing: 1,
+                        zIndex: 5,
+                        animation: "newMapPulse 2.2s ease-in-out infinite",
                       }}
                     >
-                      СТАРТ
-                    </button>
+                      <span style={{
+                        fontSize: 32,
+                        fontWeight: 900,
+                        letterSpacing: 4,
+                        color: "#fff",
+                        textShadow: "0 2px 10px rgba(255,152,0,0.85), 0 0 20px rgba(255,255,255,0.5)",
+                      }}>
+                        {t("common.new")}
+                      </span>
+                      <span style={{ fontSize: 22, lineHeight: 1, filter: "drop-shadow(0 0 8px rgba(255,255,255,0.9))" }}>✨✨✨</span>
+                      {activeMap && (
+                        <MapThumbCanvas map={activeMap} size={88} borderColor="rgba(255,255,255,0.55)" />
+                      )}
+                      {activeMap && (
+                        <span style={{
+                          fontSize: 12,
+                          fontWeight: 800,
+                          color: "#fff",
+                          textShadow: "0 1px 6px rgba(255,120,0,0.7)",
+                        }}>
+                          {activeMap.name}
+                        </span>
+                      )}
+                    </div>
                   )}
                 </div>
               );
             })}
+            </div>
           </div>
-        ) : onBossRaidLobbyPick ? (
-          <BossRaidLobbyCarousel onSelectBoss={onBossRaidLobbyPick} />
+        ) : (onBossRaidLobbyPick || mapEditorPick) ? (
+          <div
+            style={{
+              flex: 1,
+              minHeight: 0,
+              width: "100%",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <BossRaidLobbyCarousel
+              onSelectBoss={(bossId) => {
+                if (mapEditorPick) mapEditorPick("bossraid");
+                else onBossRaidLobbyPick?.(bossId);
+              }}
+            />
+          </div>
         ) : null}
+        </PageBody>
+      </div>
+
+      {passFlyJobs.map(job => (
+        <PassXpFlyBurst
+          key={job.id}
+          count={job.count}
+          fromEl={modeCardRefs.current[job.modeId]}
+          toEl={passTargetRef.current}
+          spawnDurationMs={1200}
+          onComplete={() => setPassFlyJobs(jobs => jobs.filter(j => j.id !== job.id))}
+        />
+      ))}
+    </PageBg>
+  );
+}
+
+function RankedModeCard({
+  profile,
+  onSelect,
+}: {
+  profile: ReturnType<typeof getCurrentProfile>;
+  onSelect: () => void;
+}) {
+  const { t } = useI18n();
+  const cups = profile ? getProfileRankedCups(profile) : 0;
+  const standing = rankedStandingFromTotalCups(cups);
+  const league = standing.leagueId;
+  return (
+    <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onSelect}
+        onKeyDown={e => { if (e.key === "Enter") onSelect(); }}
+        className="ui-card"
+        style={{
+          width: RANKED_MODE_CARD_W,
+          height: REGULAR_MODE_CARD_H,
+          display: "flex",
+          flexDirection: "row",
+          alignItems: "stretch",
+          padding: 0,
+          overflow: "hidden",
+          cursor: "pointer",
+          border: "2px solid rgba(206,147,216,0.55)",
+          borderRadius: "var(--r-xl)",
+          background: "linear-gradient(160deg, rgba(126,87,194,0.35), rgba(8,4,24,0.82))",
+          boxShadow: "0 16px 48px rgba(126,87,194,0.35)",
+        }}
+      >
+        <div style={{ flex: 1, padding: 20, display: "flex", flexDirection: "column", justifyContent: "center" }}>
+          <img src={getModeIconUrl("ranked")} alt="" className="ui-game-icon" style={{ width: 72, height: 72, objectFit: "contain", marginBottom: 12 }} />
+          <div style={{ fontSize: 22, fontWeight: 900, color: "#CE93D8" }}>{t("ranked.modeName")}</div>
+          <div style={{ fontSize: 12, color: "rgba(255,255,255,0.55)", marginTop: 8, lineHeight: 1.35 }}>{t("ranked.modeDesc")}</div>
+          <div style={{ fontSize: 11, fontWeight: 800, color: "#FFD54F", marginTop: 12 }}>{t("ranked.tapToSelect")}</div>
+        </div>
+        <div style={{
+          width: 120,
+          flexShrink: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "transparent",
+          borderLeft: "1px solid rgba(255,255,255,0.1)",
+        }}>
+          <img
+            src={rankedLeagueIconUrl(league)}
+            alt=""
+            className="ui-game-icon ranked-league-icon"
+            style={{ width: 96, height: 96, objectFit: "contain", filter: "none" }}
+          />
+        </div>
       </div>
     </div>
   );

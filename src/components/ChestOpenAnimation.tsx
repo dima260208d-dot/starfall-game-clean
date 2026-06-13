@@ -8,6 +8,7 @@ import * as THREE from "three";
 import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
 import { CHESTS, type ChestRarity } from "../utils/chests";
 import { loadChestCached } from "./Chest3DViewer";
+import { useI18n, chestName } from "../i18n";
 
 const OPEN_DURATION = 1.8; // seconds for the full opening flash animation
 const SPIN_SPEED_IDLE = 0.6; // rad/s while idle
@@ -21,6 +22,7 @@ interface Props {
 }
 
 export default function ChestOpenAnimation({ rarity, onDone }: Props) {
+  const { t } = useI18n();
   const mountRef = useRef<HTMLDivElement>(null);
   const flashRef = useRef<HTMLDivElement>(null);
   const phaseRef = useRef<Phase>("ready");
@@ -194,7 +196,7 @@ export default function ChestOpenAnimation({ rarity, onDone }: Props) {
         textTransform: "uppercase",
         pointerEvents: "none",
       }}>
-        {def.name}
+        {chestName(rarity).toUpperCase()}
       </div>
 
       {/* Tap hint */}
@@ -204,21 +206,22 @@ export default function ChestOpenAnimation({ rarity, onDone }: Props) {
           bottom: "14%",
           textAlign: "center",
           fontFamily: "'Segoe UI', Arial, sans-serif",
-          fontWeight: 700,
-          fontSize: 18,
-          color: "rgba(255,255,255,0.75)",
+          fontWeight: 900,
+          fontSize: 22,
+          color: "#FFFFFF",
           letterSpacing: 2,
+          textShadow: "0 0 18px rgba(255,255,255,0.95), 0 2px 8px rgba(0,0,0,0.9), 0 0 32px rgba(255,213,79,0.65)",
           animation: "glowHintPulse 1.4s ease-in-out infinite",
           pointerEvents: "none",
         }}>
-          Нажмите, чтобы открыть
+          {t("common.tapToOpen")}
         </div>
       )}
 
       <style>{`
         @keyframes glowHintPulse {
-          0%, 100% { opacity: 0.6; transform: scale(1); }
-          50%       { opacity: 1;   transform: scale(1.04); }
+          0%, 100% { opacity: 0.88; transform: scale(1); }
+          50%       { opacity: 1;   transform: scale(1.05); }
         }
       `}</style>
     </div>

@@ -3,9 +3,19 @@
  * Updated from the effects tick; drawn in screen space before HUD.
  */
 
-/** Opaque screen reset — avoids clearRect + compositing hairlines (light band at top). */
+import { isBattle3DActive } from "./battle3DWorld";
+
+/**
+ * Opaque screen reset — avoids clearRect + compositing hairlines (light band at top).
+ * В 3D-режиме боя 2D-канвас работает прозрачным HUD-слоем поверх живой THREE-сцены,
+ * поэтому делаем чистый `clearRect`, а не заливку чёрным.
+ */
 export function fillBattleCanvasBg(ctx: CanvasRenderingContext2D): void {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
+  if (isBattle3DActive()) {
+    ctx.clearRect(0, 0, 1200, 800);
+    return;
+  }
   ctx.fillStyle = "#050508";
   ctx.fillRect(0, 0, 1200, 800);
 }

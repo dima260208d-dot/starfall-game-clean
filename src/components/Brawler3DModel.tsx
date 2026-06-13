@@ -1,9 +1,12 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
 import { fixCharacterSkinnedMeshes } from "../utils/gltfSkinnedMeshFix";
 import { applyGLTFTexturePolicy } from "../utils/texturePolicy";
+import { subscribeWebGLRemount } from "../utils/devWebGLRecovery";
+import { getPetUIPreview, getPetUIHeightScale, petIdFromModelUrl, sanitizePetClips } from "../game/pet3DRenderer";
+import { applyBrawlerNormTransform, computeBrawlerNormTransform } from "../game/brawler3DScale";
 
 interface Brawler3DModelProps {
   modelUrl: string;
@@ -15,6 +18,42 @@ interface Brawler3DModelProps {
   color: string;
   size?: number;
   autoRotateInitial?: boolean;
+  /** Upper bound for `renderer.setPixelRatio` (default 2). Use 1 in dense UIs. */
+  pixelRatioCap?: number;
+  /** Меньше нагрузка на GPU: без MSAA, low-power контекст — для превью в списках. */
+  efficientPreview?: boolean;
+  /** Остановить цикл рендера (один кадр) — когда поверх открыт popup. */
+  paused?: boolean;
+  /** Цветное свечение за моделью (по умолчанию включено). */
+  showBackdrop?: boolean;
+  /** После ручного вращения — через N мс плавно вернуть в исходный yaw (0). */
+  snapBackAfterDragMs?: number;
+  /** Проигрывать анимацию (false — статичная поза, рендер и вращение работают). */
+  animationActive?: boolean;
+  /** Canvas шире layout-размера — запас при вращении, модель того же визуального размера. */
+  clipPadding?: number;
+  /** Клик без перетаскивания. */
+  onTap?: () => void;
+}
+
+function shortestYawDelta(from: number, to: number): number {
+  let d = to - from;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+
+function safeRender(
+  renderer: THREE.WebGLRenderer | undefined,
+  scene: THREE.Scene | undefined,
+  camera: THREE.Camera | undefined,
+): void {
+  if (!renderer || !scene || !camera || !renderer.info) return;
+  try {
+    renderer.render(scene, camera);
+  } catch {
+    /* disposed or lost WebGL context */
+  }
 }
 
 // ── GLTF cache ────────────────────────────────────────────────────────────────
@@ -26,11 +65,21 @@ interface CachedGLTF {
   scene: THREE.Group;
   animations: THREE.AnimationClip[];
   normScale: number;
+  normScaleY: number;
   normOffX: number;
   normOffY: number;
   normOffZ: number;
 }
 const gltfCache = new Map<string, Promise<CachedGLTF>>();
+
+export function invalidateBrawler3DGltfCache(): void {
+  gltfCache.clear();
+}
+
+/** Warm GLB cache before intro/result cards mount. */
+export function preloadBrawlerGltfUrl(url: string): Promise<CachedGLTF> {
+  return loadGLTFCached(url);
+}
 
 function loadGLTFCached(url: string): Promise<CachedGLTF> {
   const hit = gltfCache.get(url);
@@ -41,20 +90,31 @@ function loadGLTFCached(url: string): Promise<CachedGLTF> {
       fixMaterials(scene);
       fixCharacterSkinnedMeshes(scene);
 
-      // Compute normalisation from the original scene (correct for skinned meshes).
+      const TARGET_H = 2.2;
+      const isPetModel = url.includes("/models/pets/");
+      const animations = isPetModel
+        ? sanitizePetClips(gltf.animations ?? [])
+        : (gltf.animations ?? []);
+
+      if (isPetModel) {
+        const petId = petIdFromModelUrl(url) ?? "";
+        const uiTargetH = TARGET_H * getPetUIHeightScale(petId);
+        resolve({ scene, animations, ...computeBrawlerNormTransform(scene, uiTargetH, url) });
+        return;
+      }
+
+      // Бойцы — оригинальная нормализация (не трогать: иначе съезжает в меню).
       const box = new THREE.Box3().setFromObject(scene);
       const sz = new THREE.Vector3();
       box.getSize(sz);
       const center = new THREE.Vector3();
       box.getCenter(center);
-      const TARGET_H = 2.2;
       const normScale = sz.y > 0.001 ? TARGET_H / sz.y : 1;
-
-      const animations = gltf.animations ?? [];
       resolve({
         scene,
         animations,
         normScale,
+        normScaleY: normScale,
         normOffX: -center.x * normScale,
         normOffY: -box.min.y * normScale,
         normOffZ: -center.z * normScale,
@@ -67,6 +127,12 @@ function loadGLTFCached(url: string): Promise<CachedGLTF> {
   });
   gltfCache.set(url, p);
   return p;
+}
+
+/** Список имён клипов из кэша GLTF (для превью в админке). */
+export async function getGltfAnimationNames(url: string): Promise<string[]> {
+  const cached = await loadGLTFCached(url);
+  return cached.animations.map(c => c.name);
 }
 
 // ── Material fix ──────────────────────────────────────────────────────────────
@@ -105,7 +171,7 @@ function resolveClip(
 ): THREE.AnimationClip | null {
   if (!clips.length) return null;
   // 1. Direct index
-  if (idx !== undefined && clips[idx]) return clips[idx];
+  if (idx !== undefined && clips[idx] && clips[idx].name === requested) return clips[idx];
   // 2. Exact name
   const exact = clips.find(c => c.name === requested);
   if (exact) return exact;
@@ -120,6 +186,30 @@ function resolveClip(
   return clips[0];
 }
 
+function frameCameraOnModel(
+  camera: THREE.PerspectiveCamera,
+  model: THREE.Object3D,
+  distanceMult = 2.55,
+  lookAtDy = 0,
+  heightMargin = 1,
+  bboxPadTop = 0,
+) {
+  const box = new THREE.Box3().setFromObject(model);
+  if (bboxPadTop > 0) box.max.y += bboxPadTop;
+  const center = new THREE.Vector3();
+  const sz = new THREE.Vector3();
+  box.getCenter(center);
+  box.getSize(sz);
+  const lookY = center.y + lookAtDy;
+  const vFov = (camera.fov * Math.PI) / 180;
+  const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+  const distY = (sz.y * heightMargin) / (2 * Math.tan(vFov / 2));
+  const distX = (Math.max(sz.x, sz.z) * 1.06) / (2 * Math.tan(hFov / 2));
+  const dist = Math.max(distY, distX) * (distanceMult / 2.55);
+  camera.lookAt(center.x, lookY, center.z);
+  camera.position.set(center.x, lookY, center.z + dist);
+}
+
 /**
  * Standalone 3D model viewer for menu / collection screens. The user looks at
  * the brawler "head-on" and can drag horizontally to spin the model 360°.
@@ -132,8 +222,25 @@ export default function Brawler3DModel({
   color,
   size = 320,
   autoRotateInitial = false,
+  pixelRatioCap = 2,
+  efficientPreview = false,
+  paused = false,
+  showBackdrop = true,
+  snapBackAfterDragMs,
+  animationActive = true,
+  clipPadding = 1,
+  onTap,
 }: Brawler3DModelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const [remountEpoch, setRemountEpoch] = useState(0);
+  const pad = Math.max(1, clipPadding);
+  const layoutSize = size;
+  const renderSize = Math.round(size * pad);
+  const isPetModel = modelUrl.includes("/models/pets/");
+  const frameCameraMult = 2.55 * (layoutSize / renderSize);
+
+  useEffect(() => subscribeWebGLRemount(() => setRemountEpoch((e) => e + 1)), []);
+
   const stateRef = useRef<{
     renderer?: THREE.WebGLRenderer;
     scene?: THREE.Scene;
@@ -149,6 +256,10 @@ export default function Brawler3DModel({
     dragStartYaw: number;
     raf: number;
     lastTs: number;
+    frameSkip: number;
+    snapTimer: ReturnType<typeof setTimeout> | null;
+    snapping: boolean;
+    dragMoved: boolean;
   }>({
     yaw: 0,
     autoRotate: autoRotateInitial,
@@ -157,7 +268,25 @@ export default function Brawler3DModel({
     dragStartYaw: 0,
     raf: 0,
     lastTs: 0,
+    frameSkip: 0,
+    snapTimer: null,
+    snapping: false,
+    dragMoved: false,
   });
+
+  const snapBackMsRef = useRef(snapBackAfterDragMs);
+  snapBackMsRef.current = snapBackAfterDragMs;
+  const onTapRef = useRef(onTap);
+  onTapRef.current = onTap;
+  const renderSizeRef = useRef(renderSize);
+  renderSizeRef.current = renderSize;
+
+  const pausedRef = useRef(paused);
+  pausedRef.current = paused;
+  const animationActiveRef = useRef(animationActive);
+  animationActiveRef.current = animationActive;
+  const efficientPreviewRef = useRef(efficientPreview);
+  efficientPreviewRef.current = efficientPreview;
 
   // ---------------- One-time scene setup ----------------
   useEffect(() => {
@@ -166,13 +295,18 @@ export default function Brawler3DModel({
 
     let renderer: THREE.WebGLRenderer;
     try {
-      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer = new THREE.WebGLRenderer({
+        antialias: !efficientPreview,
+        alpha: true,
+        powerPreference: efficientPreview ? "low-power" : "default",
+      });
     } catch (err) {
       console.warn("[Brawler3DModel] WebGL unavailable, skipping", err);
       return;
     }
-    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
-    renderer.setSize(size, size, false);
+    renderer.setPixelRatio(Math.min(pixelRatioCap, window.devicePixelRatio || 1));
+    renderer.setSize(renderSizeRef.current, renderSizeRef.current, false);
+    renderer.setClearColor(0x000000, 0);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(renderer.domElement);
 
@@ -199,14 +333,33 @@ export default function Brawler3DModel({
 
     // ---------------- Load GLB (cached) ----------------
     let cancelled = false;
+    let disposed = false;
     loadGLTFCached(modelUrl).then((cached) => {
-      if (cancelled) return;
+      if (cancelled || disposed) return;
 
       // Clone the cached scene — scale/offset already computed at load time.
       const model = cloneSkinned(cached.scene) as THREE.Group;
       fixMaterials(model);
-      model.scale.setScalar(cached.normScale);
-      model.position.set(cached.normOffX, cached.normOffY, cached.normOffZ);
+      if (modelUrl.includes("/models/pets/")) {
+        model.traverse((obj) => {
+          const mesh = obj as THREE.Mesh;
+          if (!mesh.isMesh) return;
+          if (Array.isArray(mesh.material)) {
+            mesh.material = mesh.material.map((m) => m.clone());
+          } else if (mesh.material) {
+            mesh.material = mesh.material.clone();
+          }
+        });
+        applyGLTFTexturePolicy(model, null);
+      }
+      if (isPetModel) {
+        applyBrawlerNormTransform(model, cached);
+        const tune = getPetUIPreview(petIdFromModelUrl(modelUrl) ?? "");
+        if (tune.modelYOffset) model.position.y += tune.modelYOffset;
+      } else {
+        model.scale.setScalar(cached.normScale);
+        model.position.set(cached.normOffX, cached.normOffY, cached.normOffZ);
+      }
 
       rootGroup.add(model);
 
@@ -214,30 +367,89 @@ export default function Brawler3DModel({
       stateRef.current.mixer = mixer;
       stateRef.current.clips = cached.animations;
       playClip(animation, animationIdx);
+      mixer.update(1 / 60);
+
+      if (isPetModel && pad > 1) {
+        const tune = getPetUIPreview(petIdFromModelUrl(modelUrl) ?? "");
+        frameCameraOnModel(
+          camera,
+          model,
+          frameCameraMult * (tune.cameraMult ?? 1),
+          tune.lookAtDy ?? 0,
+          tune.heightMargin ?? 1.06,
+          tune.bboxPadTop ?? 0,
+        );
+        safeRender(renderer, scene, camera);
+      }
     }).catch(() => {
       console.warn("[Brawler3DModel] failed to load", modelUrl);
     });
 
     // ---------------- Render loop ----------------
+    const simulateFrame = (dt: number) => {
+      const s = stateRef.current;
+      if (s.autoRotate && !s.dragging && !s.snapping) {
+        s.yaw += dt * 0.6;
+      }
+      if (s.snapping && !s.dragging) {
+        const delta = shortestYawDelta(s.yaw, 0);
+        if (Math.abs(delta) < 0.015) {
+          s.yaw = 0;
+          s.snapping = false;
+        } else {
+          s.yaw += delta * Math.min(1, dt * 4.5);
+        }
+      }
+      if (s.rootGroup) s.rootGroup.rotation.y = s.yaw;
+      if (s.mixer && animationActiveRef.current) s.mixer.update(dt);
+    };
+
+    const drawFrame = () => {
+      const s = stateRef.current;
+      if (disposed) return;
+      safeRender(s.renderer, s.scene, s.camera);
+    };
+
     const tick = (ts: number) => {
       const s = stateRef.current;
+      if (disposed || pausedRef.current) {
+        s.raf = 0;
+        return;
+      }
       const dt = s.lastTs ? Math.min(0.05, (ts - s.lastTs) / 1000) : 0;
       s.lastTs = ts;
 
-      if (s.autoRotate && !s.dragging) {
-        s.yaw += dt * 0.6;
-      }
-      if (s.rootGroup) s.rootGroup.rotation.y = s.yaw;
-      if (s.mixer) s.mixer.update(dt);
-      if (s.renderer && s.scene && s.camera) s.renderer.render(s.scene, s.camera);
+      simulateFrame(dt);
 
+      if (efficientPreviewRef.current) {
+        s.frameSkip = (s.frameSkip + 1) % 2;
+        if (s.frameSkip !== 0) {
+          s.raf = requestAnimationFrame(tick);
+          return;
+        }
+      }
+
+      drawFrame();
       s.raf = requestAnimationFrame(tick);
     };
     stateRef.current.raf = requestAnimationFrame(tick);
 
     return () => {
       cancelled = true;
+      disposed = true;
+      if (stateRef.current.snapTimer) clearTimeout(stateRef.current.snapTimer);
       cancelAnimationFrame(stateRef.current.raf);
+      stateRef.current.raf = 0;
+      stateRef.current.renderer = undefined;
+      stateRef.current.scene = undefined;
+      stateRef.current.camera = undefined;
+      try {
+        const gl = renderer.getContext();
+        const ext = gl.getExtension("WEBGL_lose_context");
+        ext?.loseContext();
+      } catch {
+        /* ignore */
+      }
       renderer.dispose();
       if (renderer.domElement.parentNode === container) {
         container.removeChild(renderer.domElement);
@@ -251,12 +463,62 @@ export default function Brawler3DModel({
       });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modelUrl, size]);
+  }, [modelUrl, remountEpoch]);
+
+  useEffect(() => {
+    const s = stateRef.current;
+    if (!s.renderer) return;
+    const cap = pixelRatioCap ?? 2;
+    s.renderer.setPixelRatio(Math.min(cap, window.devicePixelRatio || 1));
+    s.renderer.setSize(renderSize, renderSize, false);
+    safeRender(s.renderer, s.scene, s.camera);
+  }, [renderSize, pixelRatioCap]);
+
+  useEffect(() => {
+    const s = stateRef.current;
+    if (paused) {
+      if (s.raf) cancelAnimationFrame(s.raf);
+      s.raf = 0;
+      s.lastTs = 0;
+      safeRender(s.renderer, s.scene, s.camera);
+    } else if (!s.raf && s.renderer) {
+      const tick = (ts: number) => {
+        if (pausedRef.current) {
+          s.raf = 0;
+          return;
+        }
+        const dt = s.lastTs ? Math.min(0.05, (ts - s.lastTs) / 1000) : 0;
+        s.lastTs = ts;
+        if (s.autoRotate && !s.dragging && !s.snapping) s.yaw += dt * 0.6;
+        if (s.snapping && !s.dragging) {
+          const delta = shortestYawDelta(s.yaw, 0);
+          if (Math.abs(delta) < 0.015) {
+            s.yaw = 0;
+            s.snapping = false;
+          } else {
+            s.yaw += delta * Math.min(1, dt * 4.5);
+          }
+        }
+        if (s.rootGroup) s.rootGroup.rotation.y = s.yaw;
+        if (s.mixer && animationActiveRef.current) s.mixer.update(dt);
+        if (efficientPreviewRef.current) {
+          s.frameSkip = (s.frameSkip + 1) % 2;
+          if (s.frameSkip !== 0) {
+            s.raf = requestAnimationFrame(tick);
+            return;
+          }
+        }
+        safeRender(s.renderer, s.scene, s.camera);
+        s.raf = requestAnimationFrame(tick);
+      };
+      s.raf = requestAnimationFrame(tick);
+    }
+  }, [paused]);
 
   // ---------------- Animation switching ----------------
   const playClip = (name: string, idx?: number) => {
     const s = stateRef.current;
-    if (!s.mixer || !s.clips) return;
+    if (!s.mixer || !s.clips || !name) return;
     const clip = resolveClip(s.clips, name, idx);
 
     if (!clip) return;
@@ -277,50 +539,97 @@ export default function Brawler3DModel({
   }, [animation, animationIdx]);
 
   // ---------------- Pointer drag ----------------
+  const scheduleSnapBack = () => {
+    const s = stateRef.current;
+    const ms = snapBackMsRef.current;
+    if (!ms || Math.abs(s.yaw) < 0.015) return;
+    if (s.snapTimer) clearTimeout(s.snapTimer);
+    s.snapTimer = setTimeout(() => {
+      s.snapTimer = null;
+      if (!s.dragging && Math.abs(s.yaw) >= 0.015) s.snapping = true;
+    }, ms);
+  };
+
   const onPointerDown = (e: React.PointerEvent) => {
     const s = stateRef.current;
     s.dragging = true;
     s.autoRotate = false;
+    s.snapping = false;
+    s.dragMoved = false;
+    if (s.snapTimer) {
+      clearTimeout(s.snapTimer);
+      s.snapTimer = null;
+    }
     s.dragStartX = e.clientX;
     s.dragStartYaw = s.yaw;
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
   };
+  const drawNow = () => {
+    const s = stateRef.current;
+    safeRender(s.renderer, s.scene, s.camera);
+  };
+
   const onPointerMove = (e: React.PointerEvent) => {
     const s = stateRef.current;
     if (!s.dragging) return;
     const dx = e.clientX - s.dragStartX;
+    if (Math.abs(dx) > 2) s.dragMoved = true;
     s.yaw = s.dragStartYaw + dx * 0.012;
+    if (s.rootGroup) s.rootGroup.rotation.y = s.yaw;
+    drawNow();
   };
   const onPointerUp = (e: React.PointerEvent) => {
-    stateRef.current.dragging = false;
+    const s = stateRef.current;
+    const dragged = s.dragMoved;
+    s.dragging = false;
+    if (dragged) {
+      scheduleSnapBack();
+      e.stopPropagation();
+    } else if (onTapRef.current) {
+      e.stopPropagation();
+      onTapRef.current();
+    }
     try { (e.target as HTMLElement).releasePointerCapture(e.pointerId); } catch { /* */ }
   };
+
+  const useClipLayout = isPetModel && pad > 1;
+  const canvasBox: CSSProperties = useClipLayout ? {
+    position: "absolute",
+    width: renderSize,
+    height: renderSize,
+    left: "50%",
+    top: "50%",
+    transform: "translate(-50%, -50%)",
+  } : { width: "100%", height: "100%", position: "relative" };
 
   return (
     <div
       style={{
-        width: size,
-        height: size,
+        width: useClipLayout ? layoutSize : size,
+        height: useClipLayout ? layoutSize : size,
         position: "relative",
+        overflow: useClipLayout ? "visible" : undefined,
         userSelect: "none",
         touchAction: "none",
-        cursor: "grab",
+        cursor: onTap ? "pointer" : "grab",
       }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
-      onDoubleClick={() => { stateRef.current.autoRotate = !stateRef.current.autoRotate; }}
       title=""
     >
-      <div
-        style={{
-          position: "absolute", inset: 0, borderRadius: "50%",
-          background: `radial-gradient(circle at 50% 55%, ${color}55 0%, ${color}15 35%, transparent 70%)`,
-          filter: "blur(2px)", pointerEvents: "none",
-        }}
-      />
-      <div ref={containerRef} style={{ width: "100%", height: "100%", position: "relative" }} />
+      {showBackdrop && (
+        <div
+          style={{
+            ...(useClipLayout ? canvasBox : { position: "absolute", inset: 0 }),
+            borderRadius: "50%",
+            background: `radial-gradient(circle at 50% 55%, ${color}55 0%, ${color}15 35%, transparent 70%)`,
+            filter: "blur(2px)", pointerEvents: "none",
+          }}
+        />
+      )}
+      <div ref={containerRef} style={{ ...canvasBox, background: "transparent" }} />
     </div>
   );
 }

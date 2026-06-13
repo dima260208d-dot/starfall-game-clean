@@ -1,17 +1,109 @@
 import { BrawlerStats, getScaledStats } from "./BrawlerData";
 import { GameMap, collidesWithWalls, isInBush, isInRiver } from "../game/MapRenderer";
+import { collidesWithTileGrid, isTileInBush } from "../game/TileMap";
 import { Projectile, createProjectile } from "./Projectile";
 import { spawnDamageNumber } from "../utils/damageNumbers";
 import { spawnEffect, makeZigzag, spawnTaroTurretEffect } from "../utils/effects";
+import { spawnVerdelettaSuperShadows } from "../utils/verdelettaShadows";
+import { spawnLuminaDome } from "../utils/luminaMechanics";
+import { fireLuminaBeamAttack } from "../utils/luminaStars";
+import { spawnOliverBugSwarm } from "../utils/oliverBugs";
+import {
+  activateOliverReplicator,
+  oliverCanUseSuper,
+  recordEnemySuperForOlivers,
+} from "../utils/oliverMechanics";
+import {
+  callistaCanUseSuper,
+  launchCallistaFlask,
+  onCallistaSuperUsed,
+  resolveCallistaAutoAimFromUnits,
+} from "../utils/callistaMechanics";
+import {
+  activateAirinEvacuation,
+  airinEvacHasTargets,
+  launchAirinCapsule,
+  resolveAirinAutoAimFromUnits,
+} from "../utils/airinMechanics";
+import {
+  activateElianGravityAnomaly,
+  launchElianStarCharge,
+  resolveElianAutoAimFromUnits,
+} from "../utils/elianMechanics";
+import {
+  activateSilvenLifeTree,
+  launchSilvenIvyVine,
+  resolveSilvenAutoAimFromUnits,
+} from "../utils/silvenMechanics";
+import {
+  activateOctaviaTentacleTrap,
+  launchOctaviaInkOrb,
+  resolveOctaviaAutoAimFromUnits,
+} from "../utils/octaviaMechanics";
+import {
+  activateZephyrinGale,
+  isZephyrinInGale,
+  launchZephyrinTornado,
+  resolveZephyrinAutoAimFromUnits,
+} from "../utils/zephyrinMechanics";
+import {
+  activateMirabelAcceleratedLearning,
+  expandMirabelLearningVolley,
+  fireMirabelSparkAttack,
+  tickMirabelLearning,
+} from "../utils/mirabelMechanics";
+import {
+  activateVittoriaBloodMoon,
+  applyVittoriaLifesteal,
+  damageVittoriaCrates,
+  damageVittoriaShadowsInMeleeArc,
+  getVittoriaAttackRange,
+  getVittoriaBloodMoonSpeedMult,
+  getVittoriaOutgoingDamageMult,
+  getVittoriaVampireNightSpeedMult,
+  onVittoriaKill,
+  spawnVittoriaBiteVfx,
+} from "../utils/vittoriaMechanics";
+import { damageEnemyShadowsInMeleeArc } from "../utils/verdelettaShadows";
+import { damageDevMonstersInMeleeArc } from "../utils/devBattleMonsters";
+import { damageMeleeCratesInArc, damageCratesInRadius, type CrateDamageOpts } from "../utils/crateDamage";
 import { clamp, distance, angleTo } from "../utils/helpers";
-import { addMatchStat } from "../utils/matchStats";
+import { addMatchStat, addParticipantStat } from "../utils/matchStats";
+import { emitKillFeed } from "../utils/killFeed";
+
+function killFeedDisplayName(b: Brawler): string {
+  const custom = b.displayName?.trim();
+  if (custom) return custom;
+  if (b.isPlayer) return "Игрок";
+  return b.stats.name || "Бот";
+}
+
+function tryEmitKillFeed(victim: Brawler, killer: Brawler | null | undefined): void {
+  if (!killer || killer.id === victim.id || killer.team === victim.team) return;
+  emitKillFeed({
+    killerBrawlerId: killer.stats.id,
+    killerName: killFeedDisplayName(killer),
+    victimBrawlerId: victim.stats.id,
+    victimName: killFeedDisplayName(victim),
+    killerTeam: killer.team,
+    killerIsPlayer: killer.isPlayer,
+  });
+}
 import { setRenderersBase, getCharRenderer, CHAR_3D_IDS, type CharAnim } from "../game/miyaTopDownRenderer";
 import { drawBrawlerImage } from "../game/sprites";
+import { isBattle3DActive } from "../game/battle3DWorld";
 import type { PetDef } from "./PetData";
-import { renderPet } from "./PetRenderer";
 import { getGemCanvas } from "../utils/powerModelCache";
 import { flashPlayerDamage } from "../game/battleScreenFX";
-import { BRAWLER_DRAW_SCALE } from "../game/battleVisualScale";
+import {
+  BRAWLER_DRAW_SCALE,
+  brawlerFootWorldDy,
+  BRAWLER_FLOOR_HALO_RX_FRAC,
+  BRAWLER_FLOOR_HALO_RX_FRAC_WIDE_HITBOX,
+  BRAWLER_FLOOR_HALO_RY_OVER_RX,
+  BRAWLER_FLOOR_HALO_ROT,
+  WIDE_HITBOX_RADIUS_THRESHOLD,
+} from "../game/battleVisualScale";
 
 // Record the base URL so lazy renderers know where to find the GLBs.
 // Models are loaded on-demand the first time a character is rendered in-battle.
@@ -22,7 +114,7 @@ if (typeof window !== "undefined") {
 export type Team = string;
 
 export interface StatusEffect {
-  type: "slow" | "poison" | "stun" | "berserker" | "vulnerable";
+  type: "slow" | "poison" | "stun" | "root" | "berserker" | "vulnerable" | "hellBrand" | "speedBoost" | "smokeBlind" | "allyBlind" | "bloodMoon" | "vampireNight" | "zephyrinGale";
   duration: number;
   value: number;
 }
@@ -84,8 +176,14 @@ export class Brawler {
   private _smoothMoveAngle = 0;
   
   inBush = false;
+  /** Octavia ink cloud — allies hidden from enemies like bushes. */
+  inOctaviaInk = false;
+  inZephyrinGale = false;
   inRiver = false;
   bushRevealTimer = 0; // > 0 while briefly visible after attacking from a bush
+
+  /** Last `move()` delta along world +Y (down). Negative = walked north (e.g. toward a wall from below). */
+  protected _lastWorldMoveDy = 0;
   
   turret: Brawler | null = null;
   /** Stable id for deployables (Taro turret). In Mega equals squad slot so switching brawler does not orphan turrets. */
@@ -111,20 +209,41 @@ export class Brawler {
   posHistory: Array<{ x: number; y: number }> = [];
   private _posHistoryTimer: number = 0;
 
+  // ── Battle pin (emote bubble, synced via BattlePinHud overlay) ───────────
+  battlePin?: { pinId: string; expiresAt: number };
+
   // ── Per-mode badge (e.g. crystals carried, power cubes) ──────────────────
   // Set by game modes each frame; rendered above the name label.
   crystalCount: number = 0;
+
+  // ── Bounty / «Охота за звёздами» ─────────────────────────────────────────
+  // Current star count carried by this brawler (1..6). At spawn = 1.
+  // Killing this brawler awards `bountyStars` (min 1) to the killer's team.
+  bountyStars: number = 1;
+  // Last enemy who damaged this brawler — used to attribute kills in modes
+  // like bounty / starhunt without changing the global takeDamage signature.
+  lastAttacker: Brawler | null = null;
 
   // ── Equipped pet & its per-match runtime state ──────────────────────────
   // Set on the local player at battle start. Bots also receive a random pet
   // (see Bot constructor) so the battlefield feels populated with companions.
   equippedPet: PetDef | null = null;
+  /** Custom nickname shown above the pet follower (player-set). */
+  petCustomName: string | null = null;
   petHealTimer: number = 0;
   petShieldTimer: number = 0;
   petPhoenixUsed: boolean = false;
-  // Smooth follower position (lerps toward a point behind the brawler).
+  // Smooth follower position (lerps toward left side when idle, behind when moving).
   petFollowX: number = 0;
   petFollowY: number = 0;
+  /** Smoothed owner movement — drives pet idle/run in 3D battle (not pet velocity). */
+  petOwnerMovingSmoothed: number = 0;
+  /** Set in move() when joystick/input is active this frame. */
+  petOwnerHasMoveInput: boolean = false;
+  private _petOwnerSampleX: number = NaN;
+  private _petOwnerSampleY: number = NaN;
+  /** Seconds left for 3D effect animation (heal/shield/revive/etc.). */
+  petEffectPulse: number = 0;
   // Animation state for the in-battle pet renderer.
   private _petPrevX: number = 0;
   private _petPrevY: number = 0;
@@ -137,6 +256,26 @@ export class Brawler {
   // Temporary absorb shield used by specific constellation effects.
   tempShieldHp: number = 0;
   tempShieldTimer: number = 0;
+
+  // ── Oliver «Репликатор» ─────────────────────────────────────────────────
+  oliverMemories: Array<{ brawlerId: string; targetX?: number; targetY?: number; angle: number }> = [];
+  oliverMemoryPick = 0;
+  oliverSuperLockTimer = 0;
+  oliverBonusSuperReady = false;
+  oliverBonusSuperArmed = false;
+  oliverBonusSuperTimer = 0;
+  oliverBonusSuperUsed = false;
+
+  // ── Callista «Взрывная смесь» ───────────────────────────────────────────
+  callistaBonusSuperReady = false;
+
+  // ── Mirabel «Ускоренное обучение» ───────────────────────────────────────
+  mirabelLearningAttacksLeft = 0;
+  mirabelLearningTimer = 0;
+  mirabelLearningDamageMult = 1;
+
+  // ── Airin «Тень пилота» ─────────────────────────────────────────────────
+  airinPilotShadowTimer = 0;
 
   constructor(stats: BrawlerStats, level: number, x: number, y: number, team: Team, isPlayer = false) {
     this.id = `brawler_${Math.random().toString(36).slice(2)}`;
@@ -181,13 +320,18 @@ export class Brawler {
 
   /** Equip a pet for this match. Resets per-match runtime state.
    *  Pass null to clear. */
-  setEquippedPet(pet: PetDef | null): void {
+  setEquippedPet(pet: PetDef | null, customName?: string | null): void {
     this.equippedPet = pet;
+    this.petCustomName = customName?.trim() || null;
     this.petHealTimer = 0;
     this.petShieldTimer = 0;
     this.petPhoenixUsed = false;
     this.petFollowX = this.x - 32;
     this.petFollowY = this.y + 14;
+    this.petEffectPulse = 0;
+    this.petOwnerMovingSmoothed = 0;
+    this._petOwnerSampleX = this.x;
+    this._petOwnerSampleY = this.y;
   }
 
   /**
@@ -236,25 +380,26 @@ export class Brawler {
 
     this.hitFlash = 0;
     this.healGlowTimer = 0;
+    this.tempShieldHp = 0;
+    this.tempShieldTimer = 0;
+    this.invulnerable = false;
+    this.invulnerableTimer = 0;
     this.grantSpawnShield(3);
   }
 
-  /** Grant a damage-immunity bubble for `seconds` and spawn its visual ring. */
+  /** Полная неуязвимость на `seconds`; купол создаётся в `syncSpawnImmunityDome`. */
   grantSpawnShield(seconds: number): void {
     this.invulnerable = true;
-    this.invulnerableTimer = seconds;
-    spawnEffect({
-      kind: "shieldDome",
-      x: this.x, y: this.y,
-      radius: this.radius + 14,
-      color: "#80D8FF",
-      timer: seconds, maxTimer: seconds,
-      followBrawler: this,
-    });
+    this.invulnerableTimer = Math.max(this.invulnerableTimer, seconds);
   }
 
   get scaledDamage(): number {
     return getScaledStats(this.stats, this.level).attackDamage * (1 + this.powerCubes * 0.1);
+  }
+
+  /** Passive regen scales with brawler level and power cubes (+10% per cube, same as damage). */
+  get scaledRegenRate(): number {
+    return getScaledStats(this.stats, this.level).regenRate * (1 + this.powerCubes * 0.1);
   }
   
   collectPowerCube(): void {
@@ -272,10 +417,14 @@ export class Brawler {
     
     this.animFrame += dt * 60;
     if (this.attackAnim > 0) {
-      this.attackAnim -= dt * 3;
+      const decay = this.stats.id === "lumina" ? 1.75 : 3;
+      this.attackAnim -= dt * decay;
       if (this.attackAnim <= 0) this.isAttacking = false;
     }
-    if (this.superAnim > 0) this.superAnim -= dt * 2;
+    if (this.superAnim > 0) {
+      const superDecay = this.stats.id === "lumina" ? 1.15 : 2;
+      this.superAnim -= dt * superDecay;
+    }
     
     if (this.hitFlash > 0) this.hitFlash -= dt * 3;
     if (this.healGlowTimer > 0) this.healGlowTimer = Math.max(0, this.healGlowTimer - dt * 2.4);
@@ -294,6 +443,8 @@ export class Brawler {
         this.statusEffects.splice(i, 1);
       }
     }
+
+    tickMirabelLearning(this, dt);
 
     if (this.attackCooldownTimer > 0) {
       this.attackCooldownTimer -= dt;
@@ -315,7 +466,7 @@ export class Brawler {
       !this.isAttacking &&
       this.hp < this.maxHp
     ) {
-      this.hp = Math.min(this.maxHp, this.hp + this.stats.regenRate * dt);
+      this.hp = Math.min(this.maxHp, this.hp + this.scaledRegenRate * dt);
     }
 
     // Track position history for temporal-rewind effect (Zafkiel Dalet / super)
@@ -326,17 +477,30 @@ export class Brawler {
       if (this.posHistory.length > 10) this.posHistory.shift(); // keep ~2s
     }
 
-    this.inBush = isInBush(this.x, this.y, map.bushes);
+    this.inBush = map.tileGrid
+      ? isTileInBush(this.x, this.y, map.tileGrid)
+      : isInBush(this.x, this.y, map.bushes);
     this.inRiver = isInRiver(this.x, this.y, map.rivers);
     if (this.tempShieldTimer > 0) {
       this.tempShieldTimer -= dt;
-      if (this.tempShieldTimer <= 0) this.tempShieldHp = 0;
+      if (this.tempShieldTimer <= 0) {
+        this.tempShieldHp = 0;
+        this.tempShieldTimer = 0;
+      }
+    } else if (this.tempShieldHp > 0) {
+      this.tempShieldHp = 0;
     }
 
-    const result = collidesWithWalls(this.x, this.y, this.radius, map.walls);
-    if (result.collides) {
-      this.x = clamp(result.nx, this.radius, map.width - this.radius);
-      this.y = clamp(result.ny, this.radius, map.height - this.radius);
+    const wallResult = map.tileGrid
+      ? collidesWithTileGrid(this.x, this.y, this.radius, map.tileGrid, {
+          circleWorldDy: this._lastWorldMoveDy < -1e-6
+            ? brawlerFootWorldDy(this.stats.id, this.radius)
+            : 0,
+        })
+      : collidesWithWalls(this.x, this.y, this.radius, map.walls);
+    if (wallResult.collides) {
+      this.x = clamp(wallResult.nx, this.radius, map.width - this.radius);
+      this.y = clamp(wallResult.ny, this.radius, map.height - this.radius);
     }
 
     this.x = clamp(this.x, this.radius, map.width - this.radius);
@@ -347,16 +511,32 @@ export class Brawler {
     let dAng = this.moveAngle - this._smoothMoveAngle;
     while (dAng > Math.PI) dAng -= 2 * Math.PI;
     while (dAng < -Math.PI) dAng += 2 * Math.PI;
-    this._smoothMoveAngle += dAng * Math.min(1, rdt * 14);
+    const turnLerp = this.isPlayer ? 14 : 7;
+    this._smoothMoveAngle += dAng * Math.min(1, rdt * turnLerp);
 
     // ── Pet effect ticks (heal pulse, periodic shield) ──────────────────
     if (this.equippedPet) {
+      if (this.petEffectPulse > 0) this.petEffectPulse = Math.max(0, this.petEffectPulse - dt);
       const eff = this.equippedPet.effect;
-      // Smoothly trail behind and slightly above the player so all of the
-      // pet's body — wings, ears, tail — stays clear of the brawler sprite.
-      const targetAngle = this.moveAngle + Math.PI; // behind facing direction
-      const tx = this.x + Math.cos(targetAngle) * 46;
-      const ty = this.y + Math.sin(targetAngle) * 30 - 4;
+      if (!Number.isFinite(this._petOwnerSampleX)) {
+        this._petOwnerSampleX = this.x;
+        this._petOwnerSampleY = this.y;
+      }
+      const inputMoving = this.petOwnerHasMoveInput ? 1 : 0;
+      if (inputMoving) {
+        this.petOwnerMovingSmoothed = Math.min(1, this.petOwnerMovingSmoothed * 0.35 + 0.65);
+      } else {
+        this.petOwnerMovingSmoothed *= 0.5;
+      }
+      this._petOwnerSampleX = this.x;
+      this._petOwnerSampleY = this.y;
+
+      const ownerStopped = !this.petOwnerHasMoveInput && this.petOwnerMovingSmoothed < 0.25;
+      const face = this._smoothMoveAngle;
+      // Idle: left flank. Moving: trail behind so wings/tail stay clear of the brawler.
+      const targetAngle = face + (ownerStopped ? -Math.PI / 2 : Math.PI);
+      const tx = this.x + Math.cos(targetAngle) * (ownerStopped ? 40 : 46);
+      const ty = this.y + Math.sin(targetAngle) * (ownerStopped ? 26 : 30) - 4;
       const lerp = Math.min(1, dt * 6);
       this.petFollowX += (tx - this.petFollowX) * lerp;
       this.petFollowY += (ty - this.petFollowY) * lerp;
@@ -368,6 +548,7 @@ export class Brawler {
           const before = this.hp;
           this.hp = Math.min(this.maxHp, this.hp + eff.amount);
           if (this.hp > before) {
+            this.petEffectPulse = 1.1;
             spawnEffect({
               kind: "burst", x: this.x, y: this.y - this.radius - 12,
               radius: 22, color: this.equippedPet.color,
@@ -381,17 +562,24 @@ export class Brawler {
         this.petShieldTimer += dt;
         if (this.petShieldTimer >= eff.intervalSec) {
           this.petShieldTimer = 0;
+          this.petEffectPulse = 1.0;
           this.grantSpawnShield(eff.amount);
         }
       }
     }
+
+    // move() runs before update(); clear input so standing still does not keep run anim.
+    this.petOwnerHasMoveInput = false;
   }
 
   move(dx: number, dy: number, dt: number): void {
     if (!this.alive) return;
     
-    // Stun freezes all movement
-    if (this.statusEffects.some(e => e.type === "stun")) return;
+    // Stun/root freezes movement (root still allows attacks)
+    if (this.statusEffects.some(e => e.type === "stun" || e.type === "root")) {
+      this._lastWorldMoveDy = 0;
+      return;
+    }
     
     let spd = this.speed * 60;
     
@@ -403,6 +591,18 @@ export class Brawler {
     const berserk = this.statusEffects.find(e => e.type === "berserker");
     if (berserk) spd *= 1.4;
 
+    const speedBoost = this.statusEffects.find(e => e.type === "speedBoost");
+    if (speedBoost) spd *= 1 + speedBoost.value;
+
+    const bloodMoon = this.statusEffects.find(e => e.type === "bloodMoon");
+    if (bloodMoon && this.stats.id === "vittoria") {
+      spd *= getVittoriaBloodMoonSpeedMult(this);
+    }
+    const vampireNight = this.statusEffects.find(e => e.type === "vampireNight");
+    if (vampireNight && this.stats.id === "vittoria") {
+      spd *= getVittoriaVampireNightSpeedMult();
+    }
+
     // Pet: low-HP speed boost
     if (this.equippedPet?.effect.kind === "lowHpSpeed") {
       const e = this.equippedPet.effect;
@@ -410,20 +610,36 @@ export class Brawler {
     }
 
     if (dx !== 0 || dy !== 0) {
+      this.petOwnerHasMoveInput = true;
       const len = Math.sqrt(dx * dx + dy * dy);
-      this.x += (dx / len) * spd * dt;
-      this.y += (dy / len) * spd * dt;
-      this.moveAngle = Math.atan2(dy, dx);
-      if (!this.isPlayer) {
-        this.angle = this.moveAngle;
+      const vx = (dx / len) * spd * dt;
+      const vy = (dy / len) * spd * dt;
+      this._lastWorldMoveDy = vy;
+      this.x += vx;
+      this.y += vy;
+      const targetAngle = Math.atan2(dy, dx);
+      if (this.isPlayer) {
+        this.moveAngle = targetAngle;
+        this.angle = targetAngle;
+      } else {
+        // Bots: rate-limited facing — instant snap caused rapid up/down spins near walls.
+        let dAng = targetAngle - this.moveAngle;
+        while (dAng > Math.PI) dAng -= 2 * Math.PI;
+        while (dAng < -Math.PI) dAng += 2 * Math.PI;
+        if (Math.abs(dAng) >= 0.18) {
+          const maxTurn = 5 * dt;
+          this.moveAngle += Math.sign(dAng) * Math.min(Math.abs(dAng), maxTurn);
+        }
       }
+    } else {
+      this._lastWorldMoveDy = 0;
     }
   }
 
   takeDamage(
     amount: number,
     attacker: Brawler | null,
-    opts?: { suppressScreenFlash?: boolean },
+    opts?: { suppressScreenFlash?: boolean; suppressSuperCharge?: boolean; suppressDamageNumber?: boolean },
   ): number {
     if (!this.alive || this.invulnerable) return 0;
     
@@ -447,22 +663,33 @@ export class Brawler {
       dmg *= attacker.equippedPet.effect.multiplier;
     }
     
-    if (this.tempShieldHp > 0) {
+    if (this.tempShieldHp > 0 && dmg > 0) {
       const blocked = Math.min(this.tempShieldHp, dmg);
-      this.tempShieldHp -= blocked;
+      this.tempShieldHp = Math.max(0, this.tempShieldHp - blocked);
       dmg -= blocked;
+      if (this.tempShieldHp <= 0) {
+        this.tempShieldHp = 0;
+        this.tempShieldTimer = 0;
+      }
     }
+    const hpBeforeHit = this.hp;
     this.hp -= dmg;
+    // HP cannot go below 0 for display/math; raw `dmg` can exceed remaining HP (boss raid).
+    const dealtHp = Math.max(0, hpBeforeHit - Math.max(0, this.hp));
+    const damageShown = Math.max(0, Math.round(dealtHp));
+
     this.lastDamageTime = Date.now() / 1000;
     this.hitFlash = 1;
-    if (this.isPlayer && dmg > 0 && !opts?.suppressScreenFlash) {
-      flashPlayerDamage(dmg, this.maxHp);
+    if (this.isPlayer && damageShown > 0 && !opts?.suppressScreenFlash) {
+      flashPlayerDamage(damageShown, this.maxHp);
     }
 
-    if (this.isPlayer) {
-      spawnDamageNumber(this.x, this.y - this.radius - 10, Math.floor(dmg), "player");
-    } else {
-      spawnDamageNumber(this.x, this.y - this.radius - 10, Math.floor(dmg), "damage");
+    if (damageShown > 0 && !opts?.suppressDamageNumber) {
+      if (this.isPlayer) {
+        spawnDamageNumber(this.x, this.y - this.radius - 10, damageShown, "player");
+      } else {
+        spawnDamageNumber(this.x, this.y - this.radius - 10, damageShown, "damage");
+      }
     }
 
     // Pet: thorns — defender reflects part of incoming damage back.
@@ -470,7 +697,8 @@ export class Brawler {
       this.equippedPet?.effect.kind === "thorns" &&
       attacker && attacker.alive && attacker.team !== this.team
     ) {
-      const reflect = dmg * this.equippedPet.effect.reflectPct;
+      const reflect = dealtHp * this.equippedPet.effect.reflectPct;
+      this.petEffectPulse = 0.9;
       attacker.hp -= reflect;
       attacker.lastDamageTime = Date.now() / 1000;
       attacker.hitFlash = 1;
@@ -489,6 +717,7 @@ export class Brawler {
           radius: 90, color: attacker.stats.color,
           timer: 0.35, maxTimer: 0.35,
         });
+        tryEmitKillFeed(attacker, this);
       }
     }
 
@@ -499,6 +728,7 @@ export class Brawler {
       Math.random() < attacker.equippedPet.effect.chance
     ) {
       const ig = attacker.equippedPet.effect;
+      attacker.petEffectPulse = 1.0;
       this.statusEffects.push({ type: "poison", duration: ig.durationSec, value: ig.dps });
       spawnEffect({
         kind: "burst", x: this.x, y: this.y - this.radius - 8,
@@ -511,12 +741,16 @@ export class Brawler {
     // no passive/auto-fill. Each brawler has its own per-hit charge rate
     // (see BrawlerStats.superChargePerHit). Damage-over-time / environmental
     // ticks pass attacker = null and intentionally award no charge.
-    if (attacker && attacker.alive && attacker.team !== this.team) {
+    if (attacker && attacker.alive && attacker.team !== this.team && !opts?.suppressSuperCharge) {
       const gain = (attacker.stats.superChargePerHit / 100) * attacker.maxSuperCharge;
       attacker.superCharge = Math.min(attacker.maxSuperCharge, attacker.superCharge + gain);
       if (attacker.superCharge >= attacker.maxSuperCharge) attacker.superReady = true;
       // Track damage for quest stats (player attacking enemy)
-      if (attacker.isPlayer) addMatchStat("damageDealt", dmg);
+      if (attacker.isPlayer) addMatchStat("damageDealt", dealtHp);
+      addParticipantStat(attacker.id, "damageDealt", dealtHp);
+      // Сохраняем последнего вражеского ударившего — для атрибуции убийств
+      // в режиме «Охота за звёздами» (см. ClashBounty.checkKillsAndStars).
+      this.lastAttacker = attacker;
     }
     
     if (this.hp <= 0) {
@@ -527,6 +761,7 @@ export class Brawler {
         !this.petPhoenixUsed && this.isPlayer
       ) {
         this.petPhoenixUsed = true;
+        this.petEffectPulse = 1.4;
         const restoreFrac = this.equippedPet.effect.hpRestoredPct;
         this.hp = Math.max(1, Math.floor(this.maxHp * restoreFrac));
         this.statusEffects = [];
@@ -538,12 +773,18 @@ export class Brawler {
         });
         spawnDamageNumber(this.x, this.y - this.radius - 16, Math.floor(this.hp), "heal");
         this.healGlowTimer = 1;
-        return dmg;
+        return dealtHp;
       }
 
       this.hp = 0;
       this.alive = false;
       this.deathAnim = 0;
+      this.invulnerable = false;
+      this.invulnerableTimer = 0;
+      this.tempShieldHp = 0;
+      this.tempShieldTimer = 0;
+      addParticipantStat(this.id, "deaths", 1);
+      if (this.isPlayer) addMatchStat("deaths", 1);
       // Death burst: short explosion + shockwave, then body fades out.
       spawnEffect({
         kind: "burst", x: this.x, y: this.y,
@@ -555,35 +796,46 @@ export class Brawler {
         radius: 90, color: this.stats.color,
         timer: 0.35, maxTimer: 0.35,
       });
+      tryEmitKillFeed(this, attacker ?? this.lastAttacker);
       // Track kill for quest stats (player killed an enemy)
+      if (attacker && !this.isPlayer && attacker.team !== this.team) {
+        addParticipantStat(attacker.id, "kills", 1);
+      }
       if (attacker?.isPlayer && !this.isPlayer) {
         addMatchStat("killCount", 1);
         // Pet bonuses on kill (only attacker is the local player)
         const ap = attacker.equippedPet;
         if (ap?.effect.kind === "killCoins") {
+          attacker.petEffectPulse = 0.8;
           addMatchStat("petBonusCoins", ap.effect.coins);
         }
-        if (ap?.effect.kind === "supercharge") {
+        if (ap?.effect.kind === "supercharge" && !opts?.suppressSuperCharge) {
           const gain = (ap.effect.perKill / 100) * attacker.maxSuperCharge;
           attacker.superCharge = Math.min(attacker.maxSuperCharge, attacker.superCharge + gain);
           if (attacker.superCharge >= attacker.maxSuperCharge) attacker.superReady = true;
         }
       }
+      if (attacker && !this.alive) {
+        onVittoriaKill(attacker);
+      }
     }
     
-    return dmg;
+    return dealtHp;
   }
 
-  heal(amount: number): void {
+  heal(amount: number, creditedTo?: Brawler): void {
     if (!this.alive) return;
     const actual = Math.min(this.maxHp - this.hp, amount);
     this.hp = Math.min(this.maxHp, this.hp + amount);
     spawnDamageNumber(this.x, this.y - this.radius - 10, Math.floor(amount), "heal");
     if (actual > 0) this.healGlowTimer = Math.min(1, this.healGlowTimer + 0.95);
-    if (this.isPlayer && actual > 0) addMatchStat("healingDone", actual);
+    const credit = creditedTo ?? this;
+    if (credit.isPlayer && actual > 0) addMatchStat("healingDone", actual);
+    if (actual > 0) addParticipantStat(credit.id, "healingDone", actual);
   }
 
   addStatus(type: StatusEffect["type"], duration: number, value = 0): void {
+    if (this.invulnerable && type !== "zephyrinGale" && type !== "speedBoost") return;
     const existing = this.statusEffects.findIndex(e => e.type === type);
     if (existing >= 0) {
       this.statusEffects[existing].duration = duration;
@@ -598,7 +850,16 @@ export class Brawler {
   }
 
   canAttack(): boolean {
+    if (this.statusEffects.some(e => e.type === "zephyrinGale")) return false;
     return this.alive && this.attackCharges > 0;
+  }
+
+  /** Mirabel «Искра знаний» — ускоряет перезарядку атак союзников рядом с целью. */
+  reduceAttackCooldown(seconds: number): void {
+    if (seconds <= 0) return;
+    if (this.attackCooldownTimer > 0) {
+      this.attackCooldownTimer = Math.max(0, this.attackCooldownTimer - seconds);
+    }
   }
 
   useAttackCharge(): void {
@@ -613,6 +874,9 @@ export class Brawler {
   }
 
   canUseSuper(): boolean {
+    if (this.statusEffects.some(e => e.type === "zephyrinGale")) return false;
+    if (this.stats.id === "oliver") return oliverCanUseSuper(this);
+    if (this.stats.id === "callista") return callistaCanUseSuper(this);
     return this.alive && this.superReady;
   }
 
@@ -622,41 +886,152 @@ export class Brawler {
     this.superAnim = 1;
   }
 
-  shoot(angle: number): Projectile[] {
+  shoot(angle: number, allTargets?: Brawler[], aimX?: number, aimY?: number, crateOpts?: CrateDamageOpts): Projectile[] {
     const projs: Projectile[] = [];
     const spd = 400;
     const dmg = this.scaledDamage;
     
     // Shooting from a bush briefly reveals the brawler to enemies (0.8s)
     if (this.inBush) this.bushRevealTimer = 0.8;
+    if (this.inOctaviaInk) this.bushRevealTimer = 0.8;
+
+    if (this.stats.id === "mirabel") {
+      this.useAttackCharge();
+      this.attackAnim = 1.2;
+      return fireMirabelSparkAttack(this, angle);
+    }
+
+    if (this.stats.id === "lumina") {
+      this.useAttackCharge();
+      this.attackAnim = 1.05;
+      if (allTargets?.length) {
+        fireLuminaBeamAttack(this, angle, allTargets, crateOpts);
+      }
+      return projs;
+    }
+
+    if (this.stats.id === "oliver") {
+      this.useAttackCharge();
+      this.attackAnim = 1.1;
+      const stars = new Set(this.constellationStars || []);
+      const count = stars.has(1) ? 7 : 5;
+      const armored = stars.has(2);
+      const bugDamage = getScaledStats(this.stats, this.level).attackDamage
+        * (1 + this.powerCubes * 0.1);
+      spawnOliverBugSwarm(this, angle, count, bugDamage, armored);
+      return projs;
+    }
+
+    if (this.stats.id === "callista") {
+      this.useAttackCharge();
+      this.attackAnim = 1.25;
+      let tx = aimX;
+      let ty = aimY;
+      if (typeof tx !== "number" || typeof ty !== "number") {
+        const auto = allTargets ? resolveCallistaAutoAimFromUnits(this, allTargets) : null;
+        if (auto) {
+          tx = auto.x;
+          ty = auto.y;
+          angle = auto.angle;
+        }
+      }
+      launchCallistaFlask(this, angle, false, 1 + this.powerCubes * 0.1, tx, ty);
+      return projs;
+    }
+
+    if (this.stats.id === "airin") {
+      this.useAttackCharge();
+      this.attackAnim = 1.2;
+      let tx = aimX;
+      let ty = aimY;
+      if (typeof tx !== "number" || typeof ty !== "number") {
+        const auto = allTargets ? resolveAirinAutoAimFromUnits(this, allTargets) : null;
+        if (auto) {
+          tx = auto.x;
+          ty = auto.y;
+          angle = auto.angle;
+        }
+      }
+      launchAirinCapsule(this, angle, tx, ty);
+      return projs;
+    }
+
+    if (this.stats.id === "elian") {
+      this.useAttackCharge();
+      this.attackAnim = 1.35;
+      let tx = aimX;
+      let ty = aimY;
+      if (typeof tx !== "number" || typeof ty !== "number") {
+        const auto = allTargets ? resolveElianAutoAimFromUnits(this, allTargets) : null;
+        if (auto) {
+          tx = auto.x;
+          ty = auto.y;
+          angle = auto.angle;
+        }
+      }
+      launchElianStarCharge(this, angle, tx, ty);
+      return projs;
+    }
+
+    if (this.stats.id === "silven") {
+      this.useAttackCharge();
+      this.attackAnim = 1.3;
+      let tx = aimX;
+      let ty = aimY;
+      if (typeof tx !== "number" || typeof ty !== "number") {
+        const auto = allTargets ? resolveSilvenAutoAimFromUnits(this, allTargets) : null;
+        if (auto) {
+          tx = auto.x;
+          ty = auto.y;
+          angle = auto.angle;
+        }
+      }
+      launchSilvenIvyVine(this, angle, tx, ty);
+      return projs;
+    }
+
+    if (this.stats.id === "octavia") {
+      this.useAttackCharge();
+      this.attackAnim = 1.35;
+      if (this.inOctaviaInk || this.inBush) this.bushRevealTimer = 0.8;
+      let tx = aimX;
+      let ty = aimY;
+      if (typeof tx !== "number" || typeof ty !== "number") {
+        const auto = allTargets ? resolveOctaviaAutoAimFromUnits(this, allTargets) : null;
+        if (auto) {
+          tx = auto.x;
+          ty = auto.y;
+          angle = auto.angle;
+        }
+      }
+      launchOctaviaInkOrb(this, angle, tx, ty);
+      return projs;
+    }
+
+    if (this.stats.id === "zephyrin") {
+      if (isZephyrinInGale(this)) return projs;
+      this.useAttackCharge();
+      this.attackAnim = 1.2;
+      if (this.inBush) this.bushRevealTimer = 0.8;
+      let tx = aimX;
+      let ty = aimY;
+      if (typeof tx !== "number" || typeof ty !== "number") {
+        const auto = allTargets ? resolveZephyrinAutoAimFromUnits(this, allTargets) : null;
+        if (auto) {
+          tx = auto.x;
+          ty = auto.y;
+          angle = auto.angle;
+        }
+      }
+      launchZephyrinTornado(this, angle, tx, ty);
+      return projs;
+    }
     
     this.useAttackCharge();
 
-    // Generic muzzle flash so every shot has visual feedback (size keyed
-    // off accentColor — this gives each brawler a uniquely tinted burst).
-    spawnEffect({
-      kind: "burst",
-      x: this.x + Math.cos(angle) * (this.radius + 4),
-      y: this.y + Math.sin(angle) * (this.radius + 4),
-      radius: 14,
-      color: this.stats.accentColor || this.stats.color,
-      timer: 0.22, maxTimer: 0.22,
-    });
-    // A few outward sparks for kinetic punch.
-    for (let i = 0; i < 4; i++) {
-      const a = angle + (Math.random() - 0.5) * 0.7;
-      const dist = 22 + Math.random() * 14;
-      spawnEffect({
-        kind: "spark",
-        x: this.x + Math.cos(angle) * (this.radius + 4),
-        y: this.y + Math.sin(angle) * (this.radius + 4),
-        toX: this.x + Math.cos(angle) * (this.radius + 4) + Math.cos(a) * dist,
-        toY: this.y + Math.sin(angle) * (this.radius + 4) + Math.sin(a) * dist,
-        radius: 3,
-        color: this.stats.accentColor || this.stats.color,
-        timer: 0.28, maxTimer: 0.28,
-      });
-    }
+    // По требованию: никаких визуальных эффектов «от персонажа» при выстреле.
+    // Снаряд сам по себе несёт motion-trail/шлейф (см. renderProjectiles).
+    // Никаких muzzle burst, искр или shockwave вокруг стрелка.
 
     switch (this.stats.id) {
       case "miya": {
@@ -720,13 +1095,9 @@ export class Brawler {
       }
       case "zafkiel": {
         const cIdx = this.zafkielChargeIdx % 3;
-        // Muzzle origin slightly ahead of the caster
-        const muzzleX = this.x + Math.cos(angle) * 18;
-        const muzzleY = this.y + Math.sin(angle) * 18;
 
         if (this.zafkielMode === "normal") {
           if (cIdx === 0) {
-            // ── Dalet: temporal ash shot — grey-white orb, slow + rewind ──
             projs.push(createProjectile({
               x: this.x, y: this.y,
               vx: Math.cos(angle) * 380, vy: Math.sin(angle) * 380,
@@ -736,14 +1107,7 @@ export class Brawler {
               color: "#ECEFF1", type: "bullet", piercing: false,
               slow: true, temporalRewind: 1.0,
             }));
-            // Ghostly muzzle burst — clockface particles
-            spawnEffect({ kind: "burst", x: muzzleX, y: muzzleY, radius: 28, color: "#CFD8DC", timer: 0.35, maxTimer: 0.35, secondary: "#90A4AE" });
-            // Pale shockwave ring around caster
-            spawnEffect({ kind: "shockwave", x: this.x, y: this.y, radius: 18, color: "#B0BEC5", timer: 0.22, maxTimer: 0.22 });
-            // Trailing clock-hand spark along fire direction
-            spawnEffect({ kind: "trail", x: this.x, y: this.y, toX: muzzleX + Math.cos(angle) * 40, toY: muzzleY + Math.sin(angle) * 40, radius: 3, color: "#E0E0E0", timer: 0.18, maxTimer: 0.18 });
           } else if (cIdx === 1) {
-            // ── Bet: deep-blue slow orb ──
             projs.push(createProjectile({
               x: this.x, y: this.y,
               vx: Math.cos(angle) * 360, vy: Math.sin(angle) * 360,
@@ -753,11 +1117,7 @@ export class Brawler {
               color: "#1E88E5", type: "snowball", piercing: false,
               slow: true,
             }));
-            // Frosty muzzle burst with cyan inner glow
-            spawnEffect({ kind: "burst", x: muzzleX, y: muzzleY, radius: 26, color: "#42A5F5", timer: 0.30, maxTimer: 0.30, secondary: "#0D47A1" });
-            spawnEffect({ kind: "shockwave", x: this.x, y: this.y, radius: 16, color: "#1565C0", timer: 0.20, maxTimer: 0.20 });
           } else {
-            // ── Zayin: purple stun bolt ──
             projs.push(createProjectile({
               x: this.x, y: this.y,
               vx: Math.cos(angle) * 340, vy: Math.sin(angle) * 340,
@@ -767,15 +1127,9 @@ export class Brawler {
               color: "#9C27B0", type: "bullet", piercing: false,
               stunDuration: 0.6,
             }));
-            spawnEffect({ kind: "burst", x: muzzleX, y: muzzleY, radius: 30, color: "#CE93D8", timer: 0.35, maxTimer: 0.35, secondary: "#6A1B9A" });
-            // Lightning snap along attack direction
-            spawnEffect({ kind: "lightningBolt", x: this.x, y: this.y, toX: muzzleX + Math.cos(angle) * 55, toY: muzzleY + Math.sin(angle) * 55, radius: 4, color: "#E040FB", timer: 0.18, maxTimer: 0.18 });
-            spawnEffect({ kind: "shockwave", x: this.x, y: this.y, radius: 20, color: "#7B1FA2", timer: 0.25, maxTimer: 0.25 });
           }
         } else {
-          // ── Enhanced mode (after Врата Вечности super) ──
           if (cIdx === 0) {
-            // Aleph: blazing red hyper-bullet (2× speed)
             projs.push(createProjectile({
               x: this.x, y: this.y,
               vx: Math.cos(angle) * 760, vy: Math.sin(angle) * 760,
@@ -784,11 +1138,7 @@ export class Brawler {
               ownerId: this.id, ownerTeam: this.team,
               color: "#FF1744", type: "bullet", piercing: false,
             }));
-            spawnEffect({ kind: "burst", x: muzzleX, y: muzzleY, radius: 28, color: "#FF5252", timer: 0.22, maxTimer: 0.22, secondary: "#B71C1C" });
-            spawnEffect({ kind: "lightningBolt", x: this.x, y: this.y, toX: muzzleX + Math.cos(angle) * 60, toY: muzzleY + Math.sin(angle) * 60, radius: 5, color: "#FF6D00", timer: 0.16, maxTimer: 0.16 });
-            spawnEffect({ kind: "shockwave", x: this.x, y: this.y, radius: 22, color: "#D50000", timer: 0.22, maxTimer: 0.22 });
           } else if (cIdx === 1) {
-            // Gimmel: lime-gold poison dagger
             projs.push(createProjectile({
               x: this.x, y: this.y,
               vx: Math.cos(angle) * 380, vy: Math.sin(angle) * 380,
@@ -798,12 +1148,7 @@ export class Brawler {
               color: "#AEEA00", type: "dagger", piercing: false,
               poison: true,
             }));
-            spawnEffect({ kind: "burst", x: muzzleX, y: muzzleY, radius: 26, color: "#CCFF90", timer: 0.30, maxTimer: 0.30, secondary: "#33691E" });
-            // Poison cloud wisps
-            spawnEffect({ kind: "spark", x: muzzleX, y: muzzleY, radius: 14, color: "#76FF03", timer: 0.40, maxTimer: 0.40 });
-            spawnEffect({ kind: "shockwave", x: this.x, y: this.y, radius: 16, color: "#AEEA00", timer: 0.20, maxTimer: 0.20 });
           } else {
-            // Yud: amber homing orb — locks on and chases
             projs.push(createProjectile({
               x: this.x, y: this.y,
               vx: Math.cos(angle) * 360, vy: Math.sin(angle) * 360,
@@ -813,20 +1158,36 @@ export class Brawler {
               color: "#FFAB00", type: "bullet", piercing: false,
               homing: true,
             }));
-            spawnEffect({ kind: "burst", x: muzzleX, y: muzzleY, radius: 30, color: "#FFD740", timer: 0.35, maxTimer: 0.35, secondary: "#E65100" });
-            spawnEffect({ kind: "shockwave", x: this.x, y: this.y, radius: 24, color: "#FF8F00", timer: 0.28, maxTimer: 0.28 });
           }
-          // After all 3 enhanced charges, cycle returns to normal
           if (cIdx === 2) {
             this.zafkielMode = "normal";
             this.zafkielChargeIdx = 0;
-            // Grand cycle-end visual: double shockwave + burst
-            spawnEffect({ kind: "shockwave", x: this.x, y: this.y, radius: 40, color: "#7C4DFF", timer: 0.5, maxTimer: 0.5 });
-            spawnEffect({ kind: "burst",     x: this.x, y: this.y, radius: 36, color: "#B388FF", timer: 0.4, maxTimer: 0.4 });
             break;
           }
         }
         this.zafkielChargeIdx = (this.zafkielChargeIdx + 1) % 3;
+        break;
+      }
+      case "verdeletta": {
+        projs.push(createProjectile({
+          x: this.x, y: this.y - 6,
+          vx: Math.cos(angle) * 560, vy: Math.sin(angle) * 560,
+          radius: 10, damage: dmg,
+          speed: 560, range: this.stats.attackRange,
+          ownerId: this.id, ownerTeam: this.team,
+          color: "#111111", type: "verdelettaInvite", piercing: false,
+          hellBrand: true, chargeSuper: true,
+        }));
+        spawnEffect({
+          kind: "verdelettaMuzzle",
+          x: this.x + Math.cos(angle) * 22,
+          y: this.y + Math.sin(angle) * 22 - 8,
+          radius: 18,
+          color: "#111111",
+          secondary: "#69F0AE",
+          timer: 0.16,
+          maxTimer: 0.16,
+        });
         break;
       }
       default: {
@@ -841,11 +1202,29 @@ export class Brawler {
       }
     }
     
-    return projs;
+    return expandMirabelLearningVolley(this, projs);
   }
 
-  meleeAttack(targets: Brawler[]): void {
+  meleeAttack(targets: Brawler[], crateOpts?: CrateDamageOpts): void {
     this.useAttackCharge();
+    if (this.stats.id === "vittoria") {
+      spawnVittoriaBiteVfx(this);
+      this.attackAnim = 0.42;
+      let totalDealt = damageVittoriaShadowsInMeleeArc(this);
+      totalDealt += damageVittoriaCrates(this, crateOpts);
+      const range = getVittoriaAttackRange(this);
+      const dmgMult = getVittoriaOutgoingDamageMult(this);
+      for (const target of targets) {
+        if (target.id === this.id || !target.alive || target.team === this.team) continue;
+        const d = distance(this.x, this.y, target.x, target.y);
+        const diff = Math.abs(angleTo(this.x, this.y, target.x, target.y) - this.angle);
+        if (d < range + target.radius && diff < Math.PI / 3.2) {
+          totalDealt += target.takeDamage(this.scaledDamage * dmgMult, this);
+        }
+      }
+      applyVittoriaLifesteal(this, totalDealt);
+      return;
+    }
     // Visual swing arc — a quick crescent burst in front of the brawler.
     const reach = this.stats.attackRange + this.radius;
     spawnEffect({
@@ -856,6 +1235,9 @@ export class Brawler {
       color: this.stats.accentColor || this.stats.color,
       timer: 0.28, maxTimer: 0.28,
     });
+    damageEnemyShadowsInMeleeArc(this);
+    damageDevMonstersInMeleeArc(this);
+    damageMeleeCratesInArc(this, crateOpts);
     for (const target of targets) {
       if (target.id === this.id || !target.alive) continue;
       if (target.team === this.team) continue;
@@ -887,15 +1269,31 @@ export class Brawler {
   activateSuper(targets: Brawler[], map: GameMap, projectiles: Projectile[], targetX?: number, targetY?: number): void {
     if (!this.canUseSuper()) return;
     if (this.isPlayer) addMatchStat("superUses", 1);
-    this.useSuper();
+    const crateOpts: CrateDamageOpts | undefined = map.crates?.length ? { crates: map.crates } : undefined;
 
-    // Generic "super-cast" flash centered on the brawler — every super
-    // gets a bright golden ring so the moment of activation is unmistakable.
-    spawnEffect({
-      kind: "shockwave", x: this.x, y: this.y,
-      radius: this.radius * 2.5, color: "#FFD700",
-      timer: 0.55, maxTimer: 0.55,
-    });
+    const isOliverBonus = this.stats.id === "oliver" && this.oliverBonusSuperReady;
+    const isCallistaBonus = this.stats.id === "callista" && this.callistaBonusSuperReady;
+
+    if (this.stats.id !== "oliver") {
+      recordEnemySuperForOlivers(this, targets, targetX, targetY);
+    }
+
+    const deferOliverSuperSpend = this.stats.id === "oliver" && !isOliverBonus;
+    const deferCallistaSuperSpend = this.stats.id === "callista" && !isCallistaBonus;
+    if (!isOliverBonus && !isCallistaBonus && !deferOliverSuperSpend && !deferCallistaSuperSpend) {
+      this.useSuper();
+    } else {
+      this.superAnim = 1;
+    }
+
+    // Generic "super-cast" flash — Verdeletta/Lumina/Oliver/Callista use their own super VFX.
+    if (this.stats.id !== "verdeletta" && this.stats.id !== "lumina" && this.stats.id !== "oliver" && this.stats.id !== "callista" && this.stats.id !== "airin" && this.stats.id !== "elian" && this.stats.id !== "silven" && this.stats.id !== "vittoria" && this.stats.id !== "octavia" && this.stats.id !== "zephyrin" && this.stats.id !== "mirabel") {
+      spawnEffect({
+        kind: "shockwave", x: this.x, y: this.y,
+        radius: this.radius * 2.5, color: "#FFD700",
+        timer: 0.55, maxTimer: 0.55,
+      });
+    }
 
     switch (this.stats.id) {
       case "miya": {
@@ -953,7 +1351,7 @@ export class Brawler {
           if (!t.alive || t.team !== this.team) continue;
           if (distance(this.x, this.y, t.x, t.y) < 140) {
             t.addStatus("slow", 3, -0.3);
-            t.heal(900);
+            t.heal(900, this);
           }
         }
         // Snow zone visual lasting for the buff duration.
@@ -994,6 +1392,12 @@ export class Brawler {
           kind: "lightCage", x: this.x, y: this.y,
           radius: 110, color: "#FFEB3B",
           timer: 5, maxTimer: 5,
+          ownerId: this.id,
+          ownerTeam: this.team,
+          damagePerTick: Math.max(80, Math.floor(this.scaledDamage * 0.35)),
+          tickInterval: 0.55,
+          tickRange: 110,
+          tickTimer: 0.2,
         });
         break;
       }
@@ -1001,7 +1405,7 @@ export class Brawler {
         for (const t of targets) {
           if (!t.alive || t.team !== this.team) continue;
           if (distance(this.x, this.y, t.x, t.y) < 160) {
-            t.heal(1200);
+            t.heal(1200, this);
           }
         }
         for (const t of targets) {
@@ -1097,12 +1501,148 @@ export class Brawler {
         });
         break;
       }
+      case "verdeletta": {
+        spawnEffect({
+          kind: "verdelettaSuper",
+          x: this.x,
+          y: this.y,
+          radius: 140,
+          color: "#69F0AE",
+          secondary: "#1B5E20",
+          timer: 1.25,
+          maxTimer: 1.25,
+          followBrawler: this,
+        });
+        spawnVerdelettaSuperShadows(this, map.width, map.height);
+        this.superAnim = 1.35;
+        break;
+      }
+      case "lumina": {
+        const stars = new Set(this.constellationStars || []);
+        const superRadius = stars.has(5) ? 150 : 120;
+        let superX = this.x;
+        let superY = this.y;
+        if (typeof targetX === "number" && typeof targetY === "number") {
+          const dx = targetX - this.x;
+          const dy = targetY - this.y;
+          const d = Math.hypot(dx, dy);
+          const maxR = 300;
+          if (d > maxR && d > 0) {
+            superX = this.x + (dx / d) * maxR;
+            superY = this.y + (dy / d) * maxR;
+          } else if (d > 0.01) {
+            superX = targetX;
+            superY = targetY;
+          }
+          superX = clamp(superX, this.radius, map.width - this.radius);
+          superY = clamp(superY, this.radius, map.height - this.radius);
+        }
+        spawnLuminaDome(this, superX, superY);
+        damageCratesInRadius(superX, superY, superRadius, this.scaledDamage * 1.15, crateOpts);
+        spawnEffect({
+          kind: "luminaMuzzle",
+          x: this.x + Math.cos(this.angle) * 14,
+          y: this.y + Math.sin(this.angle) * 14 - 10,
+          radius: 22,
+          color: "#FFD54F",
+          secondary: "#FFFFFF",
+          timer: 0.45,
+          maxTimer: 0.45,
+        });
+        this.superAnim = 1.85;
+        break;
+      }
+      case "oliver": {
+        const replicated = activateOliverReplicator(this, targets, map, projectiles, targetX, targetY, isOliverBonus);
+        if (replicated && !isOliverBonus) this.useSuper();
+        this.superAnim = 1.35;
+        break;
+      }
+      case "callista": {
+        const mult = (isCallistaBonus ? 0.5 : 1) * (1 + this.powerCubes * 0.1);
+        let tx = targetX;
+        let ty = targetY;
+        let aim = this.angle;
+        if (typeof tx === "number" && typeof ty === "number") {
+          aim = Math.atan2(ty - this.y, tx - this.x);
+        } else {
+          const auto = resolveCallistaAutoAimFromUnits(this, targets);
+          if (auto) {
+            tx = auto.x;
+            ty = auto.y;
+            aim = auto.angle;
+          }
+        }
+        launchCallistaFlask(this, aim, true, mult, tx, ty, map.width, map.height);
+        if (!isCallistaBonus) this.useSuper();
+        onCallistaSuperUsed(this, isCallistaBonus);
+        this.superAnim = 1.55;
+        break;
+      }
+      case "airin": {
+        const moved = activateAirinEvacuation(this, targets, map.width, map.height);
+        if (moved > 0) {
+          this.useSuper();
+          this.superAnim = 1.65;
+        }
+        break;
+      }
+      case "elian": {
+        activateElianGravityAnomaly(this, targetX, targetY, map.width, map.height);
+        this.useSuper();
+        this.superAnim = 1.7;
+        break;
+      }
+      case "silven": {
+        activateSilvenLifeTree(this, targetX, targetY, map.width, map.height);
+        this.useSuper();
+        this.superAnim = 1.65;
+        break;
+      }
+      case "vittoria": {
+        activateVittoriaBloodMoon(this);
+        this.useSuper();
+        this.superAnim = 1.8;
+        break;
+      }
+      case "octavia": {
+        activateOctaviaTentacleTrap(this, targetX, targetY, map.width, map.height);
+        this.useSuper();
+        this.superAnim = 1.85;
+        break;
+      }
+      case "zephyrin": {
+        activateZephyrinGale(this);
+        this.useSuper();
+        this.superAnim = 2.1;
+        break;
+      }
+      case "mirabel": {
+        activateMirabelAcceleratedLearning(this, targets, map.width, map.height);
+        this.superAnim = 1.75;
+        break;
+      }
       case "zafkiel": {
         // Врата Вечности — area that rewinds enemies to their past position
         const has6 = this.constellationStars.includes(6);
         const superRadius = has6 ? 130 : 120;
-        const superX = typeof targetX === "number" ? clamp(targetX, this.radius, map.width - this.radius) : this.x;
-        const superY = typeof targetY === "number" ? clamp(targetY, this.radius, map.height - this.radius) : this.y;
+        let superX = this.x;
+        let superY = this.y;
+        if (typeof targetX === "number" && typeof targetY === "number") {
+          const dx = targetX - this.x;
+          const dy = targetY - this.y;
+          const d = Math.hypot(dx, dy);
+          const maxR = 300;
+          if (d > maxR && d > 0) {
+            superX = this.x + (dx / d) * maxR;
+            superY = this.y + (dy / d) * maxR;
+          } else if (d > 0.01) {
+            superX = targetX;
+            superY = targetY;
+          }
+          superX = clamp(superX, this.radius, map.width - this.radius);
+          superY = clamp(superY, this.radius, map.height - this.radius);
+        }
 
         // Rewind all enemies in range to 2s-ago position
         for (const t of targets) {
@@ -1196,7 +1736,7 @@ export class Brawler {
     if (layer === "hud") {
       if (!this.alive) return;
       const isEnemyToViewer = viewerTeam !== undefined && !this.isPlayer && this.team !== viewerTeam;
-      if (this.inBush && isEnemyToViewer) {
+      if ((this.inBush || this.inOctaviaInk) && isEnemyToViewer) {
         const REVEAL_RADIUS = 140;
         let revealed = this.bushRevealTimer > 0;
         if (!revealed && friendlies) {
@@ -1213,7 +1753,17 @@ export class Brawler {
       }
       if (sx < -this.radius * 2 || sx > 1200 + this.radius * 2) return;
       if (hudSY < -this.radius * 2 || hudSY > 800 + this.radius * 2) return;
+      // В 3D-режиме тело бойца рисуется в WebGL-сцене → world-pass пропускает
+      // и тело, и его звёздную орбиту. Здесь, в HUD-passе (поверх 3D-канваса),
+      // дублируем орбиту, но ТОЛЬКО если 3D-меш реально готов и world-pass
+      // действительно был пропущен. Иначе (2D-fallback) world-pass уже её
+      // нарисовал и второй проход даёт удвоение alpha + двойную обводку,
+      // из-за чего кажется будто звёзды «под другим углом» чем team-ring.
+      if (isBattle3DActive() && this.alive && this.constellationStars.length > 0) {
+        this.drawConstellationOrbit(ctx, sx, hudSY, 1, this._smoothMoveAngle, "all");
+      }
       this.renderNameLabel(ctx, sx, hudSY, viewerTeam);
+      this.renderPetNameLabel(ctx, camX, camY, viewerTeam, friendlies);
       this.renderHPBar(ctx, sx, hudSY, viewerTeam);
       this.renderAmmoBar(ctx, sx, hudSY, viewerTeam);
       if (this.isPlayer) this.renderSuperBar(ctx, sx, hudSY);
@@ -1228,9 +1778,12 @@ export class Brawler {
     if (sx < -this.radius * 2 || sx > 1200 + this.radius * 2) return;
     if (sy < -this.radius * 2 || sy > 800 + this.radius * 2) return;
 
+    // 3D-режим: весь world-pass (тело, тени, кольца, питомцы) — только WebGL-сцена.
+    if (isBattle3DActive() && layer !== "hud") return;
+
     // Hide enemies in bushes — revealed only when a friendly is close or they shot recently
     const isEnemyToViewer = viewerTeam !== undefined && !this.isPlayer && this.team !== viewerTeam;
-    if (this.alive && this.inBush && isEnemyToViewer) {
+    if (this.alive && (this.inBush || this.inOctaviaInk) && isEnemyToViewer) {
       const REVEAL_RADIUS = 140;
       let revealed = this.bushRevealTimer > 0; // briefly visible after shooting
       if (!revealed && friendlies) {
@@ -1255,53 +1808,66 @@ export class Brawler {
     } else if (this.inBush) {
       alpha = 0.85;
     }
-    
-    // Team relation indicator ring at feet (true circle — flat ellipse read as “wrong aspect”).
+
+    const charRendererFeet = CHAR_3D_IDS.has(this.stats.id) ? getCharRenderer(this.stats.id) : null;
+    const drawSizeFeet = this.radius * BRAWLER_DRAW_SCALE;
+    const use3dFeet = !!(charRendererFeet && charRendererFeet.isReady());
+    const wideHitbox = this.radius >= WIDE_HITBOX_RADIUS_THRESHOLD;
+    const haloRxFrac = wideHitbox ? BRAWLER_FLOOR_HALO_RX_FRAC_WIDE_HITBOX : BRAWLER_FLOOR_HALO_RX_FRAC;
+    const floorRingRx = drawSizeFeet * haloRxFrac;
+    const floorRingRy = floorRingRx * BRAWLER_FLOOR_HALO_RY_OVER_RX;
+    const feetY = use3dFeet ? sy + drawSizeFeet * 0.40 - 2 : sy + this.radius - 2;
+
+    // Team relation indicator at feet — flat ellipse + tilt to match map / GLB oblique view.
     if (this.alive && viewerTeam !== undefined) {
       let ringColor: string;
       if (this.isPlayer) ringColor = "#4CAF50";
       else if (this.team === viewerTeam) ringColor = "#2196F3";
       else ringColor = "#F44336";
-      const ringR = this.radius * 0.88;
-      const ringCy = sy + this.radius - 2;
+      // У босса (wideHitbox) — кольцо в 2 раза меньше, иначе закрывает пол-карты.
+      const ringScale = wideHitbox ? 0.5 : 1;
+      const ringRx = floorRingRx * ringScale;
+      const ringRy = floorRingRy * ringScale;
       ctx.save();
+      ctx.translate(sx, feetY);
+      ctx.rotate(BRAWLER_FLOOR_HALO_ROT);
       ctx.globalAlpha = alpha * 0.85;
       ctx.strokeStyle = ringColor;
       ctx.lineWidth = 3;
       ctx.shadowColor = ringColor;
       ctx.shadowBlur = 10;
       ctx.beginPath();
-      ctx.arc(sx, ringCy, ringR, 0, Math.PI * 2);
+      ctx.ellipse(0, 0, ringRx, ringRy, 0, 0, Math.PI * 2);
       ctx.stroke();
       ctx.lineWidth = 2;
       ctx.globalAlpha = alpha * 0.32;
       ctx.fillStyle = ringColor;
       ctx.beginPath();
-      ctx.arc(sx, ringCy, ringR, 0, Math.PI * 2);
+      ctx.ellipse(0, 0, ringRx, ringRy, 0, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
     }
 
-    // Ground shadow — soft oval, slightly down-right (milder ellipse so it doesn’t read as stretch).
+    // Ground shadow — same ellipse basis + tilt as team ring (wide hitbox uses sprite footprint).
     if (this.alive) {
       ctx.save();
       ctx.globalAlpha = alpha * 0.30;
       const ox = 2.5;
       const oy = 3;
-      const shadowW = this.radius * 1.22;
-      const shadowH = this.radius * 0.56;
-      const cx = sx + ox;
-      const cy = sy + this.radius + 1 + oy;
+      const shadowRx = floorRingRx * 1.12;
+      const shadowRy = shadowRx * BRAWLER_FLOOR_HALO_RY_OVER_RX;
+      ctx.translate(sx + ox, feetY + oy);
+      ctx.rotate(BRAWLER_FLOOR_HALO_ROT);
       const grad = ctx.createRadialGradient(
-        cx, cy, shadowH * 0.18,
-        cx, cy, shadowW
+        0, -shadowRy * 0.15, shadowRy * 0.2,
+        0, 0, shadowRx,
       );
       grad.addColorStop(0, "rgba(0,0,0,0.42)");
       grad.addColorStop(0.55, "rgba(0,0,0,0.12)");
       grad.addColorStop(1, "rgba(0,0,0,0)");
       ctx.fillStyle = grad;
       ctx.beginPath();
-      ctx.ellipse(cx, cy, shadowW, shadowH, 0, 0, Math.PI * 2);
+      ctx.ellipse(0, 0, shadowRx, shadowRy, 0, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
     }
@@ -1353,9 +1919,13 @@ export class Brawler {
       this.equippedPet?.effect.kind === "damageBuff" ? "#FF5722" :
         this.statusEffects.some(e => e.type === "stun") ? "#FFD700" : undefined;
 
-    // 3D characters are rendered via an off-screen WebGL renderer.
+    // В живой 3D-сцене тело рисует battle3DWorld; оффскрин-baker здесь только
+    // портит вид (плоский спрайт поверх WebGL) и мог сбрасывать ready у GLB.
+    const useLiveBattle3DBody = isBattle3DActive() && layer !== "hud";
+
+    // 3D characters are rendered via an off-screen WebGL renderer (2D-only modes).
     const charRenderer = CHAR_3D_IDS.has(this.stats.id) ? getCharRenderer(this.stats.id) : null;
-    if (charRenderer && charRenderer.isReady()) {
+    if (charRenderer && charRenderer.isReady() && !useLiveBattle3DBody) {
       const dx = this.x - this._lastRenderX;
       const dy = this.y - this._lastRenderY;
       const moved = Math.hypot(dx, dy);
@@ -1381,6 +1951,12 @@ export class Brawler {
 
       const off = charRenderer.render(this.id, anim, renderAngle);
       const drawSize = this.radius * BRAWLER_DRAW_SCALE;
+
+      // Сначала задние звёзды созвездия (destination-over — уйдут под спрайт).
+      if (this.alive && this.constellationStars.length > 0) {
+        this.drawConstellationOrbit(ctx, sx, sy, alpha, renderAngle, "behind");
+      }
+
       if (off) {
         ctx.save();
         ctx.globalAlpha = alpha;
@@ -1394,14 +1970,17 @@ export class Brawler {
         drawBrawlerImage(ctx, this.stats.id, sx, sy, drawSize, renderAngle, alpha, glowColor);
       }
 
-      // Full orbit on top of the 3D sprite (split behind/front was mostly hidden under the opaque render).
+      // Передние звёзды — поверх спрайта.
       if (this.alive && this.constellationStars.length > 0) {
-        this.drawConstellationOrbit(ctx, sx, sy, alpha, renderAngle, "all");
+        this.drawConstellationOrbit(ctx, sx, sy, alpha, renderAngle, "front");
       }
     } else {
+      if (this.alive && this.constellationStars.length > 0) {
+        this.drawConstellationOrbit(ctx, sx, sy, alpha, this.moveAngle, "behind");
+      }
       drawBrawlerImage(ctx, this.stats.id, sx, sy, this.radius * BRAWLER_DRAW_SCALE, this.moveAngle, alpha, glowColor);
       if (this.alive && this.constellationStars.length > 0) {
-        this.drawConstellationOrbit(ctx, sx, sy, alpha, this.moveAngle, "all");
+        this.drawConstellationOrbit(ctx, sx, sy, alpha, this.moveAngle, "front");
       }
     }
 
@@ -1527,30 +2106,87 @@ export class Brawler {
     sx: number,
     sy: number,
     alpha: number,
-    facing: number,
+    _facing: number,
     layer: "behind" | "front" | "all",
   ): void {
     if (this.constellationStars.length === 0) return;
     const t = this.animFrame * 0.03;
-    const cnt = Math.min(6, this.constellationStars.length);
-    const orbitR = this.radius + 16;
-    const fx = Math.cos(facing);
-    const fy = Math.sin(facing);
+    const orbitR = this.radius + 14;
+    const useThreeDTilt = isBattle3DActive() && CHAR_3D_IDS.has(this.stats.id);
+    const TILT = useThreeDTilt ? 1.0 : BRAWLER_FLOOR_HALO_RY_OVER_RX;
+    const headY = -this.radius * 0.9;
+    const owned = new Set(this.constellationStars);
+    const hudAll = layer === "all";
+
     ctx.save();
-    ctx.globalAlpha = 0.92 * alpha;
-    for (let i = 0; i < cnt; i++) {
-      const a = t + (i / cnt) * Math.PI * 2;
-      const ox = Math.cos(a) * orbitR;
-      const oy = Math.sin(a) * (orbitR * 0.42) - this.radius * 0.35;
-      const depth = ox * fx + oy * fy;
-      if (layer === "behind" && depth > 0) continue;
-      if (layer === "front" && depth <= 0) continue;
-      ctx.fillStyle = "#FFD740";
-      ctx.shadowColor = "#FFAB00";
-      ctx.shadowBlur = 6;
+    ctx.globalAlpha = 0.95 * alpha;
+    if (layer !== "front") {
+      ctx.save();
+      if (layer === "behind") ctx.globalCompositeOperation = "destination-over";
+      ctx.strokeStyle = "rgba(255,215,64,0.5)";
+      ctx.lineWidth = 1;
+      ctx.shadowColor = "#FFAB00"; ctx.shadowBlur = 6;
+      ctx.globalAlpha = 0.45 * alpha;
       ctx.beginPath();
-      ctx.arc(sx + ox, sy + oy, 3, 0, Math.PI * 2);
+      ctx.ellipse(sx, sy + headY, orbitR, orbitR * TILT, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    for (let slot = 1; slot <= 6; slot++) {
+      if (!owned.has(slot)) continue;
+      const slotIdx = slot - 1;
+      const a = t + (slotIdx / 6) * Math.PI * 2;
+      const ox = Math.cos(a) * orbitR;
+      const oy = Math.sin(a) * (orbitR * TILT);
+      const isBack = Math.sin(a) < 0;
+      if (!hudAll) {
+        if (layer === "behind" && !isBack) continue;
+        if (layer === "front" && isBack) continue;
+      }
+
+      const px = sx + ox;
+      const py = sy + headY + oy;
+      const fullGlow = hudAll || !isBack;
+      const sc = (1 + Math.sin(this.animFrame * 0.08 + slotIdx) * 0.15) * (fullGlow ? 1 : 0.78);
+      const starR = 4.2 * sc;
+
+      ctx.save();
+      if (!fullGlow) {
+        ctx.globalCompositeOperation = "destination-over";
+        ctx.globalAlpha = 0.65 * alpha;
+        ctx.fillStyle = "#FFC107";
+      } else {
+        ctx.shadowColor = "#FFAB00"; ctx.shadowBlur = 10;
+        ctx.fillStyle = "#FFEB3B";
+      }
+      if (fullGlow) {
+        const halo = ctx.createRadialGradient(px, py, 0, px, py, starR * 2.6);
+        halo.addColorStop(0, "rgba(255,235,59,0.55)");
+        halo.addColorStop(1, "rgba(255,235,59,0)");
+        ctx.fillStyle = halo;
+        ctx.beginPath(); ctx.arc(px, py, starR * 2.6, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#FFEB3B";
+      }
+      ctx.translate(px, py);
+      ctx.rotate(this.animFrame * 0.05 + slotIdx * 0.4);
+      ctx.beginPath();
+      for (let k = 0; k < 5; k++) {
+        const ang = (k / 5) * Math.PI * 2 - Math.PI / 2;
+        ctx.lineTo(Math.cos(ang) * starR, Math.sin(ang) * starR);
+        const ang2 = ang + Math.PI / 5;
+        ctx.lineTo(Math.cos(ang2) * starR * 0.45, Math.sin(ang2) * starR * 0.45);
+      }
+      ctx.closePath();
       ctx.fill();
+      ctx.strokeStyle = fullGlow ? "#FF6F00" : "rgba(180,100,0,0.7)";
+      ctx.lineWidth = 0.9;
+      ctx.stroke();
+      if (fullGlow) {
+        ctx.fillStyle = "rgba(255,255,255,0.95)";
+        ctx.beginPath(); ctx.arc(0, 0, 1.3 * sc, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.restore();
     }
     ctx.restore();
   }
@@ -1561,66 +2197,48 @@ export class Brawler {
    *  own velocity (smoothed) so the cycle keeps swishing for a moment after
    *  the player stops. Joy pops briefly when a heal pulse fires; sad mood
    *  triggers droopy ears + downward gaze when the owner is on low HP. */
-  private renderPetFollower(ctx: CanvasRenderingContext2D, camX: number, camY: number): void {
-    const pet = this.equippedPet;
-    if (!pet) return;
-    const px = this.petFollowX - camX;
-    const py = this.petFollowY - camY;
-    const t = (typeof performance !== "undefined" ? performance.now() : Date.now()) / 1000;
+  private renderPetFollower(_ctx: CanvasRenderingContext2D, _camX: number, _camY: number): void {
+    // Pets are rendered in the 3D battle scene (battle3DPets.ts).
+  }
 
-    // ── Motion smoothing ──────────────────────────────────────────────────
-    if (this._petPrevT === 0) {
-      this._petPrevX = this.petFollowX;
-      this._petPrevY = this.petFollowY;
-      this._petPrevT = t;
-      this._petLastHealTimer = this.petHealTimer;
+  private renderPetNameLabel(
+    ctx: CanvasRenderingContext2D,
+    camX: number,
+    camY: number,
+    viewerTeam?: string,
+    friendlies?: { x: number; y: number }[],
+  ): void {
+    if (!this.equippedPet || !this.petCustomName) return;
+    const isEnemyToViewer = viewerTeam !== undefined && !this.isPlayer && this.team !== viewerTeam;
+    if ((this.inBush || this.inOctaviaInk) && isEnemyToViewer) {
+      const REVEAL_RADIUS = 140;
+      let revealed = this.bushRevealTimer > 0;
+      if (!revealed && friendlies) {
+        for (const f of friendlies) {
+          const ddx = f.x - this.x;
+          const ddy = f.y - this.y;
+          if (ddx * ddx + ddy * ddy <= REVEAL_RADIUS * REVEAL_RADIUS) {
+            revealed = true;
+            break;
+          }
+        }
+      }
+      if (!revealed) return;
     }
-    const ddt = Math.max(0.001, Math.min(0.1, t - this._petPrevT));
-    const vx = (this.petFollowX - this._petPrevX) / ddt;
-    const vy = (this.petFollowY - this._petPrevY) / ddt;
-    const speed = Math.hypot(vx, vy);
-    const targetMove = speed > 25 ? 1 : 0;
-    this._petMoveSmoothed += (targetMove - this._petMoveSmoothed) * Math.min(1, ddt * 5);
-    this._petPrevX = this.petFollowX;
-    this._petPrevY = this.petFollowY;
-    this._petPrevT = t;
-
-    // ── Mood detection ────────────────────────────────────────────────────
-    // Heal pulse just fired? petHealTimer wraps from ≥interval back to ~0.
-    if (pet.effect.kind === "heal" && this.petHealTimer < this._petLastHealTimer) {
-      this._petJoyTimer = 1.0;
-    }
-    this._petLastHealTimer = this.petHealTimer;
-    this._petJoyTimer = Math.max(0, this._petJoyTimer - ddt);
-    const joy = this._petJoyTimer > 0;
-    const sad = !joy && (this.hp / Math.max(1, this.maxHp)) < 0.30 && this.alive;
-
-    const moveStrength = this._petMoveSmoothed;
-    const bob = Math.sin(t * 4) * 1.5 * (1 - moveStrength) + Math.sin(t * 16) * 2.5 * moveStrength;
-    const walkPhase = t * 8 * (0.6 + moveStrength * 0.8);
-
+    const psx = this.petFollowX - camX;
+    const psy = this.petFollowY - camY;
+    if (psx < -80 || psx > 1280 || psy < -80 || psy > 880) return;
+    const labelY = psy - 22;
     ctx.save();
-    // Soft halo (bigger on joy)
-    const haloR = 30 + (joy ? 10 : 0) + moveStrength * 4;
-    const glow = ctx.createRadialGradient(px, py - 2 + bob, 4, px, py - 2 + bob, haloR);
-    glow.addColorStop(0, pet.color + (joy ? "DD" : "99"));
-    glow.addColorStop(1, pet.color + "00");
-    ctx.fillStyle = glow;
-    ctx.beginPath();
-    ctx.arc(px, py - 2 + bob, haloR, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Pet origin: translate, then optional joy-pop scale.
-    ctx.translate(px, py + bob);
-    if (joy) {
-      const pop = 1 + Math.sin(this._petJoyTimer * Math.PI) * 0.18;
-      ctx.scale(pop, pop);
-    }
-    // Slight lean toward the owner so the pet "faces" them.
-    const facing = Math.atan2(this.y - this.petFollowY, this.x - this.petFollowX);
-    ctx.rotate(Math.cos(facing) * 0.10);
-
-    renderPet(ctx, pet, { walkPhase, moveStrength, t, joy, sad, facing });
+    ctx.font = "bold 10px Arial";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.shadowColor = "rgba(0,0,0,0.9)";
+    ctx.shadowBlur = 4;
+    ctx.fillStyle = this.isPlayer
+      ? "#FFFFFF"
+      : (viewerTeam !== undefined && this.team !== viewerTeam ? "#FFCCBC" : "#C8E6C9");
+    ctx.fillText(this.petCustomName, psx, labelY);
     ctx.restore();
   }
 
@@ -1634,26 +2252,10 @@ export class Brawler {
     ctx.shadowColor = "rgba(0,0,0,0.9)";
     ctx.shadowBlur = 4;
 
-    if (this.isBot) {
-      const tag = "БОТ";
-      const nm = ` ${this.displayName}`;
-      const tagW = ctx.measureText(tag).width;
-      const nmW = ctx.measureText(nm).width;
-      const totalW = tagW + nmW;
-      const startX = sx - totalW / 2;
-      ctx.textAlign = "left";
-      ctx.fillStyle = "#FFD740";
-      ctx.fillText(tag, startX, labelY);
-      ctx.fillStyle = viewerTeam !== undefined && this.team !== viewerTeam
-        ? "#FF8A80"
-        : "rgba(255,255,255,0.92)";
-      ctx.fillText(nm, startX + tagW, labelY);
-    } else {
-      ctx.fillStyle = this.isPlayer
-        ? "#FFFFFF"
-        : (viewerTeam !== undefined && this.team !== viewerTeam ? "#FF8A80" : "#A5D6A7");
-      ctx.fillText(this.displayName, sx, labelY);
-    }
+    ctx.fillStyle = this.isPlayer
+      ? "#FFFFFF"
+      : (viewerTeam !== undefined && this.team !== viewerTeam ? "#FF8A80" : "#A5D6A7");
+    ctx.fillText(this.displayName, sx, labelY);
     ctx.restore();
 
     // ── Badges above the name ──────────────────────────────────────────────

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useI18n } from "../i18n";
 
 // Force the player to play in landscape on mobile devices. The whole UI is
 // designed around a wide 1200×800 stage (canvas, joysticks, lobby panels),
@@ -7,6 +8,7 @@ import { useEffect, useState } from "react";
 // phone-class screen (short side ≤ 900px). We also try to lock the screen
 // orientation programmatically when supported.
 export default function RotateDeviceOverlay() {
+  const { t } = useI18n();
   const [needsRotate, setNeedsRotate] = useState(false);
 
   useEffect(() => {
@@ -94,15 +96,14 @@ export default function RotateDeviceOverlay() {
         backgroundClip: "text",
         marginBottom: 12,
       }}>
-        ПОВЕРНИТЕ УСТРОЙСТВО
+        {t("rotate.title")}
       </div>
       <div style={{
         fontSize: 15, color: "rgba(255,255,255,0.75)",
         maxWidth: 320, lineHeight: 1.5,
         animation: "pulseHint 2s ease-in-out infinite",
       }}>
-        Starfall играется в горизонтальной ориентации.
-        Поверните телефон, чтобы продолжить.
+        {t("rotate.subtitle")}
       </div>
     </div>
   );
