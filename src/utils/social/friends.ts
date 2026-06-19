@@ -8,7 +8,10 @@ import { getProfileByPlayerId } from "../playerGiftSend";
 import { initFriendshipBondOnAdd } from "./friendship";
 import { isValidPlayerIdFormat, normalizePlayerIdQuery } from "../playerId";
 import { getPresenceForPlayerId, formatLastSeen } from "./presence";
+import { getRemotePresenceEntry } from "../cloud/remotePresenceCache";
 import { translate as t } from "../../i18n";
+import { lookupCloudPlayerPublic } from "../cloud/profileCloud";
+import { cacheKnownPlayerStub } from "../knownPlayers";
 
 export interface FriendEntry {
   playerId: string;
@@ -43,8 +46,61 @@ export function addFriendByPlayerId(playerIdInput: string): { success: boolean; 
   }
 
   const target = getProfileByPlayerId(idNorm);
-  if (!target) return { success: false, error: t("friends.error.notFound") };
+  if (!target) {
+    return { success: false, error: t("friends.error.notFound") };
+  }
 
+  return addFriendEntry(idNorm, target.username);
+}
+
+export async function addFriendByPlayerIdAsync(
+  playerIdInput: string,
+): Promise<{ success: boolean; error?: string }> {
+  const me = getCurrentProfile();
+  if (!me?.playerId) return { success: false, error: t("friends.error.unauthorized") };
+
+  const idNorm = normalizePlayerIdQuery(playerIdInput);
+  if (!isValidPlayerIdFormat(idNorm)) {
+    return { success: false, error: t("friends.error.invalidId") };
+  }
+
+  if (normalizePlayerIdQuery(me.playerId) === idNorm) {
+    return { success: false, error: t("friends.error.self") };
+  }
+
+  let target = getProfileByPlayerId(idNorm);
+  if (!target) {
+    const remote = getRemotePresenceEntry(idNorm);
+    if (remote?.username) {
+      cacheKnownPlayerStub({
+        playerId: idNorm,
+        username: remote.username,
+        selectedBrawlerId: remote.brawlerId,
+        profileIconId: remote.profileIconId,
+        trophies: remote.trophies,
+      });
+      target = getProfileByPlayerId(idNorm);
+    }
+  }
+
+  if (!target) {
+    const cloud = await lookupCloudPlayerPublic(idNorm);
+    if (!cloud) return { success: false, error: t("friends.error.notFound") };
+    cacheKnownPlayerStub({
+      playerId: cloud.playerId,
+      username: cloud.username,
+      selectedBrawlerId: cloud.selectedBrawlerId,
+      profileIconId: cloud.profileIconId,
+      trophies: cloud.trophies,
+    });
+    target = getProfileByPlayerId(idNorm);
+  }
+
+  if (!target) return { success: false, error: t("friends.error.notFound") };
+  return addFriendEntry(idNorm, target.username);
+}
+
+function addFriendEntry(idNorm: string, username: string): { success: boolean; error?: string } {
   const list = getFriendsList();
   if (list.some(f => normalizePlayerIdQuery(f.playerId) === idNorm)) {
     return { success: false, error: t("friends.error.alreadyAdded") };
@@ -52,7 +108,7 @@ export function addFriendByPlayerId(playerIdInput: string): { success: boolean; 
 
   const entry: FriendEntry = {
     playerId: idNorm,
-    username: target.username,
+    username,
     addedAt: Date.now(),
   };
   updateProfile({ friends: [...list, entry] } as any);
@@ -84,14 +140,15 @@ export function getFriendRows(): FriendRow[] {
   return getFriendsList().map(entry => {
     const pr = getPresenceForPlayerId(entry.playerId);
     const prof = getProfileByPlayerId(entry.playerId);
+    const remote = getRemotePresenceEntry(entry.playerId);
     return {
       entry,
       online: pr.online,
       screen: pr.screen,
       statusText: formatLastSeen(pr.updatedAt, pr.online),
-      profileIconId: prof?.profileIconId,
-      brawlerId: prof?.selectedBrawlerId || prof?.favoriteBrawlerId || "miya",
-      trophies: prof?.trophies ?? 0,
+      profileIconId: prof?.profileIconId ?? remote?.profileIconId,
+      brawlerId: prof?.selectedBrawlerId || prof?.favoriteBrawlerId || remote?.brawlerId || "miya",
+      trophies: prof?.trophies ?? remote?.trophies ?? 0,
     };
   });
 }

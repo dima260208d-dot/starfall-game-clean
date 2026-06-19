@@ -9,6 +9,7 @@ import {
 } from "../localStorageAPI";
 import { normalizePlayerIdQuery } from "../playerId";
 import { translate as t } from "../../i18n";
+import { getRemotePresenceEntry } from "../cloud/remotePresenceCache";
 
 export type PresenceScreen = "menu" | "results" | "battle" | "offline";
 
@@ -157,6 +158,9 @@ export function clearMyBattlePresence() {
 }
 
 export function getBattleModeForPlayerId(playerId: string): string | null {
+  const idNorm = normalizePlayerIdQuery(playerId);
+  const remote = getRemotePresenceEntry(idNorm);
+  if (remote?.screen === "battle") return remote.battleMode ?? null;
   const pr = readPresenceForPlayerId(playerId);
   if (!pr || pr.screen !== "battle") return null;
   return pr.battleMode ?? null;
@@ -199,6 +203,18 @@ export function getPresenceForPlayerId(playerId: string): {
   updatedAt: number;
   online: boolean;
 } {
+  const idNorm = normalizePlayerIdQuery(playerId);
+  const remote = getRemotePresenceEntry(idNorm);
+  if (remote) {
+    const stale = Date.now() - remote.updatedAt > ONLINE_MS;
+    if (!stale && remote.screen !== "offline") {
+      return { screen: remote.screen, updatedAt: remote.updatedAt, online: true };
+    }
+    if (!stale && remote.screen === "offline") {
+      return { screen: "offline", updatedAt: remote.updatedAt, online: false };
+    }
+  }
+
   const pr = readPresenceForPlayerId(playerId);
   const now = Date.now();
   if (!pr) {
@@ -268,6 +284,11 @@ export function setMyMenuActivity(activity: MenuActivityId | null) {
 }
 
 export function getMenuActivityLabelForPlayerId(playerId: string): string | null {
+  const idNorm = normalizePlayerIdQuery(playerId);
+  const remote = getRemotePresenceEntry(idNorm);
+  if (remote?.screen === "menu" && remote.menuActivity) {
+    return menuActivityLabel(remote.menuActivity);
+  }
   const pr = readPresenceForPlayerId(playerId);
   if (!pr || pr.screen !== "menu" || !pr.menuActivity) return null;
   return menuActivityLabel(pr.menuActivity);

@@ -19,6 +19,7 @@
     "server:dev": "npm run dev --prefix server",
     "party:apply": "node scripts/party-apply-url.mjs",
     "party:health": "node scripts/party-health.mjs",
+    "party:stability": "node scripts/party-stability.mjs",
     "edge:install": "npm install --prefix edge-server",
     "edge:dev": "npm run dev --prefix edge-server",
     "dev": "node scripts/fix-encoding.mjs && node scripts/sync-cloud-config.mjs && vite --config vite.config.ts --host 0.0.0.0",

@@ -6,7 +6,7 @@ import FriendshipLevelUpModal from "../components/social/FriendshipLevelUpModal"
 import FriendshipTitleModal from "../components/social/FriendshipTitleModal";
 import FriendshipRewardsPage from "./FriendshipRewardsPage";
 import {
-  addFriendByPlayerId,
+  addFriendByPlayerIdAsync,
   getFriendRows,
   getFriendsList,
   removeFriend,
@@ -24,6 +24,8 @@ import {
 } from "../utils/social/friendship";
 import { friendshipLevelFromXp } from "../data/friendshipLevels";
 import { useI18n } from "../i18n";
+import { Tr } from "../i18n/Tr";
+import { EmojiIcon } from "../components/EmojiIcon";
 
 interface Props {
   onBack: () => void;
@@ -74,15 +76,16 @@ export default function FriendsPage({ onBack, onViewProfile, onGiftShop }: Props
   }, [levelUpNotice, tick]);
 
   const handleAdd = () => {
-    const r = addFriendByPlayerId(idInput);
-    if (r.success) {
-      setMsg(t("friends.added"));
-      setIdInput("");
-      refresh();
-    } else {
-      setMsg(r.error ?? t("common.error"));
-    }
-    setTimeout(() => setMsg(""), 2400);
+    void addFriendByPlayerIdAsync(idInput).then((r) => {
+      if (r.success) {
+        setMsg(t("friends.added"));
+        setIdInput("");
+        refresh();
+      } else {
+        setMsg(r.error ?? t("common.error"));
+      }
+      setTimeout(() => setMsg(""), 2400);
+    });
   };
 
   const closeLevelUp = () => {
@@ -105,7 +108,7 @@ export default function FriendsPage({ onBack, onViewProfile, onGiftShop }: Props
 
   return (
     <PageBg variant="friends" style={{ fontFamily: "var(--app-font-sans)" }}>
-      <PageHeader onBack={onBack} title={`👥 ${t("friends.title")}`} />
+      <PageHeader onBack={onBack} title={<> <EmojiIcon emoji="👥" size={20} /> <Tr id="friends.title" /></>} />
       <PageBody style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", gap: 10 }}>
         <div style={{
           background: "rgba(0,0,0,0.45)",
@@ -114,7 +117,7 @@ export default function FriendsPage({ onBack, onViewProfile, onGiftShop }: Props
           padding: 10,
         }}>
           <div style={{ fontSize: 11, fontWeight: 800, color: "rgba(255,255,255,0.65)", marginBottom: 6 }}>
-            {t("friends.addById")}
+            <Tr id="friends.addById" />
           </div>
           <div style={{ display: "flex", gap: 6 }}>
             <input
@@ -125,7 +128,7 @@ export default function FriendsPage({ onBack, onViewProfile, onGiftShop }: Props
               style={{ flex: 1, fontSize: 13, fontFamily: "monospace" }}
             />
             <button type="button" className="ui-btn ui-btn--primary" onClick={handleAdd} style={{ minWidth: 88 }}>
-              {t("friends.addBtn")}
+              <Tr id="friends.addBtn" />
             </button>
           </div>
           {msg && (
@@ -136,13 +139,13 @@ export default function FriendsPage({ onBack, onViewProfile, onGiftShop }: Props
         </div>
 
         <div style={{ fontSize: 12, fontWeight: 900, color: "rgba(255,255,255,0.75)" }}>
-          {t("friends.listCount", { count: String(rows.length) })}
+          <Tr id="friends.listCount" params={{ count: String(rows.length) }} />
         </div>
 
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
           {rows.length === 0 && (
             <div style={{ textAlign: "center", color: "rgba(255,255,255,0.45)", fontSize: 13, padding: 24 }}>
-              {t("friends.empty")}
+              <Tr id="friends.empty" />
             </div>
           )}
           {rows.map(row => (
@@ -252,27 +255,27 @@ function FriendActionModal({
         }}
       >
         <div style={{ fontSize: 12, fontWeight: 900, color: "#FFD740", textAlign: "center", marginBottom: 4 }}>
-          {t("friendship.levelShort", { level: String(level) })}
+          <Tr id="friendship.levelShort" params={{ level: String(level) }} />
         </div>
         <button type="button" className="ui-btn ui-btn--primary" onClick={onProfile}>
-          {t("friends.viewProfile")}
+          <Tr id="friends.viewProfile" />
         </button>
         <button type="button" className="ui-btn ui-btn--primary" onClick={onGift}>
-          🎁 {t("friendship.giftBtn")}
+          <EmojiIcon emoji="🎁" size={18} /> <Tr id="friendship.giftBtn" />
         </button>
         <button type="button" className="ui-btn ui-btn--primary" onClick={onLevelRewards}>
-          🏆 {t("friendship.rewardsBtn")}
+          <EmojiIcon emoji="🏆" size={18} /> <Tr id="friendship.rewardsBtn" />
         </button>
         {showTitleBtn && (
           <button type="button" className="ui-btn ui-btn--primary" onClick={onCreateTitle} style={{ borderColor: "#FFD740" }}>
-            ✨ {t("friendship.createTitleBtn")}
+            <EmojiIcon emoji="✨" size={18} /> <Tr id="friendship.createTitleBtn" />
           </button>
         )}
         <button type="button" className="ui-btn ui-btn--danger" onClick={onRemove}>
-          {t("friends.remove")}
+          <Tr id="friends.remove" />
         </button>
         <button type="button" className="ui-btn ui-btn--secondary" onClick={onClose}>
-          {t("common.cancel")}
+          <Tr id="common.cancel" />
         </button>
       </div>
     </div>

@@ -53,6 +53,17 @@ import {
 } from "./profileIconUtils";
 import { PROFILE_ICON_BY_ID, REMOVED_PROFILE_ICON_IDS } from "../data/profileIcons";
 import {
+  DEFAULT_PORTRAIT_BACKGROUND_ID,
+  PORTRAIT_BACKGROUND_BY_ID,
+  PORTRAIT_BG_GEM_COST,
+} from "../data/portraitBackgrounds";
+import { BRAWLER_TRAIL_BY_ID, TRAIL_GEM_COST } from "../data/brawlerTrails";
+import { getEquippedTrailForBrawler, isTrailOwned } from "./trailEquip";
+import {
+  ensureDefaultPortraitBackgroundUnlocked,
+  isPortraitBackgroundUnlocked,
+} from "./portraitBackgroundUtils";
+import {
   getIntroDisplayIconIds,
   normalizeIntroDisplayIconIds,
   type IntroDisplayIconSlot,
@@ -237,6 +248,17 @@ export interface UserProfile {
   introDisplayIconIds?: string[];
   /** Extra profile icons unlocked from chests (misc with unlock.type stored). */
   unlockedProfileIcons?: string[];
+  /** Portrait frame backgrounds for favorite / battle intro cards. */
+  unlockedPortraitBackgrounds?: string[];
+  equippedPortraitBackgroundId?: string;
+  /** Purchased motion trail cosmetics (200 gems each). */
+  ownedMotionTrails?: string[];
+  /** Global trail for all brawlers (when mode is global). */
+  equippedMotionTrailGlobalId?: string | null;
+  /** Per-brawler trail override id. */
+  equippedMotionTrailByBrawler?: Record<string, string>;
+  /** global = use equippedMotionTrailGlobalId; individual = per-brawler id. */
+  brawlerTrailMode?: Record<string, "global" | "individual">;
   /** Display name color in profile UI only — battle always shows white. */
   usernameColor?: string;
   /** Timestamp (ms) of last viewed club chat message — drives nav badge. */
@@ -260,9 +282,15 @@ export interface UserProfile {
     /** Ranked battle cup change (not trophy road). */
     rankedCupDelta?: number;
     rankedBattle?: boolean;
+    /** Player-created map battle (no trophies). */
+    playerMapBattle?: boolean;
     /** Pro Star Pass tokens gained this match (after ×2 if paid). */
     proStarPassTokensGained?: number;
   };
+  /** Последняя успешная синхронизация профиля с облаком (ms). */
+  cloudSyncedAt?: number;
+  /** Локальное изменение профиля (ms) — для облачной синхронизации. */
+  profileLocalRev?: number;
   battleHistory?: BattleRecord[];
   createdAt: number;
 
@@ -433,6 +461,12 @@ export interface UserProfile {
     sentAt: number;
     side?: "left" | "right";
   };
+  outgoingPartyInvites?: Array<{
+    targetPlayerId: string;
+    targetUsername: string;
+    sentAt: number;
+    side?: "left" | "right" | "back1_left" | "back1_right" | "back2_left" | "back2_right";
+  }>;
   /** Dev/test: бот-друг автоматически принимает приглашение в команду. */
   socialTestAutoAcceptParty?: boolean;
 
@@ -1218,12 +1252,16 @@ export function claimPaidClashPassReward(level: number): { success: boolean; rew
 const PROFILES_KEY = "clashArena_profiles";
 const CURRENT_USER_KEY = "clashArena_currentUser";
 
-function simpleHash(s: string): string {
+export function hashAccountPassword(s: string): string {
   let h = 0;
   for (let i = 0; i < s.length; i++) {
     h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
   }
   return h.toString(16);
+}
+
+function simpleHash(s: string): string {
+  return hashAccountPassword(s);
 }
 
 /** Выдать ID только если нет; существующий валидный ID никогда не перезаписываем. */
@@ -1273,6 +1311,9 @@ export function getAllProfiles(): Record<string, UserProfile> {
 
 export function saveProfiles(profiles: Record<string, UserProfile>): void {
   localStorage.setItem(PROFILES_KEY, JSON.stringify(profiles));
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event("clash-profile-local-changed"));
+  }
 }
 
 export function getCurrentUsername(): string | null {
@@ -1350,6 +1391,34 @@ export function normalizeProfile(p: UserProfile): UserProfile {
     introDisplayIconIds: normalizeIntroDisplayIconIds(p),
     unlockedProfileIcons: (p.unlockedProfileIcons || []).filter(
       (id: string) => !id.startsWith("misc:") && !REMOVED_PROFILE_ICON_IDS.has(id) && PROFILE_ICON_BY_ID.has(id),
+    ),
+    unlockedPortraitBackgrounds: ensureDefaultPortraitBackgroundUnlocked({
+      ...p,
+      unlockedPortraitBackgrounds: (p.unlockedPortraitBackgrounds || []).filter(
+        (id: string) => PORTRAIT_BACKGROUND_BY_ID.has(id),
+      ),
+    }),
+    equippedPortraitBackgroundId: (() => {
+      const id = p.equippedPortraitBackgroundId ?? DEFAULT_PORTRAIT_BACKGROUND_ID;
+      return PORTRAIT_BACKGROUND_BY_ID.has(id) ? id : DEFAULT_PORTRAIT_BACKGROUND_ID;
+    })(),
+    ownedMotionTrails: (p.ownedMotionTrails || []).filter(
+      (id: string) => BRAWLER_TRAIL_BY_ID.has(id),
+    ),
+    equippedMotionTrailGlobalId: (() => {
+      const id = p.equippedMotionTrailGlobalId ?? null;
+      if (!id || !BRAWLER_TRAIL_BY_ID.has(id)) return null;
+      return id;
+    })(),
+    equippedMotionTrailByBrawler: Object.fromEntries(
+      Object.entries(p.equippedMotionTrailByBrawler || {}).filter(
+        ([bid, tid]) => typeof bid === "string" && BRAWLER_TRAIL_BY_ID.has(tid),
+      ),
+    ),
+    brawlerTrailMode: Object.fromEntries(
+      Object.entries(p.brawlerTrailMode || {}).filter(
+        ([bid, mode]) => typeof bid === "string" && (mode === "global" || mode === "individual"),
+      ),
     ),
     usernameColor: p.usernameColor || "#FFFFFF",
     selectedBrawlerId: safeSelected(p.selectedBrawlerId),
@@ -1476,6 +1545,12 @@ export function normalizeProfile(p: UserProfile): UserProfile {
     partyCode: p.partyCode ?? null,
     partyInviteIncoming: p.partyInviteIncoming,
     outgoingPartyInvite: p.outgoingPartyInvite,
+    outgoingPartyInvites: (() => {
+      const multi = p.outgoingPartyInvites;
+      if (Array.isArray(multi) && multi.length) return multi;
+      if (p.outgoingPartyInvite) return [p.outgoingPartyInvite];
+      return undefined;
+    })(),
     socialTestAutoAcceptParty: p.socialTestAutoAcceptParty,
     bossRaid: (() => {
       const raw = p.bossRaid;
@@ -1626,6 +1701,32 @@ export function findProfileStorageKey(query: string): string | null {
     if (key.toLowerCase() === lower) return key;
   }
   return null;
+}
+
+/** Ключ профиля по e-mail (без учёта регистра). */
+export function findProfileStorageKeyByEmail(email: string): string | null {
+  const norm = email.trim().toLowerCase();
+  if (!norm.includes("@")) return null;
+  for (const [key, raw] of Object.entries(getAllProfiles())) {
+    const em = raw.email?.trim().toLowerCase();
+    if (em && em === norm) return key;
+  }
+  return null;
+}
+
+/** Локальный профиль, привязанный к облачному аккаунту (playerId / email / ник). */
+export function findLocalProfileKeyForCloudAccount(input: {
+  playerId: string;
+  email?: string | null;
+  username: string;
+}): string | null {
+  const byId = findProfileStorageKeyByPlayerId(input.playerId);
+  if (byId) return byId;
+  if (input.email) {
+    const byEmail = findProfileStorageKeyByEmail(input.email);
+    if (byEmail) return byEmail;
+  }
+  return findProfileStorageKey(input.username);
 }
 
 /** Ключ профиля только по уникальному ID игрока (никнейм не используется). */
@@ -1950,12 +2051,14 @@ export function createProfile(username: string, password: string, email?: string
     return { success: false, error: "Username already taken" };
   }
   const usedIds = collectUsedPlayerIds(profiles);
+  const now = Date.now();
   const newProfile: UserProfile = normalizeProfile({
     username: trimmed,
     playerId: generateUniquePlayerId(usedIds),
     passwordHash: simpleHash(password),
     email: trimmedEmail || undefined,
-    createdAt: Date.now(),
+    createdAt: now,
+    profileLocalRev: now,
   } as UserProfile);
   profiles[trimmed] = newProfile;
   saveProfiles(profiles);
@@ -1984,6 +2087,7 @@ export function createGuestProfile(): void {
   const guestName = `Guest_${Math.floor(Math.random() * 9999)}`;
   const profiles = getAllProfiles();
   const usedIds = collectUsedPlayerIds(profiles);
+  const now = Date.now();
   profiles[guestName] = normalizeProfile({
     username: guestName,
     playerId: generateUniquePlayerId(usedIds),
@@ -1991,7 +2095,8 @@ export function createGuestProfile(): void {
     coins: 200,
     gems: 10,
     powerPoints: 5,
-    createdAt: Date.now(),
+    createdAt: now,
+    profileLocalRev: now,
   } as UserProfile);
   saveProfiles(profiles);
   setCurrentUsername(guestName);
@@ -2009,6 +2114,8 @@ export function updateProfile(updates: Partial<UserProfile>, opts?: { skipTreasu
     merged = applyTreasuryOnResourceGrant(current, merged);
   }
   profiles[username] = mergeStarFeatPeaksIntoProfile({ ...current, ...merged });
+  const touched = profiles[username];
+  profiles[username] = { ...touched, profileLocalRev: Date.now() };
   saveProfiles(profiles);
 }
 
@@ -2106,6 +2213,8 @@ export interface LocalAccountSummary {
   isCurrent: boolean;
   totalGamesPlayed: number;
   totalWins: number;
+  coins: number;
+  trophies: number;
   createdAt: number;
 }
 
@@ -2121,6 +2230,8 @@ export function listLocalAccounts(): LocalAccountSummary[] {
       isCurrent: key === current,
       totalGamesPlayed: p.totalGamesPlayed,
       totalWins: p.totalWins,
+      coins: p.coins,
+      trophies: p.trophies,
       createdAt: p.createdAt,
     }))
     .sort((a, b) => {
@@ -2320,7 +2431,9 @@ import {
   rollMonsterInvasionCompletionBonus,
 } from "./monsterInvasionRewards";
 import { applyWinStreakAfterMatch, isWinStreakVisible } from "./winStreak";
+import { getBattleAfkWinTrophySuppressed } from "../game/battleAfk";
 import { isRankedBattleSession } from "./rankedMapPick";
+import { isPlayerMapBattleSession } from "./playerMaps/playerMapSession";
 import { applyRankedCupDelta } from "./rankedProgress";
 import {
   getMasteryLevel,
@@ -2520,6 +2633,84 @@ export function recordRankedBattleOnlyResult(opts: {
   };
 }
 
+function recordPlayerMapBattleOnlyResult(opts: {
+  won: boolean;
+  mode: string;
+  brawlerId?: string;
+  place?: number;
+  totalPlayers?: number;
+  enemies?: Array<{ id: string; name: string; isBot: boolean }>;
+  durationSec?: number;
+  killCount?: number;
+  damageDealt?: number;
+  healingDone?: number;
+  superUses?: number;
+  powerCubesCollected?: number;
+}): ReturnType<typeof recordGameResult> {
+  const profile = getCurrentProfile();
+  if (!profile) {
+    return { trophyDelta: 0, xpGained: 0, coinsEarned: 0, place: 0, clashPassUp: false, winStreak: 0, winStreakBonus: 0, masteryXpGained: 0, masteryLeaderBonus: 0 };
+  }
+  const usedId = opts.brawlerId || profile.selectedBrawlerId;
+  const place = opts.place ?? (opts.won ? 1 : 2);
+  const xpGained = opts.won ? 14 : 6;
+  const coinsEarned = opts.won ? 10 : 4;
+  const newRecord: BattleRecord = {
+    id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    ts: Date.now(),
+    mode: opts.mode,
+    brawlerId: usedId,
+    won: opts.won,
+    place,
+    totalPlayers: opts.totalPlayers ?? 6,
+    trophyDelta: 0,
+    xpGained,
+    coinsEarned,
+    durationSec: opts.durationSec,
+    enemies: opts.enemies ?? [],
+  };
+  const newHistory = [newRecord, ...(profile.battleHistory ?? [])].slice(0, 20);
+  updateProfile({
+    coins: profile.coins + coinsEarned,
+    xp: profile.xp + xpGained,
+    totalGamesPlayed: profile.totalGamesPlayed + 1,
+    totalWins: opts.won ? profile.totalWins + 1 : profile.totalWins,
+    totalLosses: !opts.won ? profile.totalLosses + 1 : profile.totalLosses,
+    lastResult: {
+      place,
+      trophyDelta: 0,
+      xpGained,
+      mode: opts.mode,
+      won: opts.won,
+      playerMapBattle: true,
+    },
+    battleHistory: newHistory,
+  });
+  trackQuestsByContext({
+    won: opts.won,
+    mode: opts.mode,
+    place,
+    actualDelta: 0,
+    brawlerId: usedId,
+    killCount: opts.killCount ?? 0,
+    damageDealt: opts.damageDealt ?? 0,
+    healingDone: opts.healingDone ?? 0,
+    superUses: opts.superUses ?? 0,
+    powerCubesCollected: opts.powerCubesCollected ?? 0,
+  });
+  return {
+    trophyDelta: 0,
+    xpGained,
+    coinsEarned,
+    place,
+    clashPassUp: false,
+    winStreak: 0,
+    winStreakBonus: 0,
+    masteryXpGained: 0,
+    masteryLeaderBonus: 0,
+  };
+}
+
 export function recordGameResult(opts: {
   won: boolean;
   mode: string;
@@ -2560,6 +2751,9 @@ export function recordGameResult(opts: {
   }
   if (isRankedBattleSession()) {
     return recordRankedBattleOnlyResult(opts);
+  }
+  if (isPlayerMapBattleSession()) {
+    return recordPlayerMapBattleOnlyResult(opts);
   }
   const { won, mode } = opts;
   if (mode === "bossraid") {
@@ -2628,7 +2822,10 @@ export function recordGameResult(opts: {
 
   const monsterKillBonus = Math.max(0, opts.monsterKillTrophyBonus ?? 0);
   // Trophy road uses admin table values only (+ monster-hide kill bonus). Win-streak bonus is shown separately.
-  const trophyDelta = baseTrophyDelta + monsterKillBonus;
+  let trophyDelta = baseTrophyDelta + monsterKillBonus;
+  if (won && getBattleAfkWinTrophySuppressed() && trophyDelta > 0) {
+    trophyDelta = 0;
+  }
   const winStreak = streakApply.newStreak;
   const winStreakBonus = streakApply.streakBonus;
   const newTrophies = Math.max(0, Math.min(MAX_TROPHIES, profile.trophies + trophyDelta));
@@ -2738,7 +2935,7 @@ export function recordGameResult(opts: {
     } catch { /* ignore */ }
   }
 
-  const dailyWin = won
+  const dailyWin = won && actualDelta > 0
     ? buildDailyWinVictoryPatch(profile, mode)
     : { patch: {} as Partial<UserProfile>, granted: false };
 
@@ -3113,6 +3310,13 @@ export function applyProfilePetToBrawler(b: Brawler, profile?: UserProfile | nul
   const pet = getPetById(petId);
   const customName = petId ? getPetCustomName(petId, p) : null;
   b.setEquippedPet(pet, customName);
+  b.setMotionTrail(getEquippedTrailForBrawler(p, b.stats.id));
+}
+
+/** @deprecated Use applyProfilePetToBrawler — trail is applied together. */
+export function applyProfileTrailToBrawler(b: Brawler, profile?: UserProfile | null): void {
+  const p = profile ?? getCurrentProfile();
+  b.setMotionTrail(getEquippedTrailForBrawler(p, b.stats.id));
 }
 
 export function getNewPets(): string[] {
@@ -3464,6 +3668,108 @@ export function grantProfileIconToPlayer(iconId: string): { success: boolean; er
     updateProfile({ unlockedProfileIcons: grantProfileIcon(profile, iconId) });
     return { success: true };
   }
+  return { success: true };
+}
+
+export function purchasePortraitBackground(backgroundId: string): { success: boolean; error?: string } {
+  const profile = getCurrentProfile();
+  if (!profile) return { success: false, error: "Не авторизован" };
+  const def = PORTRAIT_BACKGROUND_BY_ID.get(backgroundId);
+  if (!def) return { success: false, error: "Неизвестный фон" };
+  if (def.free) return { success: false, error: "Фон уже доступен" };
+  if (isPortraitBackgroundUnlocked(profile, backgroundId)) {
+    return { success: false, error: "Фон уже куплен" };
+  }
+  if (profile.gems < PORTRAIT_BG_GEM_COST) {
+    return { success: false, error: `Нужно ${PORTRAIT_BG_GEM_COST} кристаллов` };
+  }
+  const unlocked = new Set(profile.unlockedPortraitBackgrounds ?? []);
+  unlocked.add(backgroundId);
+  updateProfile({
+    gems: profile.gems - PORTRAIT_BG_GEM_COST,
+    unlockedPortraitBackgrounds: ensureDefaultPortraitBackgroundUnlocked({
+      ...profile,
+      unlockedPortraitBackgrounds: [...unlocked],
+    }),
+  });
+  return { success: true };
+}
+
+export function setEquippedPortraitBackground(backgroundId: string): { success: boolean; error?: string } {
+  const profile = getCurrentProfile();
+  if (!profile) return { success: false, error: "Не авторизован" };
+  if (!PORTRAIT_BACKGROUND_BY_ID.has(backgroundId)) {
+    return { success: false, error: "Неизвестный фон" };
+  }
+  if (!isPortraitBackgroundUnlocked(profile, backgroundId)) {
+    return { success: false, error: "Сначала купите фон" };
+  }
+  updateProfile({ equippedPortraitBackgroundId: backgroundId });
+  return { success: true };
+}
+
+export function purchaseMotionTrail(trailId: string): { success: boolean; error?: string } {
+  const profile = getCurrentProfile();
+  if (!profile) return { success: false, error: "Не авторизован" };
+  if (!BRAWLER_TRAIL_BY_ID.has(trailId)) return { success: false, error: "Неизвестный след" };
+  if (isTrailOwned(profile, trailId)) return { success: false, error: "След уже куплен" };
+  if (profile.gems < TRAIL_GEM_COST) {
+    return { success: false, error: `Нужно ${TRAIL_GEM_COST} кристаллов` };
+  }
+  const owned = new Set(profile.ownedMotionTrails ?? []);
+  owned.add(trailId);
+  updateProfile({
+    gems: profile.gems - TRAIL_GEM_COST,
+    ownedMotionTrails: [...owned],
+  });
+  return { success: true };
+}
+
+export function setGlobalEquippedMotionTrail(trailId: string | null): { success: boolean; error?: string } {
+  const profile = getCurrentProfile();
+  if (!profile) return { success: false, error: "Не авторизован" };
+  if (trailId && (!BRAWLER_TRAIL_BY_ID.has(trailId) || !isTrailOwned(profile, trailId))) {
+    return { success: false, error: "Сначала купите след" };
+  }
+  updateProfile({ equippedMotionTrailGlobalId: trailId });
+  return { success: true };
+}
+
+export function setBrawlerTrailMode(
+  brawlerId: string,
+  mode: "global" | "individual",
+): { success: boolean; error?: string } {
+  const profile = getCurrentProfile();
+  if (!profile) return { success: false, error: "Не авторизован" };
+  if (!BRAWLERS.some(b => b.id === brawlerId)) return { success: false, error: "Неизвестный боец" };
+  const brawlerTrailMode = { ...(profile.brawlerTrailMode || {}), [brawlerId]: mode };
+  const patch: Partial<UserProfile> = { brawlerTrailMode };
+  if (mode === "global") {
+    const by = { ...(profile.equippedMotionTrailByBrawler || {}) };
+    delete by[brawlerId];
+    patch.equippedMotionTrailByBrawler = by;
+  }
+  updateProfile(patch);
+  return { success: true };
+}
+
+export function setBrawlerIndividualMotionTrail(
+  brawlerId: string,
+  trailId: string | null,
+): { success: boolean; error?: string } {
+  const profile = getCurrentProfile();
+  if (!profile) return { success: false, error: "Не авторизован" };
+  if (!BRAWLERS.some(b => b.id === brawlerId)) return { success: false, error: "Неизвестный боец" };
+  if (trailId && (!BRAWLER_TRAIL_BY_ID.has(trailId) || !isTrailOwned(profile, trailId))) {
+    return { success: false, error: "Сначала купите след" };
+  }
+  const equippedMotionTrailByBrawler = { ...(profile.equippedMotionTrailByBrawler || {}) };
+  if (trailId) equippedMotionTrailByBrawler[brawlerId] = trailId;
+  else delete equippedMotionTrailByBrawler[brawlerId];
+  updateProfile({
+    brawlerTrailMode: { ...(profile.brawlerTrailMode || {}), [brawlerId]: "individual" },
+    equippedMotionTrailByBrawler,
+  });
   return { success: true };
 }
 

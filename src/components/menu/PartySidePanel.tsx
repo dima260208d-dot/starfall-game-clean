@@ -1,24 +1,42 @@
 import { useEffect, useMemo, useState } from "react";
 import { useI18n } from "../../i18n";
 import FriendRowCard from "../FriendRowCard";
+import OnlineTeamCard from "./OnlineTeamCard";
 import { getModeIconUrl } from "../../utils/modeAssets";
+import { EmojiIcon } from "../EmojiIcon";
+import { Tr } from "../../i18n/Tr";
 import {
-  getOnlineFriendsForParty,
+  getMyPartyCode,
+  cancelMyPartyJoinRequest,
+  cancelOutgoingInviteForTarget,
+  getDemoOnlinePartyGroup,
+  getDemoOnlinePartyGroupFull,
+  getMyPartyRoom,
+  getOnlinePartyGroupsForPanel,
+  getOutgoingInviteTo,
   inviteFriendToParty,
+  isInAnyParty,
+  isPartyRoomAtCapacity,
   joinPartyByCode,
+  isFriendInMyParty,
   PARTY_CHANGED_EVENT,
+  PARTY_JOIN_REQUEST_EVENT,
+  requestJoinParty,
   type PartySlot,
 } from "../../utils/social/party";
+import { PRESENCE_CHANGED_EVENT } from "../../utils/social/presence";
 
 /** Ширина доп. меню (HamburgerDrawer, panel «menu»). */
 export const AUX_MENU_WIDTH = 280;
-/** Панель «В сети» — в 2 раза шире доп. меню. */
-export const ONLINE_PANEL_WIDTH = AUX_MENU_WIDTH * 2;
+/** Панель «В сети» — широкая, карточки команд ~675px. */
+export const ONLINE_PANEL_WIDTH = 700;
+export const PARTY_CHAT_PANEL_WIDTH = 350;
 
 export type PartyPanelSide = "left" | "right";
 
-function panelSideForSlot(slot: PartySlot): PartyPanelSide {
-  return slot.includes("right") ? "right" : "left";
+/** Панели «В сети» и чат команды всегда справа. */
+function panelSideForSlot(_slot: PartySlot): PartyPanelSide {
+  return "right";
 }
 
 interface Props {
@@ -40,6 +58,10 @@ const iconBtnStyle: React.CSSProperties = {
   fontFamily: "inherit",
 };
 
+/** Прозрачность как у всплывашки Астрала, те же фиолетовые оттенки. */
+const PANEL_BG =
+  "linear-gradient(180deg, rgba(36,18,72,0.72) 0%, rgba(12,6,32,0.78) 52%, rgba(24,12,52,0.70) 100%)";
+
 export default function PartySidePanel({ inviteSlot, onClose, onViewProfile, onSpectate }: Props) {
   const { t } = useI18n();
   const side = panelSideForSlot(inviteSlot);
@@ -47,12 +69,31 @@ export default function PartySidePanel({ inviteSlot, onClose, onViewProfile, onS
   const [msg, setMsg] = useState("");
   const [actionPlayer, setActionPlayer] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
-  const friends = useMemo(() => getOnlineFriendsForParty(), [tick]);
+  const { groups, soloFriends } = useMemo(() => getOnlinePartyGroupsForPanel(), [tick]);
+  const displayGroups = useMemo(
+    () => [
+      getDemoOnlinePartyGroup(),
+      getDemoOnlinePartyGroupFull(),
+      ...groups.filter(g => !g.isDemo),
+    ],
+    [groups],
+  );
+  const myPartyCode = getMyPartyCode()?.toUpperCase() ?? null;
+  const myRoom = getMyPartyRoom();
+  const teamFull = myRoom ? isPartyRoomAtCapacity(myRoom) : false;
+  const inAnotherTeam = isInAnyParty();
+  const onlineCount = displayGroups.reduce((s, g) => s + g.members.length, 0) + soloFriends.length;
 
   useEffect(() => {
     const bump = () => setTick(t => t + 1);
     window.addEventListener(PARTY_CHANGED_EVENT, bump);
-    return () => window.removeEventListener(PARTY_CHANGED_EVENT, bump);
+    window.addEventListener(PARTY_JOIN_REQUEST_EVENT, bump);
+    window.addEventListener(PRESENCE_CHANGED_EVENT, bump);
+    return () => {
+      window.removeEventListener(PARTY_CHANGED_EVENT, bump);
+      window.removeEventListener(PARTY_JOIN_REQUEST_EVENT, bump);
+      window.removeEventListener(PRESENCE_CHANGED_EVENT, bump);
+    };
   }, []);
 
   const handleInvite = (playerId: string) => {
@@ -63,14 +104,31 @@ export default function PartySidePanel({ inviteSlot, onClose, onViewProfile, onS
   };
 
   const handleJoinCode = () => {
-    const r = joinPartyByCode(codeInput);
-    setMsg(r.success ? t("party.joinedTeam") : (r.error ?? t("common.error")));
-    if (r.success) onClose();
+    void joinPartyByCode(codeInput).then((r) => {
+      setMsg(r.success ? t("party.joinedTeam") : (r.error ?? t("common.error")));
+      if (r.success) onClose();
+      setTimeout(() => setMsg(""), 2200);
+    });
+  };
+
+  const handleJoinTeam = (code: string) => {
+    void requestJoinParty(code).then((r) => {
+      setMsg(r.success ? t("party.joinRequestSent") : (r.error ?? t("common.error")));
+      setTick(t => t + 1);
+      setTimeout(() => setMsg(""), 2400);
+    });
+  };
+
+  const handleCancelJoinTeam = (code: string) => {
+    const r = cancelMyPartyJoinRequest(code);
+    setMsg(r.success ? t("party.joinRequestCanceled") : (r.error ?? t("common.error")));
+    setTick(t => t + 1);
     setTimeout(() => setMsg(""), 2200);
   };
 
   const selected = actionPlayer
-    ? friends.find(f => f.playerId === actionPlayer)
+    ? soloFriends.find(f => f.playerId === actionPlayer)
+      ?? displayGroups.flatMap(g => g.members).find(m => m.playerId === actionPlayer)
     : null;
 
   const slideAnim = side === "right" ? "partySlideInRight 0.22s ease-out" : "partySlideInLeft 0.22s ease-out";
@@ -100,18 +158,18 @@ export default function PartySidePanel({ inviteSlot, onClose, onViewProfile, onS
           flexDirection: "column",
           overflow: "hidden",
           animation: slideAnim,
-          background: "linear-gradient(180deg, rgba(36,18,72,0.94) 0%, rgba(12,6,32,0.97) 52%, rgba(24,12,52,0.95) 100%)",
+          background: PANEL_BG,
           ...(side === "right"
             ? {
                 borderLeft: "1px solid rgba(206,147,216,0.42)",
-                boxShadow: "-20px 0 60px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.08)",
+                boxShadow: "-20px 0 60px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.08)",
               }
             : {
                 borderRight: "1px solid rgba(206,147,216,0.42)",
-                boxShadow: "20px 0 60px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.08)",
+                boxShadow: "20px 0 60px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.08)",
               }),
-          backdropFilter: "blur(12px) saturate(1.15)",
-          WebkitBackdropFilter: "blur(12px) saturate(1.15)",
+          backdropFilter: "blur(14px) saturate(1.2)",
+          WebkitBackdropFilter: "blur(14px) saturate(1.2)",
         }}
       >
         <style>{`
@@ -126,20 +184,20 @@ export default function PartySidePanel({ inviteSlot, onClose, onViewProfile, onS
             justifyContent: "space-between",
             padding: "18px 22px",
             borderBottom: "1px solid rgba(255,255,255,0.12)",
-            background: "rgba(255,255,255,0.05)",
+            background: "rgba(255,255,255,0.04)",
             flexShrink: 0,
           }}
         >
           <div>
             <div style={{ fontSize: 17, fontWeight: 900, color: "#CE93D8", letterSpacing: "0.02em" }}>
-              {t("party.online", { count: friends.length })}
+              <Tr id="party.online" params={{ count: onlineCount }} />
             </div>
             <div style={{ fontSize: 12, color: "rgba(255,255,255,0.42)", marginTop: 4, fontWeight: 600 }}>
-              {t("party.inviteHint")}
+              <Tr id="party.inviteHint" />
             </div>
           </div>
           <button type="button" onClick={onClose} style={iconBtnStyle} aria-label={t("common.close")}>
-            ✕
+            <EmojiIcon emoji="✕" size={20} />
           </button>
         </div>
 
@@ -152,11 +210,12 @@ export default function PartySidePanel({ inviteSlot, onClose, onViewProfile, onS
             padding: "14px 16px",
             display: "flex",
             flexDirection: "column",
-            gap: 10,
+            alignContent: "flex-start",
+            gap: 12,
             WebkitOverflowScrolling: "touch",
           }}
         >
-          {friends.length === 0 && (
+          {onlineCount === 0 && (
             <div
               style={{
                 textAlign: "center",
@@ -164,21 +223,51 @@ export default function PartySidePanel({ inviteSlot, onClose, onViewProfile, onS
                 color: "rgba(255,255,255,0.42)",
               }}
             >
-              <div style={{ fontSize: 40, marginBottom: 12 }}>👥</div>
-              <div style={{ fontSize: 15, fontWeight: 700 }}>{t("party.noFriendsOnline")}</div>
+              <div style={{ fontSize: 40, marginBottom: 12 }}><EmojiIcon emoji="👥" size={24} /></div>
+              <div style={{ fontSize: 15, fontWeight: 700 }}><Tr id="party.noFriendsOnline" /></div>
             </div>
           )}
 
-          {friends.map(f => (
+          {displayGroups.map(group => (
+            <div key={group.code} style={{ flexShrink: 0, width: "100%" }}>
+              <OnlineTeamCard
+                group={group}
+                inMyParty={myPartyCode === group.code}
+                inAnotherTeam={inAnotherTeam && myPartyCode !== group.code}
+                onJoin={code => {
+                  if (group.isDemo) {
+                    setMsg(t("party.demoTeamHint"));
+                    setTimeout(() => setMsg(""), 2400);
+                    return;
+                  }
+                  handleJoinTeam(code);
+                }}
+                onCancelJoin={code => {
+                  if (group.isDemo) {
+                    setMsg(t("party.demoTeamHint"));
+                    setTimeout(() => setMsg(""), 2400);
+                    return;
+                  }
+                  handleCancelJoinTeam(code);
+                }}
+                onMemberClick={setActionPlayer}
+              />
+            </div>
+          ))}
+
+          {soloFriends.map(f => (
             <FriendRowCard
               key={f.playerId}
+              style={{ flexShrink: 0, minHeight: 90, boxSizing: "border-box" }}
               username={f.username}
               statusText={f.screen === "battle" ? t("presence.screen.battle") : f.statusText}
               trophies={f.trophies}
               online={f.online}
               profileIconId={f.profileIconId}
               brawlerId={f.brawlerId}
+              squareAvatar
               modeIconUrl={f.battleMode ? getModeIconUrl(f.battleMode) : null}
+              modeIconBesideAvatar={Boolean(f.battleMode && f.screen === "battle")}
               onClick={() => setActionPlayer(f.playerId)}
               trailing={
                 f.inMyParty ? (
@@ -196,9 +285,11 @@ export default function PartySidePanel({ inviteSlot, onClose, onViewProfile, onS
                     }}
                     onClick={e => e.stopPropagation()}
                   >
-                    {t("party.inTeam")}
+                    <Tr id="party.inTeam" />
                   </span>
-                ) : (
+                ) : (() => {
+                  const pendingInvite = getOutgoingInviteTo(f.playerId);
+                  return (
                   <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
                     {f.screen === "battle" && f.online && onSpectate && (
                       <button
@@ -217,27 +308,52 @@ export default function PartySidePanel({ inviteSlot, onClose, onViewProfile, onS
                           onClose();
                         }}
                       >
-                        👁 {t("party.spectateShort")}
+                        <EmojiIcon emoji="👁" size={18} /> <Tr id="party.spectateShort" />
                       </button>
                     )}
-                    <button
-                      type="button"
-                      className="ui-btn ui-btn--primary"
-                      style={{
-                        fontSize: 12,
-                        padding: "8px 14px",
-                        minHeight: 0,
-                        fontWeight: 800,
-                      }}
-                      onClick={e => {
-                        e.stopPropagation();
-                        handleInvite(f.playerId);
-                      }}
-                    >
-                      {t("party.invite")}
-                    </button>
+                    {pendingInvite ? (
+                      <button
+                        type="button"
+                        className="ui-btn ui-btn--secondary"
+                        style={{
+                          fontSize: 12,
+                          padding: "8px 14px",
+                          minHeight: 0,
+                          fontWeight: 800,
+                        }}
+                        onClick={e => {
+                          e.stopPropagation();
+                          cancelOutgoingInviteForTarget(f.playerId);
+                          setTick(t => t + 1);
+                        }}
+                      >
+                        <Tr id="party.inviteCancel" />
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="ui-btn ui-btn--primary"
+                        disabled={teamFull}
+                        style={{
+                          fontSize: 12,
+                          padding: "8px 14px",
+                          minHeight: 0,
+                          fontWeight: 800,
+                          opacity: teamFull ? 0.38 : 1,
+                          cursor: teamFull ? "not-allowed" : "pointer",
+                        }}
+                        onClick={e => {
+                          e.stopPropagation();
+                          if (teamFull) return;
+                          handleInvite(f.playerId);
+                        }}
+                      >
+                        <Tr id="party.invite" />
+                      </button>
+                    )}
                   </div>
-                )
+                  );
+                })()
               }
             />
           ))}
@@ -247,12 +363,12 @@ export default function PartySidePanel({ inviteSlot, onClose, onViewProfile, onS
           style={{
             padding: "16px 20px 20px",
             borderTop: "1px solid rgba(255,255,255,0.12)",
-            background: "rgba(0,0,0,0.18)",
+            background: "rgba(0,0,0,0.12)",
             flexShrink: 0,
           }}
         >
           <div style={{ fontSize: 12, fontWeight: 800, color: "rgba(255,255,255,0.55)", marginBottom: 8 }}>
-            {t("party.teamCode")}
+            <Tr id="party.teamCode" />
           </div>
           <div style={{ display: "flex", gap: 10 }}>
             <input
@@ -275,7 +391,7 @@ export default function PartySidePanel({ inviteSlot, onClose, onViewProfile, onS
               onClick={handleJoinCode}
               style={{ fontSize: 13, padding: "10px 18px", minHeight: 0, fontWeight: 800 }}
             >
-              {t("party.join")}
+              <Tr id="party.join" />
             </button>
           </div>
           {msg && (
@@ -320,28 +436,28 @@ export default function PartySidePanel({ inviteSlot, onClose, onViewProfile, onS
               className="ui-btn ui-btn--primary"
               onClick={() => { onViewProfile(selected.playerId); setActionPlayer(null); onClose(); }}
             >
-              {t("party.profile")}
+              <Tr id="party.profile" />
             </button>
-            {selected.screen === "battle" && selected.online && onSpectate && (
+            {"screen" in selected && selected.screen === "battle" && selected.online && onSpectate && (
               <button
                 type="button"
                 className="ui-btn ui-btn--secondary"
                 onClick={() => { onSpectate(selected.playerId); setActionPlayer(null); }}
               >
-                {t("party.spectateBattle")}
+                <Tr id="party.spectateBattle" />
               </button>
             )}
-            {!selected.inMyParty && (
+            {!isFriendInMyParty(selected.playerId) && myPartyCode !== (selected as { partyCode?: string }).partyCode?.toUpperCase() && (
               <button
                 type="button"
                 className="ui-btn ui-btn--primary"
                 onClick={() => { handleInvite(selected.playerId); setActionPlayer(null); }}
               >
-                {t("party.invite")}
+                <Tr id="party.invite" />
               </button>
             )}
             <button type="button" className="ui-btn ui-btn--secondary" onClick={() => setActionPlayer(null)}>
-              {t("common.close")}
+              <Tr id="common.close" />
             </button>
           </div>
         </div>

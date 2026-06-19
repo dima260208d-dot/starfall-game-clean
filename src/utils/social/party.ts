@@ -31,6 +31,14 @@ import {
   abortClubBossRaidRecruitment,
   findClubIdByBossRaidPartyCode,
 } from "../clubs";
+import { normalizePlayerIdQuery } from "../playerId";
+import { getRemotePartyCodeForPlayer } from "../cloud/remotePresenceCache";
+import {
+  checkRankedPartyLeagueCompatibility,
+  formatRankedPartyLeagueError,
+  type RankedPartyLeagueCheck,
+} from "../rankedPartyLeague";
+import { translate } from "../../i18n/core";
 
 export const PARTY_CHANGED_EVENT = "clash_party_changed";
 
@@ -50,6 +58,16 @@ export interface PartyInviteIncoming {
   fromUsername: string;
   sentAt: number;
 }
+
+/** Заявка на вступление в команду (лидер принимает / отклоняет). */
+export interface PartyJoinRequest {
+  playerId: string;
+  username: string;
+  brawlerId: string;
+  sentAt: number;
+}
+
+export const PARTY_JOIN_REQUEST_EVENT = "clash_party_join_request";
 
 /** Предложение сменить бойца в команде (локально, одно на команду). */
 export interface PartyBrawlerSuggestion {
@@ -80,18 +98,29 @@ export interface PartyPlayAgainState {
   exitedBy?: string | null;
 }
 
+/** Предложение сменить режим (не лидер → лидер). */
+export interface PartyModeSuggestion {
+  fromPlayerId: string;
+  fromUsername: string;
+  modeId: string;
+  sentAt: number;
+}
+
 export interface PartyRoom {
   code: string;
   leaderPlayerId: string;
   members: PartyMember[];
   createdAt: number;
   brawlerSuggestion?: PartyBrawlerSuggestion | null;
+  modeSuggestion?: PartyModeSuggestion | null;
   playReady?: PartyPlayReadyState | null;
   playAgain?: PartyPlayAgainState | null;
   /** Подбор противников — синхронизация команды. */
   matchmaking?: PartyMatchmakingState | null;
   /** Командный чат (текст и пины). */
   chat?: PartyChatMessage[];
+  /** Ожидающие заявки на вступление (лидер решает). */
+  joinRequests?: PartyJoinRequest[];
 }
 
 export type PartyMatchmakingStatus = "searching" | "complete" | "cancelled";
@@ -115,6 +144,9 @@ export interface PartyChatMessage {
   username: string;
   text?: string;
   pinId?: string;
+  /** Предложение режима (картинка + текст в чате). */
+  modeId?: string;
+  modeSuggest?: boolean;
   /** Ответ ИИ Астрала (виден всем в чате команды). */
   astral?: boolean;
   /** Системное сообщение (модерация, уведомления). */
@@ -157,6 +189,9 @@ function readParties(): Record<string, PartyRoom> {
 function writeParties(all: Record<string, PartyRoom>) {
   localStorage.setItem(PARTIES_KEY, JSON.stringify(all));
   emitPartyChanged();
+  if (typeof window !== "undefined") {
+    void import("../cloud/partyServerBootstrap").then(({ onPartiesWritten }) => onPartiesWritten(all));
+  }
 }
 
 function randomCode(): string {
@@ -251,11 +286,30 @@ export function amPartyLeader(): boolean {
   return normalizePlayerIdQuery(room.leaderPlayerId) === normalizePlayerIdQuery(me.playerId);
 }
 
-export function getOutgoingInvite(): OutgoingPartyInvite | null {
+export function getOutgoingInvites(): OutgoingPartyInvite[] {
   const p = getCurrentProfile();
-  const raw = (p as any)?.outgoingPartyInvite as OutgoingPartyInvite | undefined;
-  if (!raw) return null;
-  return { ...raw, side: raw.side ?? "left" };
+  const multi = (p as { outgoingPartyInvites?: OutgoingPartyInvite[] })?.outgoingPartyInvites;
+  if (multi?.length) return multi.map(x => ({ ...x, side: x.side ?? "left" }));
+  const raw = (p as { outgoingPartyInvite?: OutgoingPartyInvite })?.outgoingPartyInvite;
+  if (raw) return [{ ...raw, side: raw.side ?? "left" }];
+  return [];
+}
+
+export function getOutgoingInvite(): OutgoingPartyInvite | null {
+  return getOutgoingInvites()[0] ?? null;
+}
+
+export function getOutgoingInviteForSide(side: PartySlot): OutgoingPartyInvite | null {
+  return getOutgoingInvites().find(i => i.side === side) ?? null;
+}
+
+export function getOutgoingInviteTo(targetPlayerId: string): OutgoingPartyInvite | null {
+  const tid = normalizePlayerIdQuery(targetPlayerId);
+  return getOutgoingInvites().find(i => normalizePlayerIdQuery(i.targetPlayerId) === tid) ?? null;
+}
+
+export function isInAnyParty(): boolean {
+  return !!getMyPartyCode();
 }
 
 export function getIncomingInvite(): PartyInviteIncoming | null {
@@ -307,6 +361,21 @@ function roomIsFull(room: PartyRoom): boolean {
   return room.members.length >= Math.max(0, maxMembersForRoom(room) - 1);
 }
 
+/** Команда заполнена по лимиту выбранного режима лидера. */
+export function isPartyRoomAtCapacity(room: PartyRoom): boolean {
+  return roomIsFull(room);
+}
+
+export function isOnlinePartyGroupJoinable(
+  group: Pick<OnlinePartyGroup, "isFull" | "currentSize" | "maxSize" | "hasMyPendingRequest">,
+  inMyParty: boolean,
+  inAnotherTeam = false,
+): boolean {
+  if (inMyParty || group.hasMyPendingRequest || inAnotherTeam) return false;
+  if (group.isFull) return false;
+  return group.currentSize < group.maxSize;
+}
+
 function nextFreeSlot(room: PartyRoom, _preferred?: PartySlot): PartySlot | null {
   const allowed = memberSlotsForMaxParty(maxMembersForRoom(room));
   const used = new Set(room.members.map(m => normalizePartySlot(m.slot)));
@@ -325,6 +394,17 @@ export function getPartyRoomAllPlayerIds(room: PartyRoom): string[] {
   const ids = [normalizePlayerIdQuery(room.leaderPlayerId)];
   for (const m of room.members) ids.push(normalizePlayerIdQuery(m.playerId));
   return ids;
+}
+
+/** Ранговый бой в команде: разница лиг между любыми двумя игроками ≤ 1. */
+export function checkMyPartyRankedLeague(): RankedPartyLeagueCheck {
+  const room = getMyPartyRoom();
+  if (!room || room.members.length === 0) return { ok: true };
+  return checkRankedPartyLeagueCompatibility(getPartyRoomAllPlayerIds(room));
+}
+
+function rankedPartyLeagueError(check: RankedPartyLeagueCheck): string {
+  return formatRankedPartyLeagueError(check, (key, params) => translate(key, params));
 }
 
 export function getPartyPlayReadyState(): PartyPlayReadyState | null {
@@ -781,7 +861,7 @@ export function inviteFriendToParty(
   const target = getProfileByPlayerId(targetId);
   if (!target) return { success: false, error: "Игрок не найден" };
 
-  if ((target as any).partyCode) {
+  if ((target as any).partyCode || getRemotePartyCodeForPlayer(targetId)) {
     return { success: false, error: "Игрок уже в команде" };
   }
 
@@ -806,13 +886,31 @@ export function inviteFriendToParty(
     sentAt: Date.now(),
   };
   pushInviteToPlayer(targetId, invite);
+  if (typeof window !== "undefined") {
+    void import("../cloud/presenceServerSync").then(({ isOnlinePresenceSyncEnabled, pushPartyInviteToServer }) => {
+      if (!isOnlinePresenceSyncEnabled()) return;
+      void pushPartyInviteToServer({
+        toPlayerId: targetId,
+        fromPlayerId: myId,
+        fromUsername: me.username,
+        code: room.code,
+        sentAt: invite.sentAt,
+      });
+    });
+  }
+  const existing = getOutgoingInvites();
+  const filtered = existing.filter(i => normalizePlayerIdQuery(i.targetPlayerId) !== targetId);
   updateProfile({
-    outgoingPartyInvite: {
-      targetPlayerId: targetId,
-      targetUsername: target.username,
-      sentAt: Date.now(),
-      side: fromSide,
-    },
+    outgoingPartyInvites: [
+      ...filtered,
+      {
+        targetPlayerId: targetId,
+        targetUsername: target.username,
+        sentAt: Date.now(),
+        side: fromSide,
+      },
+    ],
+    outgoingPartyInvite: undefined,
   } as any);
   emitPartyChanged();
 
@@ -876,6 +974,12 @@ function addMemberToRoom(room: PartyRoom, member: PartyMember) {
   });
   all[room.code] = updated;
   writeParties(all);
+  if (roomIsFull(updated)) {
+    purgeOverflowPartyInvites(updated);
+  }
+  if (isTestFriendPlayerId(member.playerId) && !isTestFriendPlayerId(updated.leaderPlayerId)) {
+    scheduleTestBotModeSuggestAfterJoin(updated.code, member.playerId);
+  }
   return true;
 }
 
@@ -889,10 +993,40 @@ export function acceptPartyInvite(): { success: boolean; error?: string } {
     return { success: false, error: "Вы уже в команде" };
   }
 
+  return acceptPartyInviteInternal(inv);
+}
+
+async function ensurePartyRoomAvailable(code: string): Promise<PartyRoom | null> {
+  let room = getPartyRoom(code);
+  if (room) return room;
+
+  const { isOnlinePartySyncEnabled, hydratePartyFromServer, wakePartyServer } = await import("../cloud/partyServerSync");
+  if (!isOnlinePartySyncEnabled()) return null;
+
+  await wakePartyServer(45_000);
+  for (let i = 0; i < 3; i++) {
+    if (await hydratePartyFromServer(code)) {
+      room = getPartyRoom(code);
+      if (room) return room;
+    }
+    if (i < 2) await new Promise((r) => setTimeout(r, 1200));
+  }
+  return null;
+}
+
+function acceptPartyInviteInternal(inv: PartyInviteIncoming): { success: boolean; error?: string } {
+  const me = getCurrentProfile();
+  if (!me?.playerId) return { success: false, error: "Не авторизован" };
+
   const room = getPartyRoom(inv.code);
   if (!room) {
-    clearIncomingInvite();
-    return { success: false, error: "Команда больше не существует" };
+    void ensurePartyRoomAvailable(inv.code).then((hydrated) => {
+      if (hydrated) {
+        acceptPartyInviteInternal(inv);
+        emitPartyChanged();
+      }
+    });
+    return { success: false, error: "Загрузка команды с сервера…" };
   }
   if (roomIsFull(room)) {
     clearIncomingInvite();
@@ -921,23 +1055,47 @@ export function acceptPartyInvite(): { success: boolean; error?: string } {
   return { success: true };
 }
 
-function clearOutgoingOnLeader(leaderPlayerId?: string) {
-  updateProfile({ outgoingPartyInvite: undefined } as any);
-  const lid = leaderPlayerId ? normalizePlayerIdQuery(leaderPlayerId) : getCurrentProfile()?.playerId;
-  if (!lid) return;
-  const key = findProfileStorageKeyByPlayerId(lid);
+function setOutgoingInvitesOnPlayer(playerId: string, invites: OutgoingPartyInvite[]): void {
+  const key = findProfileStorageKeyByPlayerId(playerId);
   if (!key) return;
   const all = getAllProfiles();
   const raw = all[key];
   if (!raw) return;
-  all[key] = { ...raw, outgoingPartyInvite: undefined };
+  all[key] = { ...raw, outgoingPartyInvites: invites, outgoingPartyInvite: undefined };
   saveProfiles(all);
 }
 
+function purgeOverflowPartyInvites(room: PartyRoom): void {
+  if (!roomIsFull(room)) return;
+  const leaderId = normalizePlayerIdQuery(room.leaderPlayerId);
+  const leaderProf = getProfileByPlayerId(leaderId);
+  const invites = (() => {
+    const multi = (leaderProf as { outgoingPartyInvites?: OutgoingPartyInvite[] })?.outgoingPartyInvites;
+    if (multi?.length) return multi;
+    const single = (leaderProf as { outgoingPartyInvite?: OutgoingPartyInvite })?.outgoingPartyInvite;
+    return single ? [single] : [];
+  })();
+  for (const inv of invites) {
+    clearInviteOnPlayer(inv.targetPlayerId);
+  }
+  setOutgoingInvitesOnPlayer(leaderId, []);
+  patchPartyRoom(room.code, r => ({
+    ...r,
+    joinRequests: [],
+  }));
+  emitPartyChanged();
+}
+
 function clearIncomingInvite() {
+  const inv = getIncomingInvite();
   updateProfile({ partyInviteIncoming: undefined } as any);
   const me = getCurrentProfile();
   if (me?.playerId) clearInviteOnPlayer(me.playerId);
+  if (inv?.code && typeof window !== "undefined") {
+    void import("../cloud/presenceServerBootstrap").then(({ clearRemotePartyInvite }) => {
+      void clearRemotePartyInvite(inv.code);
+    });
+  }
 }
 
 export function declinePartyInvite(): void {
@@ -950,21 +1108,63 @@ export function declinePartyInviteForPlayer(playerId: string): void {
   emitPartyChanged();
 }
 
-export function cancelOutgoingInvite(): void {
-  const out = getOutgoingInvite();
-  if (out?.targetPlayerId) {
-    clearInviteOnPlayer(out.targetPlayerId);
-  }
-  clearOutgoingOnLeader();
+export function cancelOutgoingInviteForTarget(targetPlayerId: string): void {
+  const tid = normalizePlayerIdQuery(targetPlayerId);
+  clearInviteOnPlayer(tid);
+  const me = getCurrentProfile();
+  if (!me?.playerId) return;
+  const remaining = getOutgoingInvites().filter(
+    i => normalizePlayerIdQuery(i.targetPlayerId) !== tid,
+  );
+  updateProfile({ outgoingPartyInvites: remaining, outgoingPartyInvite: undefined } as any);
   emitPartyChanged();
 }
 
-export function joinPartyByCode(codeInput: string): { success: boolean; error?: string } {
+export function cancelOutgoingInvite(): void {
+  const invites = getOutgoingInvites();
+  if (!invites.length) return;
+  for (const inv of invites) {
+    clearInviteOnPlayer(inv.targetPlayerId);
+  }
+  updateProfile({ outgoingPartyInvites: [], outgoingPartyInvite: undefined } as any);
+  emitPartyChanged();
+}
+
+function clearOutgoingOnLeader(leaderPlayerId?: string) {
+  const lid = leaderPlayerId ? normalizePlayerIdQuery(leaderPlayerId) : getCurrentProfile()?.playerId;
+  if (!lid) return;
+  setOutgoingInvitesOnPlayer(lid, []);
+  const me = getCurrentProfile();
+  if (me?.playerId && normalizePlayerIdQuery(me.playerId) === lid) {
+    updateProfile({ outgoingPartyInvites: [], outgoingPartyInvite: undefined } as any);
+  }
+}
+
+export async function joinPartyByCode(codeInput: string): Promise<{ success: boolean; error?: string }> {
   const me = getCurrentProfile();
   if (!me?.playerId) return { success: false, error: "Не авторизован" };
 
   const code = codeInput.trim().toUpperCase();
   if (code.length < 4) return { success: false, error: "Введите код команды" };
+
+  const { isOnlinePartySyncEnabled, hydratePartyFromServer, wakePartyServer } = await import("../cloud/partyServerSync");
+  if (isOnlinePartySyncEnabled()) {
+    const awake = await wakePartyServer(45_000);
+    if (!awake) {
+      return { success: false, error: "Сервер команд не отвечает. Подождите минуту и попробуйте снова." };
+    }
+    let hydrated = false;
+    for (let i = 0; i < 3; i++) {
+      if (await hydratePartyFromServer(code)) {
+        hydrated = true;
+        break;
+      }
+      if (i < 2) await new Promise((r) => setTimeout(r, 1500));
+    }
+    if (!hydrated) {
+      return { success: false, error: "Команда не найдена на сервере. Попросите лидера пересоздать команду." };
+    }
+  }
 
   if ((me as any).partyCode) {
     return { success: false, error: "Сначала выйдите из текущей команды" };
@@ -1041,7 +1241,22 @@ export function leaveParty(): void {
   if (room) {
     const all = readParties();
     const isLeader = normalizePlayerIdQuery(room.leaderPlayerId) === myId;
-    if (isLeader) {
+    if (isLeader && room.members.length > 0 && !clubRaidClubId) {
+      const sorted = [...room.members].sort((a, b) => a.joinedAt - b.joinedAt);
+      const promoted = sorted[0]!;
+      const newLeaderId = normalizePlayerIdQuery(promoted.playerId);
+      const remaining = sorted.slice(1);
+      const updated: PartyRoom = rebalancePartyMemberSlots({
+        ...clearPartyPlayReadyOnRoom(room),
+        leaderPlayerId: newLeaderId,
+        members: remaining,
+        brawlerSuggestion: null,
+        playAgain: null,
+        joinRequests: room.joinRequests ?? [],
+      });
+      all[room.code] = updated;
+      writeParties(all);
+    } else if (isLeader) {
       for (const m of room.members) {
         syncProfilePartyCode(m.playerId, null);
         const k = findProfileStorageKeyByPlayerId(m.playerId);
@@ -1055,13 +1270,14 @@ export function leaveParty(): void {
         }
       }
       delete all[room.code];
+      writeParties(all);
     } else {
       room.members = room.members.filter(
         m => normalizePlayerIdQuery(m.playerId) !== myId,
       );
       all[room.code] = abortPartyPlayAgainForAllOnRoom(clearPartyPlayReadyOnRoom(room));
+      writeParties(all);
     }
-    writeParties(all);
   }
 
   updateProfile({
@@ -1396,6 +1612,140 @@ export function declinePartyBrawlerSuggestion(): void {
   clearPartyBrawlerSuggestion();
 }
 
+function partyChatMsgId(): string {
+  return `pc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+export function getPartyModeSuggestion(): PartyModeSuggestion | null {
+  return getMyPartyRoom()?.modeSuggestion ?? null;
+}
+
+export function sendPartyModeSuggestion(modeId: string): { success: boolean; error?: string } {
+  const me = getCurrentProfile();
+  if (!me?.playerId) return { success: false, error: "Не авторизован" };
+  if (amPartyLeader()) return { success: false, error: "Лидер выбирает режим сам" };
+  const room = getMyPartyRoom();
+  if (!room) return { success: false, error: "Вы не в команде" };
+
+  if (modeId === "ranked") {
+    const leagueCheck = checkRankedPartyLeagueCompatibility(getPartyRoomAllPlayerIds(room));
+    if (!leagueCheck.ok) {
+      return { success: false, error: rankedPartyLeagueError(leagueCheck) };
+    }
+  }
+
+  const ok = applyPartyModeSuggestionFromPlayer(room.code, me.playerId, modeId);
+  return ok ? { success: true } : { success: false, error: "Не удалось предложить режим" };
+}
+
+/** Записать предложение режима от конкретного игрока (бот / напарник). */
+export function applyPartyModeSuggestionFromPlayer(
+  roomCode: string,
+  fromPlayerId: string,
+  modeId: string,
+): boolean {
+  const room = getPartyRoom(roomCode);
+  if (!room) return false;
+
+  const fromId = normalizePlayerIdQuery(fromPlayerId);
+  if (fromId === normalizePlayerIdQuery(room.leaderPlayerId)) return false;
+
+  const inParty =
+    fromId === normalizePlayerIdQuery(room.leaderPlayerId)
+    || room.members.some(m => normalizePlayerIdQuery(m.playerId) === fromId);
+  if (!inParty) return false;
+
+  const prof = getProfileByPlayerId(fromId);
+  if (!prof) return false;
+
+  const suggestion: PartyModeSuggestion = {
+    fromPlayerId: fromId,
+    fromUsername: prof.username,
+    modeId,
+    sentAt: Date.now(),
+  };
+
+  const msg: PartyChatMessage = {
+    id: partyChatMsgId(),
+    sentAt: Date.now(),
+    playerId: fromId,
+    username: prof.username,
+    modeId,
+    modeSuggest: true,
+  };
+
+  patchPartyRoom(roomCode, r => ({
+    ...r,
+    modeSuggestion: suggestion,
+    chat: pruneChatByLimit([...(r.chat ?? []), msg]),
+  }));
+  emitPartyChanged();
+  return true;
+}
+
+export function cancelPartyModeSuggestion(): void {
+  const me = getCurrentProfile();
+  const room = getMyPartyRoom();
+  if (!room?.modeSuggestion || !me?.playerId) return;
+  if (normalizePlayerIdQuery(room.modeSuggestion.fromPlayerId) !== normalizePlayerIdQuery(me.playerId)) return;
+  patchPartyRoom(room.code, r => ({ ...r, modeSuggestion: null }));
+  emitPartyChanged();
+}
+
+export function acceptPartyModeSuggestion(): { success: boolean; error?: string } {
+  if (!amPartyLeader()) return { success: false, error: "Только лидер может принять" };
+  const room = getMyPartyRoom();
+  const sug = room?.modeSuggestion;
+  if (!room || !sug) return { success: false, error: "Нет предложения" };
+
+  if (sug.modeId === "ranked") {
+    const leagueCheck = checkRankedPartyLeagueCompatibility(getPartyRoomAllPlayerIds(room));
+    if (!leagueCheck.ok) {
+      return { success: false, error: rankedPartyLeagueError(leagueCheck) };
+    }
+  }
+
+  const leaderId = normalizePlayerIdQuery(room.leaderPlayerId);
+  const key = findProfileStorageKeyByPlayerId(leaderId);
+  if (key) {
+    const all = getAllProfiles();
+    const raw = all[key];
+    if (raw) {
+      all[key] = { ...raw, selectedMode: sug.modeId as UserProfile["selectedMode"] };
+      saveProfiles(all);
+    }
+  }
+  const me = getCurrentProfile();
+  if (me?.playerId && normalizePlayerIdQuery(me.playerId) === leaderId) {
+    updateProfile({ selectedMode: sug.modeId as UserProfile["selectedMode"] });
+  }
+  patchPartyRoom(room.code, r => ({ ...r, modeSuggestion: null }));
+  emitPartyChanged();
+  return { success: true };
+}
+
+export function declinePartyModeSuggestion(): void {
+  if (!amPartyLeader()) return;
+  const room = getMyPartyRoom();
+  if (!room) return;
+  patchPartyRoom(room.code, r => ({ ...r, modeSuggestion: null }));
+  emitPartyChanged();
+  scheduleTestBotModeSuggestAfterJoin(room.code);
+}
+
+/** Последнее сообщение игрока для «облачка» над головой (не системное). */
+export function getLatestPartySpeechForPlayer(playerId: string): PartyChatMessage | null {
+  const room = getMyPartyRoom();
+  if (!room?.chat?.length) return null;
+  const pid = normalizePlayerIdQuery(playerId);
+  for (let i = room.chat.length - 1; i >= 0; i--) {
+    const m = room.chat[i]!;
+    if (m.system || m.astral || m.modeSuggest) continue;
+    if (normalizePlayerIdQuery(m.playerId) === pid) return m;
+  }
+  return null;
+}
+
 export function kickPartyMember(targetPlayerId: string): { success: boolean; error?: string } {
   if (!amPartyLeader()) return { success: false, error: "Только лидер может выгнать" };
 
@@ -1433,6 +1783,73 @@ export function kickPartyMember(targetPlayerId: string): { success: boolean; err
   syncProfilePartyCode(targetId, null);
   emitPartyChanged();
   return { success: true };
+}
+
+const TEST_BOT_MODE_SUGGEST_COOLDOWN_MS = 9000;
+const DEMO_MODE_POOL = ["gemgrab", "showdown", "heist", "bounty", "siege", "starstrike", "bossraid"] as const;
+let testBotModeSuggestRound = 0;
+let testBotModeSuggestLastAt = 0;
+const pendingTestBotModeSuggestTimers = new Map<string, number>();
+
+function pickAlternateModeForBot(fromPlayerId: string, currentMode: string): string {
+  const spec = getTestFriendSpec(fromPlayerId);
+  if (spec?.battleMode && spec.battleMode !== currentMode) return spec.battleMode;
+  const alt = DEMO_MODE_POOL.filter(m => m !== currentMode);
+  if (!alt.length) return "gemgrab";
+  const h = stableHash(`${fromPlayerId}:${testBotModeSuggestRound}:${currentMode}`);
+  return alt[h % alt.length]!;
+}
+
+function stableHash(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+function scheduleTestBotModeSuggestAfterJoin(roomCode: string, preferredFromId?: string): void {
+  if (typeof window === "undefined") return;
+  const prev = pendingTestBotModeSuggestTimers.get(roomCode);
+  if (prev) window.clearTimeout(prev);
+  const delay = preferredFromId ? 2200 + Math.floor(Math.random() * 1800) : 8000 + Math.floor(Math.random() * 4000);
+  const timer = window.setTimeout(() => {
+    pendingTestBotModeSuggestTimers.delete(roomCode);
+    maybeOfferTestBotModeSuggest(preferredFromId);
+  }, delay);
+  pendingTestBotModeSuggestTimers.set(roomCode, timer);
+}
+
+/** Тест-боты в команде предлагают лидеру другой режим (демо UI). */
+export function maybeOfferTestBotModeSuggest(preferredFromId?: string): void {
+  const me = getCurrentProfile();
+  if (!me?.playerId || !amPartyLeader()) return;
+  if (isTestFriendPlayerId(me.playerId)) return;
+
+  const room = getMyPartyRoom();
+  if (!room || room.code !== getMyPartyCode()) return;
+  if (room.modeSuggestion) return;
+  if (isPartyPlayReadyActive()) return;
+
+  const testMembers = room.members.filter(m => isTestFriendPlayerId(m.playerId));
+  if (!testMembers.length) return;
+
+  const now = Date.now();
+  if (now - testBotModeSuggestLastAt < TEST_BOT_MODE_SUGGEST_COOLDOWN_MS) return;
+
+  const currentMode = partyModeFromProfile(me);
+  let fromMember = preferredFromId
+    ? testMembers.find(m => normalizePlayerIdQuery(m.playerId) === normalizePlayerIdQuery(preferredFromId))
+    : undefined;
+  if (!fromMember) {
+    fromMember = testMembers[testBotModeSuggestRound % testMembers.length];
+  }
+  if (!fromMember) return;
+
+  testBotModeSuggestRound += 1;
+  const modeId = pickAlternateModeForBot(fromMember.playerId, currentMode);
+  if (modeId === currentMode) return;
+
+  const ok = applyPartyModeSuggestionFromPlayer(room.code, fromMember.playerId, modeId);
+  if (ok) testBotModeSuggestLastAt = now;
 }
 
 const DEMO_BRAWLER_SUGGEST_KEY = "clash_demo_brawler_suggest_v1";
@@ -1541,4 +1958,419 @@ export function cyclePartyTestFriendsMenuActivity(round: number): boolean {
     }
   }
   return changed;
+}
+
+function emitJoinRequestEvent() {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event(PARTY_JOIN_REQUEST_EVENT));
+  }
+}
+
+function partyCodeForPlayer(playerId: string): string | null {
+  const remote = getRemotePartyCodeForPlayer(playerId);
+  if (remote) return remote;
+  const p = getProfileByPlayerId(playerId);
+  const code = (p as { partyCode?: string | null } | null)?.partyCode;
+  return code ? String(code).toUpperCase() : null;
+}
+
+export function isPartyMemberOnline(playerId: string): boolean {
+  const id = normalizePlayerIdQuery(playerId);
+  const me = getCurrentProfile();
+  if (me?.playerId && normalizePlayerIdQuery(me.playerId) === id) {
+    return true;
+  }
+
+  const room = getMyPartyRoom();
+  const inMyParty = !!room?.members.some(m => normalizePlayerIdQuery(m.playerId) === id);
+  if (inMyParty && isTestFriendPlayerId(id)) {
+    return true;
+  }
+
+  const pr = getPresenceForPlayerId(id);
+  return pr.online && pr.screen !== "offline";
+}
+
+/** Есть ли в команде участник не в сети (блокирует старт). */
+export function hasOfflinePartyMember(): boolean {
+  const room = getMyPartyRoom();
+  if (!room) return false;
+  for (const id of getPartyRoomAllPlayerIds(room)) {
+    if (!isPartyMemberOnline(id)) return true;
+  }
+  return false;
+}
+
+export function isPartyLeaderPlayerId(playerId: string, room?: PartyRoom | null): boolean {
+  const r = room ?? getMyPartyRoom();
+  if (!r) return false;
+  return normalizePlayerIdQuery(r.leaderPlayerId) === normalizePlayerIdQuery(playerId);
+}
+
+/** Первая ожидающая заявка на вступление (только для лидера). */
+export function getPendingJoinRequestForLeader(): (PartyJoinRequest & { code: string }) | null {
+  if (!amPartyLeader()) return null;
+  const room = getMyPartyRoom();
+  if (!room?.joinRequests?.length) return null;
+  const req = room.joinRequests[0]!;
+  return { ...req, code: room.code };
+}
+
+/** Отправить заявку на вступление в команду по коду (лидер принимает). */
+export async function requestJoinParty(codeInput: string): Promise<{ success: boolean; error?: string }> {
+  const me = getCurrentProfile();
+  if (!me?.playerId) return { success: false, error: "Не авторизован" };
+
+  const code = codeInput.trim().toUpperCase();
+  if (code.length < 4) return { success: false, error: "Неверный код команды" };
+
+  if ((me as { partyCode?: string | null }).partyCode) {
+    return { success: false, error: "Сначала выйдите из текущей команды" };
+  }
+
+  const { isOnlinePartySyncEnabled, hydratePartyFromServer, wakePartyServer } = await import("../cloud/partyServerSync");
+  if (isOnlinePartySyncEnabled() && !getPartyRoom(code)) {
+    const awake = await wakePartyServer(45_000);
+    if (!awake) {
+      return { success: false, error: "Сервер команд не отвечает. Подождите минуту и попробуйте снова." };
+    }
+    let hydrated = false;
+    for (let i = 0; i < 3; i++) {
+      if (await hydratePartyFromServer(code)) {
+        hydrated = true;
+        break;
+      }
+      if (i < 2) await new Promise((r) => setTimeout(r, 1200));
+    }
+    if (!hydrated) {
+      return { success: false, error: "Команда не найдена на сервере" };
+    }
+  }
+
+  const room = getPartyRoom(code);
+  if (!room) return { success: false, error: "Команда не найдена" };
+  if (roomIsFull(room)) return { success: false, error: "Команда заполнена" };
+
+  const myId = normalizePlayerIdQuery(me.playerId);
+  if (normalizePlayerIdQuery(room.leaderPlayerId) === myId) {
+    return { success: false, error: "Вы уже лидер этой команды" };
+  }
+  if (room.members.some(m => normalizePlayerIdQuery(m.playerId) === myId)) {
+    return { success: false, error: "Вы уже в этой команде" };
+  }
+
+  const existing = room.joinRequests ?? [];
+  if (existing.some(r => normalizePlayerIdQuery(r.playerId) === myId)) {
+    return { success: false, error: "Заявка уже отправлена" };
+  }
+
+  const req: PartyJoinRequest = {
+    playerId: myId,
+    username: me.username,
+    brawlerId: me.selectedBrawlerId || "hana",
+    sentAt: Date.now(),
+  };
+
+  patchPartyRoom(code, r => ({
+    ...r,
+    joinRequests: [...(r.joinRequests ?? []), req],
+  }));
+
+  emitJoinRequestEvent();
+  emitPartyChanged();
+  scheduleTestLeaderAcceptJoinRequest(code, req);
+  return { success: true };
+}
+
+export function acceptPartyJoinRequest(fromPlayerId: string): { success: boolean; error?: string } {
+  if (!amPartyLeader()) return { success: false, error: "Только лидер может принимать заявки" };
+  const room = getMyPartyRoom();
+  if (!room) return { success: false, error: "Нет команды" };
+  return acceptJoinRequestInRoom(room.code, fromPlayerId);
+}
+
+function acceptJoinRequestInRoom(code: string, fromPlayerId: string): { success: boolean; error?: string } {
+  const room = getPartyRoom(code);
+  if (!room) return { success: false, error: "Нет команды" };
+  if (roomIsFull(room)) return { success: false, error: "Команда заполнена" };
+
+  const fid = normalizePlayerIdQuery(fromPlayerId);
+  const req = room.joinRequests?.find(r => normalizePlayerIdQuery(r.playerId) === fid);
+  if (!req) return { success: false, error: "Заявка не найдена" };
+
+  const prof = getProfileByPlayerId(fid);
+  if (!prof) return { success: false, error: "Игрок не найден" };
+  if ((prof as { partyCode?: string | null }).partyCode) {
+    patchPartyRoom(room.code, r => ({
+      ...r,
+      joinRequests: (r.joinRequests ?? []).filter(x => normalizePlayerIdQuery(x.playerId) !== fid),
+    }));
+    return { success: false, error: "Игрок уже в другой команде" };
+  }
+
+  const member: PartyMember = {
+    playerId: fid,
+    username: prof.username,
+    brawlerId: prof.selectedBrawlerId || req.brawlerId || "hana",
+    slot: "left",
+    joinedAt: Date.now(),
+  };
+  if (!addMemberToRoom(room, member)) {
+    return { success: false, error: "Нет свободных мест" };
+  }
+
+  const key = findProfileStorageKeyByPlayerId(fid);
+  if (key) {
+    const all = getAllProfiles();
+    const raw = all[key];
+    if (raw) {
+      all[key] = { ...raw, partyCode: room.code, partyInviteIncoming: undefined };
+      saveProfiles(all);
+    }
+  }
+  syncProfilePartyCode(fid, room.code);
+
+  patchPartyRoom(room.code, r => ({
+    ...r,
+    joinRequests: (r.joinRequests ?? []).filter(x => normalizePlayerIdQuery(x.playerId) !== fid),
+  }));
+
+  emitPartyChanged();
+  return { success: true };
+}
+
+export function declinePartyJoinRequest(fromPlayerId: string): void {
+  if (!amPartyLeader()) return;
+  const room = getMyPartyRoom();
+  if (!room) return;
+  const fid = normalizePlayerIdQuery(fromPlayerId);
+  patchPartyRoom(room.code, r => ({
+    ...r,
+    joinRequests: (r.joinRequests ?? []).filter(x => normalizePlayerIdQuery(x.playerId) !== fid),
+  }));
+  emitPartyChanged();
+}
+
+export function hasPendingJoinRequestForParty(code: string): boolean {
+  const me = getCurrentProfile();
+  if (!me?.playerId) return false;
+  const myId = normalizePlayerIdQuery(me.playerId);
+  const room = getPartyRoom(code);
+  return !!room?.joinRequests?.some(r => normalizePlayerIdQuery(r.playerId) === myId);
+}
+
+/** Отменить свою заявку на вступление в команду по коду. */
+export function cancelMyPartyJoinRequest(codeInput: string): { success: boolean; error?: string } {
+  const me = getCurrentProfile();
+  if (!me?.playerId) return { success: false, error: "Не авторизован" };
+
+  const code = codeInput.trim().toUpperCase();
+  const room = getPartyRoom(code);
+  if (!room) return { success: false, error: "Команда не найдена" };
+
+  const myId = normalizePlayerIdQuery(me.playerId);
+  const hasReq = (room.joinRequests ?? []).some(r => normalizePlayerIdQuery(r.playerId) === myId);
+  if (!hasReq) return { success: false, error: "Заявка не найдена" };
+
+  patchPartyRoom(code, r => ({
+    ...r,
+    joinRequests: (r.joinRequests ?? []).filter(x => normalizePlayerIdQuery(x.playerId) !== myId),
+  }));
+  emitPartyChanged();
+  return { success: true };
+}
+
+export interface OnlinePartyGroupMember {
+  playerId: string;
+  username: string;
+  brawlerId: string;
+  profileIconId?: string | null;
+  trophies: number;
+  online: boolean;
+  isLeader: boolean;
+}
+
+export interface OnlinePartyGroup {
+  code: string;
+  modeId: string;
+  leaderPlayerId: string;
+  members: OnlinePartyGroupMember[];
+  currentSize: number;
+  maxSize: number;
+  isFull: boolean;
+  hasMyPendingRequest: boolean;
+  /** Превью-карточка для UI (не настоящая команда). */
+  isDemo?: boolean;
+}
+
+export const DEMO_PARTY_PREVIEW_CODE = "DEM00X";
+export const DEMO_PARTY_FULL_CODE = "DEM00Y";
+
+/** Пример: есть свободные места — кнопка «Вступить» видна. */
+export function getDemoOnlinePartyGroup(): OnlinePartyGroup {
+  return {
+    code: DEMO_PARTY_PREVIEW_CODE,
+    modeId: "gemgrab",
+    leaderPlayerId: "01YUKIFROSTX",
+    members: [
+      {
+        playerId: "01YUKIFROSTX",
+        username: "Test_Yuki",
+        brawlerId: "yuki",
+        trophies: 4200,
+        online: true,
+        isLeader: true,
+      },
+      {
+        playerId: "02RONINBLADE",
+        username: "Test_Ronin",
+        brawlerId: "ronin",
+        trophies: 3100,
+        online: true,
+        isLeader: false,
+      },
+    ],
+    currentSize: 2,
+    maxSize: 3,
+    isFull: false,
+    hasMyPendingRequest: false,
+    isDemo: true,
+  };
+}
+
+/** Пример: команда заполнена для режима — без кнопки «Вступить». */
+export function getDemoOnlinePartyGroupFull(): OnlinePartyGroup {
+  return {
+    code: DEMO_PARTY_FULL_CODE,
+    modeId: "gemgrab",
+    leaderPlayerId: "01YUKIFROSTX",
+    members: [
+      {
+        playerId: "01YUKIFROSTX",
+        username: "Test_Yuki",
+        brawlerId: "yuki",
+        trophies: 4200,
+        online: true,
+        isLeader: true,
+      },
+      {
+        playerId: "02RONINBLADE",
+        username: "Test_Ronin",
+        brawlerId: "ronin",
+        trophies: 3100,
+        online: true,
+        isLeader: false,
+      },
+      {
+        playerId: "05GOROCRUSHX",
+        username: "Test_Goro",
+        brawlerId: "goro",
+        trophies: 2900,
+        online: false,
+        isLeader: false,
+      },
+    ],
+    currentSize: 3,
+    maxSize: 3,
+    isFull: true,
+    hasMyPendingRequest: false,
+    isDemo: true,
+  };
+}
+
+export function getOnlinePartyGroupsForPanel(): {
+  groups: OnlinePartyGroup[];
+  soloFriends: PartyFriendRow[];
+} {
+  const friends = getOnlineFriendsForParty();
+  const codeToFriendIds = new Map<string, Set<string>>();
+  for (const f of friends) {
+    const code = partyCodeForPlayer(f.playerId);
+    if (!code) continue;
+    if (!codeToFriendIds.has(code)) codeToFriendIds.set(code, new Set());
+    codeToFriendIds.get(code)!.add(normalizePlayerIdQuery(f.playerId));
+  }
+
+  const groupedFriendIds = new Set<string>();
+  const groups: OnlinePartyGroup[] = [];
+
+  for (const [code] of codeToFriendIds) {
+    const room = getPartyRoom(code);
+    if (!room) continue;
+
+    const leaderProf = getProfileByPlayerId(room.leaderPlayerId);
+    const modeSel = partyModeFromProfile(leaderProf);
+    const maxSize = getMaxPartySize(modeSel);
+    const currentSize = getPartyCount(room.members.length);
+    if (currentSize < 2) continue;
+
+    const members: OnlinePartyGroupMember[] = [];
+    const leaderId = normalizePlayerIdQuery(room.leaderPlayerId);
+
+    const pushMember = (playerId: string, isLeader: boolean) => {
+      const fid = normalizePlayerIdQuery(playerId);
+      const fr = friends.find(f => normalizePlayerIdQuery(f.playerId) === fid);
+      const prof = getProfileByPlayerId(fid);
+      if (!fr && !prof) return;
+      const pres = getPresenceForPlayerId(fid);
+      members.push({
+        playerId: fid,
+        username: fr?.username ?? prof?.username ?? "?",
+        brawlerId: fr?.brawlerId ?? prof?.selectedBrawlerId ?? "hana",
+        profileIconId: fr?.profileIconId ?? prof?.profileIconId,
+        trophies: fr?.trophies ?? prof?.trophies ?? 0,
+        online: pres.online,
+        isLeader,
+      });
+      if (fr) groupedFriendIds.add(fid);
+    };
+
+    pushMember(room.leaderPlayerId, true);
+    const sortedMembers = [...room.members].sort((a, b) => a.joinedAt - b.joinedAt);
+    for (const m of sortedMembers) {
+      pushMember(m.playerId, false);
+    }
+
+    if (members.length < 2) continue;
+
+    groups.push({
+      code,
+      modeId: modeSel.mode,
+      leaderPlayerId: leaderId,
+      members,
+      currentSize,
+      maxSize,
+      isFull: roomIsFull(room),
+      hasMyPendingRequest: hasPendingJoinRequestForParty(code),
+    });
+  }
+
+  const soloFriends = friends.filter(f => {
+    const fid = normalizePlayerIdQuery(f.playerId);
+    if (groupedFriendIds.has(fid)) return false;
+    const code = partyCodeForPlayer(f.playerId);
+    if (!code) return true;
+    const room = getPartyRoom(code);
+    if (!room) return true;
+    return getPartyCount(room.members.length) < 2;
+  });
+
+  groups.sort((a, b) => b.currentSize - a.currentSize || a.code.localeCompare(b.code));
+  return { groups, soloFriends };
+}
+
+function scheduleTestLeaderAcceptJoinRequest(code: string, req: PartyJoinRequest): void {
+  const room = getPartyRoom(code);
+  if (!room) return;
+  const leaderId = normalizePlayerIdQuery(room.leaderPlayerId);
+  if (!isTestFriendPlayerId(leaderId)) return;
+  const spec = getTestFriendSpec(leaderId);
+  if (!spec?.autoAcceptParty) return;
+  window.setTimeout(() => {
+    const current = getPartyRoom(code);
+    if (!current?.joinRequests?.some(r => normalizePlayerIdQuery(r.playerId) === normalizePlayerIdQuery(req.playerId))) {
+      return;
+    }
+    acceptJoinRequestInRoom(code, req.playerId);
+  }, 1200);
 }

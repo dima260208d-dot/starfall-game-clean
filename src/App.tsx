@@ -48,6 +48,7 @@ import {
   getPartyMemberCount,
 } from "./utils/social/party";
 import { getPartyCount, canPlayWithParty, partyModeFromProfile } from "./utils/social/partyConfig";
+import { checkMyPartyRankedLeague } from "./utils/social/party";
 import MegaSquadPickerPage from "./pages/MegaSquadPickerPage";
 import StarGuardianRewardsPage from "./pages/StarGuardianRewardsPage";
 import BattleHistoryPage from "./pages/BattleHistoryPage";
@@ -58,11 +59,27 @@ import AccountsPage from "./pages/AccountsPage";
 import AccountDetailPage from "./pages/AccountDetailPage";
 import BrawlerMasteryPage from "./pages/BrawlerMasteryPage";
 import BrawlerComicPage from "./pages/BrawlerComicPage";
+import BrawlerTrailPage from "./pages/BrawlerTrailPage";
 import StarFeatsPage from "./pages/StarFeatsPage";
 import RankedMenuPage, { RankedMatchFlowPage } from "./pages/RankedMenuPage";
 import { clearRankedBattleSession } from "./utils/rankedMapPick";
+import {
+  beginPlayerMapBattle,
+  clearMapSourceCategory,
+  clearPlayerMapBattleSession,
+  isPlayerMapsModeSelected,
+} from "./utils/playerMaps/playerMapSession";
+import { tickPlayerMapMaintenance } from "./utils/playerMaps/playerMapRegistry";
+import { syncProfileWithCloud, ensureAutoCloudSyncRunning } from "./utils/cloud/profileCloud";
 import LiveBattleSpectator from "./components/LiveBattleSpectator";
+import BackgroundBattleRejoinBanner from "./components/BackgroundBattleRejoinBanner";
 import { ensureBotLiveBattleSim } from "./utils/social/botLiveBattleSim";
+import {
+  hasActiveBackgroundBattle,
+  BACKGROUND_BATTLE_CHANGED,
+  BACKGROUND_BATTLE_FINISHED,
+  getBackgroundBattleMeta,
+} from "./game/backgroundBattleSession";
 import { syncAiBattleTrainingFromControl, stopAiBattleTraining } from "./ai/aiTrainingRuntime";
 import { ensureAdminScheduleTicker } from "./utils/adminScheduler";
 import { isAdminUnlocked } from "./utils/mapEditorAPI";
@@ -100,6 +117,8 @@ type Screen =
   | "pets"
   | "mapeditor"
   | "mapEditorModeSelect"
+  | "playerMapEditor"
+  | "playerMapEditorModeSelect"
   | "news"
   | "messages"
   | "admin"
@@ -117,6 +136,7 @@ type Screen =
   | "battleFeed"
   | "mastery"
   | "comic"
+  | "brawlerTrail"
   | "starFeats"
   | "rankedMenu"
   | "rankedMatch"
@@ -138,6 +158,8 @@ export default function App() {
   const [selectedBrawler, setSelectedBrawler] = useState(initial?.selectedBrawlerId || "miya");
   const [masteryBrawlerId, setMasteryBrawlerId] = useState(initial?.selectedBrawlerId || "hana");
   const [comicBrawlerId, setComicBrawlerId] = useState(initial?.selectedBrawlerId || "hana");
+  const [trailBrawlerId, setTrailBrawlerId] = useState(initial?.selectedBrawlerId || "hana");
+  const [customizationTab, setCustomizationTab] = useState<"pins" | "icons" | "gifts" | "backgrounds" | "trails">("pins");
 
   // Always rehydrate selections from the active profile when entering the menu/game,
   // so a profile switch never carries stale picks across accounts.
@@ -176,6 +198,8 @@ export default function App() {
   const [viewClubId, setViewClubId] = useState<string | null>(null);
   const [profileBackScreen, setProfileBackScreen] = useState<Screen>("menu");
   const [spectateTargetId, setSpectateTargetId] = useState<string | null>(null);
+  const [reattachBackgroundBattle, setReattachBackgroundBattle] = useState(false);
+  const [backgroundBattleActive, setBackgroundBattleActive] = useState(() => hasActiveBackgroundBattle());
   /** Босс, выбранный в ленте режимов; «Играть» в лобби запускает bossraid с этим id */
   // Сохраняется между сессиями, чтобы при перезаходе в игру выбранный босс
   // (а вместе с ним — корректный «текущий уровень» из профиля) восстанавливался,
@@ -243,9 +267,16 @@ export default function App() {
   }, [screen]);
 
   useEffect(() => {
+    tickPlayerMapMaintenance();
     ensureAdminScheduleTicker();
     ensureTechBreakTicker();
   }, []);
+
+  useEffect(() => {
+    if (bootLoading) return;
+    if (!getCurrentUsername()) return;
+    void syncProfileWithCloud().finally(() => ensureAutoCloudSyncRunning());
+  }, [bootLoading]);
 
   useEffect(() => subscribeTechBreakChanges(() => {
     setTechBreakActive(isTechBreakActive());
@@ -269,6 +300,17 @@ export default function App() {
     if (screen === "game") return;
     return ensureBotLiveBattleSim();
   }, [bootLoading, screen]);
+
+  useEffect(() => {
+    const syncBg = () => setBackgroundBattleActive(hasActiveBackgroundBattle());
+    syncBg();
+    window.addEventListener(BACKGROUND_BATTLE_CHANGED, syncBg);
+    window.addEventListener(BACKGROUND_BATTLE_FINISHED, syncBg);
+    return () => {
+      window.removeEventListener(BACKGROUND_BATTLE_CHANGED, syncBg);
+      window.removeEventListener(BACKGROUND_BATTLE_FINISHED, syncBg);
+    };
+  }, []);
 
   useEffect(() => {
     const base = (import.meta as any).env?.BASE_URL ?? "/";
@@ -323,6 +365,20 @@ export default function App() {
     });
   };
 
+  const rejoinBackgroundBattle = useCallback(() => {
+    const meta = getBackgroundBattleMeta();
+    if (!meta) return;
+    setSelectedMode(meta.mode);
+    setSelectedBrawler(meta.brawlerId);
+    if (meta.showdownFormat) setSelectedShowdownFormat(meta.showdownFormat);
+    if (meta.starStrikeFormat) setSelectedStarStrikeFormat(meta.starStrikeFormat);
+    setBossRaidBattle(meta.bossRaid ?? null);
+    setSiegeBattle(meta.siege ?? null);
+    setMegaSquad(meta.megaSquad ?? null);
+    setReattachBackgroundBattle(true);
+    goWithLoad("game", translate("loading.rejoinBattle"));
+  }, []);
+
   const content = renderContent();
   const isGame = screen === "game";
   return (
@@ -334,6 +390,9 @@ export default function App() {
       ) : (
         <MenuStageShell>
           {content}
+          {screen === "menu" && backgroundBattleActive && (
+            <BackgroundBattleRejoinBanner onRejoin={rejoinBackgroundBattle} />
+          )}
         </MenuStageShell>
       )}
       <RotateDeviceOverlay />
@@ -407,9 +466,25 @@ export default function App() {
             if (!canPlayWithParty(n, sel)) {
               return;
             }
+            if (sel.mode === "ranked" && n > 1 && !checkMyPartyRankedLeague().ok) {
+              return;
+            }
           }
           stashPartyBattleRoster();
           clearAllPlayAgainState();
+          if (isPlayerMapsModeSelected()) {
+            const prof = getCurrentProfile();
+            const playMode = (prof?.selectedMode as GameMode) || selectedMode;
+            if (playMode !== "ranked") {
+              const picked = beginPlayerMapBattle(playMode);
+              if (!picked) {
+                window.alert(translate("playerMaps.noMapsAvailable"));
+                return;
+              }
+            }
+          } else {
+            clearPlayerMapBattleSession();
+          }
           if (lobbyBossRaidBossId) {
             startMatchmaking(() => {
               hydrateFromProfile();
@@ -454,10 +529,12 @@ export default function App() {
         onBrawlerSelect={() => go("characterSelect")}
         onMastery={(id) => { setMasteryBrawlerId(id); go("mastery"); }}
         onComic={(id) => { setComicBrawlerId(id); go("comic"); }}
+        onTrails={(id) => { setTrailBrawlerId(id); go("brawlerTrail"); }}
         onLogout={() => { logout(); go("auth"); }}
         onRegister={() => go("register")}
         onAccounts={() => go("accounts")}
         onMapEditor={() => go("mapEditorModeSelect")}
+        onPlayerMapEditor={() => go("playerMapEditorModeSelect")}
         onNews={() => go("news")}
         onMessages={() => go("messages")}
         onClubs={() => { setViewClubId(null); go("clubs"); }}
@@ -535,6 +612,38 @@ export default function App() {
 
   if (screen === "starGuardianRewards") {
     return <StarGuardianRewardsPage onBack={() => go("menu")} />;
+  }
+
+  if (screen === "playerMapEditorModeSelect") {
+    return (
+      <ModeSelect
+        mapEditorPick={(gameMode) => {
+          const editorMode = editorModeForGameMode(gameMode);
+          if (!editorMode) return;
+          setMapEditorMode(editorMode);
+          go("playerMapEditor");
+        }}
+        onSelect={() => {}}
+        selectedShowdownFormat={selectedShowdownFormat}
+        selectedStarStrikeFormat={selectedStarStrikeFormat}
+        onBack={() => go("menu")}
+        playerMapEditorPick
+      />
+    );
+  }
+
+  if (screen === "playerMapEditor") {
+    if (!mapEditorMode) return null;
+    return (
+      <MapEditorPage
+        variant="player"
+        initialMode={mapEditorMode}
+        onBack={() => {
+          setMapEditorMode(null);
+          go("playerMapEditorModeSelect");
+        }}
+      />
+    );
   }
 
   if (screen === "mapEditorModeSelect") {
@@ -670,6 +779,7 @@ export default function App() {
         }}
         onOpenMastery={(id) => { setMasteryBrawlerId(id); go("mastery"); }}
         onOpenComic={(id) => { setComicBrawlerId(id); go("comic"); }}
+        onOpenTrails={(id) => { setTrailBrawlerId(id); go("brawlerTrail"); }}
         onTraining={(id) => {
           // For training we use the brawler locally without persisting it as
           // the player's active pick — locked brawlers are testable but
@@ -754,11 +864,19 @@ export default function App() {
         megaSquad={activeMode === "megashowdown" ? megaSquad : null}
         bossRaid={bossRaidBattle}
         siege={siegeBattle}
+        reattachFromBackground={reattachBackgroundBattle}
+        onReattachStarted={() => setReattachBackgroundBattle(false)}
+        onAfkKicked={() => {
+          setMyPresence("menu");
+          goWithLoad("menu", translate("loading.lobbyReturn"));
+        }}
         onExit={() => {
           clearAllPlayAgainState();
           setForceMode(null);
           setRankedBattleMode(null);
           clearRankedBattleSession();
+          clearPlayerMapBattleSession();
+          clearMapSourceCategory();
           setMegaSquad(null);
           setBossRaidBattle(null);
           setSiegeBattle(null);
@@ -768,6 +886,8 @@ export default function App() {
           const partyRematch = readPartyBattleRoster().length > 1;
           if (rankedBattleMode !== null && !partyRematch) {
             clearRankedBattleSession();
+          clearPlayerMapBattleSession();
+          clearMapSourceCategory();
             setRankedBattleMode(null);
             go("menu");
             return;
@@ -810,7 +930,12 @@ export default function App() {
   }
 
   if (screen === "customization") {
-    return <CustomizationPage onBack={() => go("menu")} />;
+    return (
+      <CustomizationPage
+        initialTab={customizationTab}
+        onBack={() => go("menu")}
+      />
+    );
   }
 
   if (screen === "settings") {
@@ -887,6 +1012,19 @@ export default function App() {
       <BrawlerComicPage
         brawlerId={comicBrawlerId}
         onBack={() => go("menu")}
+      />
+    );
+  }
+
+  if (screen === "brawlerTrail") {
+    return (
+      <BrawlerTrailPage
+        brawlerId={trailBrawlerId}
+        onBack={() => go("menu")}
+        onOpenShop={() => {
+          setCustomizationTab("trails");
+          go("customization");
+        }}
       />
     );
   }
