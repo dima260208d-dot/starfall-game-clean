@@ -1,5 +1,21 @@
 node_modules
 
+# Секреты (ключи Supabase и т.д.)
+.env
+.env.local
+.env.*.local
+
+# Автогенерация из .env.local (секреты)
+public/cloud-config.json
+
+# Cloudflare Worker локальные файлы
+cloudflare-worker/.wrangler/
+cloudflare-worker/.worker-url
+cloudflare-worker/node_modules/
+
+# Party server URL после деплоя
+server/.party-url
+
 # Сборка Vite (восстанавливается `npm run build`; дубликат public + бандла)
 dist/
 
