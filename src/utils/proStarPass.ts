@@ -216,6 +216,7 @@ export function buyProStarPass(): { success: boolean; error?: string } {
   if (!profile) return { success: false, error: "Not logged in" };
   if (profile.proStarPassPaid) return { success: false, error: "Pro Star Pass уже куплен" };
   updateProfile({ proStarPassPaid: true });
+  void import("./cloud/profileCloud").then((m) => m.pushCurrentProfileToCloud());
   recordPurchase({
     category: "pass",
     title: "Pro Star Pass",

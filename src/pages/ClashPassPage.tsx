@@ -29,6 +29,7 @@ import {
   type ClashPassReward,
   type InfinitePassChoice,
 } from "../utils/localStorageAPI";
+import { PROFILE_CLOUD_CHANGED } from "../utils/cloud/profileCloud";
 import QuestsModal from "../components/QuestsModal";
 import PassTrackDetailsModal, {
   PassInfoButton,
@@ -44,6 +45,8 @@ import { PageBg, PageBody, PageHeader } from "../components/PageChrome";
 import { useI18n, trackRewardLabel } from "../i18n";
 import { useScrollToOnMount } from "../hooks/useScrollToOnMount";
 import { clashPassScrollTarget } from "../utils/rewardTrackTargets";
+import { EmojiIcon } from "../components/EmojiIcon";
+import { Tr } from "../i18n/Tr";
 
 interface Props {
   onBack: () => void;
@@ -142,7 +145,7 @@ function LevelNode({
       zIndex: 2,
       transition: "all var(--ease-mid)",
     }}>
-      {locked ? "🔒" : showCheck ? "✓" : label}
+      {locked ? <EmojiIcon emoji="🔒" size={24} /> : showCheck ? <EmojiIcon emoji="✓" size={24} /> : label}
     </div>
   );
 }
@@ -236,7 +239,7 @@ function RandomRewardTile({
           color: variant === "ultra" ? "#fff" : variant === "premium" ? "#FFD700" : "#fff",
           textShadow: variant === "ultra" ? "0 1px 4px rgba(0,0,0,0.5)" : undefined,
         }}>
-          {t("pass.infinite.randomReward")}
+          <Tr id="pass.infinite.randomReward" />
         </div>
       </div>
       {locked && (
@@ -246,7 +249,7 @@ function RandomRewardTile({
           display: "flex", alignItems: "center", justifyContent: "center",
           fontSize: 24, zIndex: 2,
         }}>
-          🔒
+          <EmojiIcon emoji="🔒" size={24} />
         </div>
       )}
     </button>
@@ -378,7 +381,7 @@ function RewardTile({
             letterSpacing: "0.1em",
           }}
         >
-          {claimed ? t("common.claimed") : locked ? "🔒" : reached ? t("common.claim") : "🔒"}
+          {claimed ? t("common.claimed") : locked ? <EmojiIcon emoji="🔒" size={21} /> : reached ? t("common.claim") : <EmojiIcon emoji="🔒" size={21} />}
         </button>
       </div>
 
@@ -392,7 +395,7 @@ function RewardTile({
           pointerEvents: "none",
           zIndex: 2,
         }}>
-          🔒
+          <EmojiIcon emoji="🔒" size={24} />
         </div>
       )}
     </div>
@@ -470,13 +473,13 @@ function InfinitePassChoiceModal({
           textAlign: "center", fontSize: 22, fontWeight: 900,
           color: "#FFD700", letterSpacing: "0.06em", marginBottom: 8,
         }}>
-          {t("pass.infinite.modalTitle", { tier })}
+          <Tr id="pass.infinite.modalTitle" params={{ tier }} />
         </div>
         <p style={{
           margin: "0 0 22px", textAlign: "center",
           color: "rgba(255,255,255,0.65)", fontSize: 13, lineHeight: 1.5,
         }}>
-          {t("pass.infinite.modalDesc")}
+          <Tr id="pass.infinite.modalDesc" />
         </p>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
@@ -510,10 +513,10 @@ function InfinitePassChoiceModal({
             </div>
             <div style={{ position: "relative", zIndex: 1 }}>{renderPreview(undefined, true)}</div>
             <div style={{ position: "relative", zIndex: 1, fontSize: 12, fontWeight: 800, color: "#fff", textAlign: "center" }}>
-              {t("pass.infinite.randomReward")}
+              <Tr id="pass.infinite.randomReward" />
             </div>
             <div style={{ position: "relative", zIndex: 1, fontSize: 11, color: "rgba(255,255,255,0.5)", textAlign: "center" }}>
-              {t("pass.infinite.freeHint")}
+              <Tr id="pass.infinite.freeHint" />
             </div>
             <button
               type="button"
@@ -521,7 +524,7 @@ function InfinitePassChoiceModal({
               className="ui-btn ui-btn--success ui-btn--block"
               style={{ position: "relative", zIndex: 1, fontSize: 12, padding: "10px 12px" }}
             >
-              {t("pass.infinite.chooseFree")}
+              <Tr id="pass.infinite.chooseFree" />
             </button>
           </div>
 
@@ -538,7 +541,7 @@ function InfinitePassChoiceModal({
               {trackRewardLabel(deal.reward)}
             </div>
             <div style={{ position: "relative", zIndex: 1, fontSize: 11, color: "rgba(255,255,255,0.55)", textAlign: "center" }}>
-              {t("pass.infinite.dealHint")}
+              <Tr id="pass.infinite.dealHint" />
             </div>
             <button
               type="button"
@@ -547,7 +550,7 @@ function InfinitePassChoiceModal({
               className={`ui-btn ui-btn--block ${canAfford ? "ui-btn--primary" : "ui-btn--ghost"}`}
               style={{ position: "relative", zIndex: 1, fontSize: 12, padding: "10px 12px" }}
             >
-              {t("pass.infinite.chooseDeal", { gems: deal.gemCost })}
+              <Tr id="pass.infinite.chooseDeal" params={{ gems: deal.gemCost }} />
             </button>
           </div>
         </div>
@@ -574,6 +577,16 @@ export default function ClashPassPage({ onBack }: Props) {
     if (p) getPassDailyBattleXpStatus(p);
     refresh();
   }, [passTrackDetails]);
+
+  useEffect(() => {
+    const onProfile = () => refresh();
+    window.addEventListener("clash-profile-local-changed", onProfile);
+    window.addEventListener(PROFILE_CLOUD_CHANGED, onProfile);
+    return () => {
+      window.removeEventListener("clash-profile-local-changed", onProfile);
+      window.removeEventListener(PROFILE_CLOUD_CHANGED, onProfile);
+    };
+  }, []);
 
   useEffect(() => {
     if (!profile) return;
@@ -776,16 +789,16 @@ export default function ClashPassPage({ onBack }: Props) {
     }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
         <span style={{ fontSize: 11, fontWeight: 900, letterSpacing: "0.12em", color: "#FFD700" }}>
-          {t("pass.dailyXp")}
+          <Tr id="pass.dailyXp" />
         </span>
         {(dailyBattleXp.freeLeft <= 0 && (!dailyBattleXp.hasPaid || dailyBattleXp.paidLeft <= 0)) && (
-          <span style={{ fontSize: 11, color: "rgba(255,255,255,0.5)" }}>{t("common.tomorrow")}</span>
+          <span style={{ fontSize: 11, color: "rgba(255,255,255,0.5)" }}><Tr id="common.tomorrow" /></span>
         )}
       </div>
       <div style={{ display: "grid", gridTemplateColumns: dailyBattleXp.hasPaid ? "1fr 1fr" : "1fr", gap: 12 }}>
         <div>
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 4 }}>
-            <span style={{ color: "rgba(255,255,255,0.7)" }}>{t("pass.dailyFree")}</span>
+            <span style={{ color: "rgba(255,255,255,0.7)" }}><Tr id="pass.dailyFree" /></span>
             <span style={{ fontWeight: 900, color: "#fff" }}>{dailyBattleXp.freeLeft}/{PASS_DAILY_BATTLE_XP_FREE} ⭐</span>
           </div>
           <div className="ui-progress" style={{ height: 8 }}>
@@ -795,7 +808,7 @@ export default function ClashPassPage({ onBack }: Props) {
         {dailyBattleXp.hasPaid && (
           <div>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 4 }}>
-              <span style={{ color: "#FFD700" }}>{t("pass.dailyPaid")}</span>
+              <span style={{ color: "#FFD700" }}><Tr id="pass.dailyPaid" /></span>
               <span style={{ fontWeight: 900, color: "#FFD700" }}>{dailyBattleXp.paidLeft}/{PASS_DAILY_BATTLE_XP_PAID} ⭐</span>
             </div>
             <div className="ui-progress" style={{ height: 8 }}>
@@ -821,7 +834,7 @@ export default function ClashPassPage({ onBack }: Props) {
               className="ui-btn ui-btn--primary"
               style={{ position: "relative", padding: "8px 16px", fontSize: 13 }}
             >
-              {t("pass.quests")}
+              <Tr id="pass.quests" />
               {questClaimBadge > 0 && (
                 <span className="ui-badge" style={{ position: "static", marginLeft: 4, animation: "none" }}>
                   {questClaimBadge > 99 ? "99+" : questClaimBadge}
@@ -833,7 +846,7 @@ export default function ClashPassPage({ onBack }: Props) {
       />
       <PageBody ref={bodyRef} style={{ maxWidth: 1200, margin: "0 auto", padding: "24px 20px 40px", zIndex: 1 }}>
         <p style={{ textAlign: "center", color: "var(--t-3)", marginTop: 0, marginBottom: 8, fontSize: 13, letterSpacing: "0.04em" }}>
-          {t("pass.subtitle")}
+          <Tr id="pass.subtitle" />
         </p>
 
         {/* Progress card */}
@@ -842,7 +855,7 @@ export default function ClashPassPage({ onBack }: Props) {
             <div>
               <div style={{ fontSize: 28, fontWeight: 900, color: "#FFD700" }}>{levelDisplay}</div>
               <div style={{ color: "rgba(255,255,255,0.6)", fontSize: 13, marginTop: 4 }}>
-                {t("pass.xpProgress", { current: profile.xp, need: levelXpNeed })}
+                <Tr id="pass.xpProgress" params={{ current: profile.xp, need: levelXpNeed }} />
               </div>
             </div>
             <div style={{ color: "#40C4FF", fontSize: 16, display: "flex", alignItems: "center", gap: 6 }}>
@@ -856,7 +869,7 @@ export default function ClashPassPage({ onBack }: Props) {
           {/* XP shop */}
           <div style={{ marginTop: 18 }}>
             <div className="ui-section-title">
-              {t("pass.buyXp")}
+              <Tr id="pass.buyXp" />
             </div>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
               {XP_BUNDLES.map(b => (
@@ -873,7 +886,7 @@ export default function ClashPassPage({ onBack }: Props) {
                   }}
                 >
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                    +{b.xp} ⭐ <span style={{ opacity: 0.8 }}>{t("common.for")}</span> <GemIcon size={16} /> {b.gems}
+                    +{b.xp} ⭐ <span style={{ opacity: 0.8 }}><Tr id="common.for" /></span> <GemIcon size={16} /> {b.gems}
                   </span>
                 </button>
               ))}
@@ -911,10 +924,10 @@ export default function ClashPassPage({ onBack }: Props) {
           }}>
             <div style={{ flex: 1, minWidth: 240, position: "relative", zIndex: 1 }}>
               <div style={{ fontSize: 22, fontWeight: 900, letterSpacing: "0.06em" }}>
-                {t("pass.premium.title")}
+                <Tr id="pass.premium.title" />
               </div>
               <div style={{ fontSize: 13, marginTop: 4, opacity: 0.88, lineHeight: 1.45 }}>
-                {t("pass.premium.desc")}
+                <Tr id="pass.premium.desc" />
               </div>
             </div>
             <button
@@ -933,7 +946,7 @@ export default function ClashPassPage({ onBack }: Props) {
                 boxShadow: "0 8px 22px rgba(0,0,0,0.45), 0 0 24px rgba(255,213,79,0.45), inset 0 1px 0 rgba(255,255,255,0.18)",
               }}
             >
-              {t("pass.premium.buy", { price: CLASH_PASS_PRICE_RUB })}
+              <Tr id="pass.premium.buy" params={{ price: CLASH_PASS_PRICE_RUB }} />
             </button>
           </div>
         )}
@@ -944,7 +957,7 @@ export default function ClashPassPage({ onBack }: Props) {
             border: "1.5px solid #FFD700",
             color: "#FFD700", fontWeight: 900, textAlign: "center", letterSpacing: 0.5,
           }}>
-            {t("pass.premium.active")}
+            <Tr id="pass.premium.active" />
           </div>
         )}
 
@@ -967,10 +980,10 @@ export default function ClashPassPage({ onBack }: Props) {
           }}>
             <div style={{ flex: 1, minWidth: 240, position: "relative", zIndex: 1 }}>
               <div style={{ fontSize: 22, fontWeight: 900, letterSpacing: "0.06em", textShadow: "0 2px 8px rgba(0,0,0,0.45)" }}>
-                {t("pass.ultra.title")}
+                <Tr id="pass.ultra.title" />
               </div>
               <div style={{ fontSize: 13, marginTop: 4, opacity: 0.92, lineHeight: 1.45, textShadow: "0 1px 4px rgba(0,0,0,0.4)" }}>
-                {t("pass.ultra.desc")}
+                <Tr id="pass.ultra.desc" />
               </div>
             </div>
             <button
@@ -988,7 +1001,7 @@ export default function ClashPassPage({ onBack }: Props) {
                 boxShadow: "0 8px 22px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.18)",
               }}
             >
-              {t("pass.ultra.buy", { price: CLASH_PASS_ULTRA_PRICE_RUB })}
+              <Tr id="pass.ultra.buy" params={{ price: CLASH_PASS_ULTRA_PRICE_RUB }} />
             </button>
           </div>
         )}
@@ -1000,7 +1013,7 @@ export default function ClashPassPage({ onBack }: Props) {
             color: "#fff", fontWeight: 900, textAlign: "center", letterSpacing: 0.5,
             textShadow: "0 1px 4px rgba(0,0,0,0.5)",
           }}>
-            {t("pass.ultra.active")}
+            <Tr id="pass.ultra.active" />
           </div>
         )}
 
@@ -1018,13 +1031,13 @@ export default function ClashPassPage({ onBack }: Props) {
             background: "rgba(0,0,0,0.25)", color: "rgba(255,255,255,0.85)",
             border: "1px solid rgba(255,255,255,0.12)",
           }}>
-            {t("pass.track.free")}
+            <Tr id="pass.track.free" />
           </div>
           <div style={{
             textAlign: "center", fontWeight: 900, fontSize: 13,
             color: "rgba(255,255,255,0.7)", letterSpacing: 1,
           }}>
-            {t("common.levelShort")}
+            <Tr id="common.levelShort" />
           </div>
           <div style={{
             textAlign: "center", fontWeight: 900, letterSpacing: 1.5, fontSize: 13,
@@ -1033,13 +1046,13 @@ export default function ClashPassPage({ onBack }: Props) {
             color: "#1a0a3a",
             border: "1px solid rgba(255,255,255,0.3)",
           }}>
-            {t("pass.track.premium")}
+            <Tr id="pass.track.premium" />
           </div>
           <div style={{
             textAlign: "center", fontWeight: 900, fontSize: 13,
             color: "rgba(255,255,255,0.7)", letterSpacing: 1,
           }}>
-            {t("common.levelShort")}
+            <Tr id="common.levelShort" />
           </div>
           <div style={{
             textAlign: "center", fontWeight: 900, letterSpacing: 1.5, fontSize: 13,
@@ -1049,7 +1062,7 @@ export default function ClashPassPage({ onBack }: Props) {
             border: "1px solid rgba(255,255,255,0.35)",
             textShadow: "0 1px 4px rgba(0,0,0,0.45)",
           }}>
-            {t("pass.track.ultra")}
+            <Tr id="pass.track.ultra" />
           </div>
         </div>
 

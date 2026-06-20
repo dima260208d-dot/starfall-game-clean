@@ -70,7 +70,7 @@ import { getPendingGifts } from "../utils/gifts";
 import { getUnreadClubChatCount, CLUB_CHAT_CHANGED_EVENT } from "../utils/clubs";
 import { getUnreadNewsCount } from "../utils/news";
 import { getUnreadInboxCount } from "../utils/messages";
-import { sendFeedContestTestGiftIfNeeded } from "../utils/battleFeedContest";
+import { getIncomingFriendRequests, FRIENDS_CHANGED_EVENT } from "../utils/social/friends";
 import { getStarFeatMenuBadge } from "../utils/starFeatProgress";
 import { syncStarFeatPeaks } from "../utils/localStorageAPI";
 import { getCurrentUsername } from "../utils/localStorageAPI";
@@ -311,6 +311,9 @@ export default function MainMenu(props: MainMenuProps) {
   );
   const [unreadMessages, setUnreadMessages] = useState(() => getUnreadInboxCount());
   const [unreadClub, setUnreadClub] = useState(() => getUnreadClubChatCount());
+  const [incomingFriendRequests, setIncomingFriendRequests] = useState(
+    () => getIncomingFriendRequests().length,
+  );
 
   const [profile, setProfile] = useState(getCurrentProfile());
   const [notif, setNotif] = useState<string | null>(null);
@@ -481,11 +484,8 @@ export default function MainMenu(props: MainMenuProps) {
   };
 
   useEffect(() => {
-    sendFeedContestTestGiftIfNeeded();
-  }, []);
-
-  useEffect(() => {
     profileMenuSigRef.current = menuProfileSignature(getCurrentProfile());
+    void import("../utils/cloud/friendServerSync").then((m) => m.syncFriendsFromServer());
 
     const interval = setInterval(() => {
       const nextProfile = getCurrentProfile();
@@ -511,6 +511,10 @@ export default function MainMenu(props: MainMenuProps) {
         const next = getUnreadClubChatCount();
         return next === prev ? prev : next;
       });
+      setIncomingFriendRequests(prev => {
+        const next = getIncomingFriendRequests().length;
+        return next === prev ? prev : next;
+      });
       setHasModeMapNews(prev => {
         const next = hasAnyUnseenMap();
         return prev === next ? prev : next;
@@ -519,10 +523,15 @@ export default function MainMenu(props: MainMenuProps) {
     const onClubChat = () => {
       setUnreadClub(getUnreadClubChatCount());
     };
+    const onFriendsChanged = () => {
+      setIncomingFriendRequests(getIncomingFriendRequests().length);
+    };
     window.addEventListener(CLUB_CHAT_CHANGED_EVENT, onClubChat);
+    window.addEventListener(FRIENDS_CHANGED_EVENT, onFriendsChanged);
     return () => {
       clearInterval(interval);
       window.removeEventListener(CLUB_CHAT_CHANGED_EVENT, onClubChat);
+      window.removeEventListener(FRIENDS_CHANGED_EVENT, onFriendsChanged);
     };
   }, []);
 
@@ -1949,7 +1958,7 @@ export default function MainMenu(props: MainMenuProps) {
         <SideButton icon="🐾" imgSrc="ui/nav-pets.png" label={t("nav.pets")} onClick={() => guardPartyMenuAction(onPets)} color="#76FF03" compact={compact} badge={newPetBadge} notifyCorner="top-left" />
         <SideButton icon="⭐" imgSrc="ui/nav-feats.png" label={t("nav.feats")} onClick={() => guardPartyMenuAction(onStarFeats)} color="#FFD54F" compact={compact} badge={starFeatBadge} notifyCorner="top-left" />
         <SideButton icon="🏛️" imgSrc="ui/nav-clubs.png" label={t("nav.clubs")} onClick={() => guardPartyMenuAction(onClubs)} color="#FF8A65" compact={compact} badge={unreadClub || undefined} notifyCorner="top-left" />
-        <SideButton icon="👥" imgSrc="ui/nav-friends.png" label={t("nav.friends")} onClick={() => guardPartyMenuAction(onFriends)} color="#CE93D8" compact={compact} notifyCorner="top-left" />
+        <SideButton icon="👥" imgSrc="ui/nav-friends.png" label={t("nav.friends")} onClick={() => guardPartyMenuAction(onFriends)} color="#CE93D8" compact={compact} badge={incomingFriendRequests || undefined} notifyCorner="top-left" />
       </div>
 
       {/* LEFT SIDE — магазин, персонаж, бонус дня, сундуки */}

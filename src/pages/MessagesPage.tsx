@@ -1,6 +1,7 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { PageBg, PageBody, PageHeader, PageToolbar } from "../components/PageChrome";
 import { getCurrentProfile } from "../utils/localStorageAPI";
+import { PROFILE_CLOUD_CHANGED } from "../utils/cloud/profileCloud";
 import {
   getInboxMessages,
   getMyThreads,
@@ -20,12 +21,20 @@ import {
   type ThreadMessage,
 } from "../utils/messages";
 import { getPendingGifts, claimGift, describeGiftItem, getGiftSenderTitle, type PendingGift } from "../utils/gifts";
+import {
+  claimMapRewardInbox,
+  isMapRewardMessage,
+  parseMapRewardMessage,
+  type MapRewardInboxPayload,
+} from "../utils/playerMaps/playerMapRewards";
 import RewardDropQueue from "../components/RewardDropQueue";
 import BrawlerRevealModal from "../components/BrawlerRevealModal";
 import PetRevealModal from "../components/PetRevealModal";
 import { rewardInfosFromGiftItems } from "../utils/shopRewards";
 import type { RewardInfo } from "../components/RewardDropModal";
 import { useI18n } from "../i18n";
+import { EmojiIcon, TextWithEmojis } from "../components/EmojiIcon";
+import { Tr } from "../i18n/Tr";
 
 interface Props {
   onBack: () => void;
@@ -57,6 +66,16 @@ export default function MessagesPage({ onBack }: Props) {
     setInbox(getInboxMessages());
     setThreads(getMyThreads());
   };
+
+  useEffect(() => {
+    const onProfile = () => refresh();
+    window.addEventListener("clash-profile-local-changed", onProfile);
+    window.addEventListener(PROFILE_CLOUD_CHANGED, onProfile);
+    return () => {
+      window.removeEventListener("clash-profile-local-changed", onProfile);
+      window.removeEventListener(PROFILE_CLOUD_CHANGED, onProfile);
+    };
+  }, []);
 
   const selectedInbox = useMemo(
     () => inbox.find(m => m.id === selectedInboxId) ?? null,
@@ -166,9 +185,35 @@ export default function MessagesPage({ onBack }: Props) {
 
   const unreadInbox = inbox.filter(m => !m.read).length;
   const profile = getCurrentProfile();
-  const pendingGift = selectedInbox?.giftId
+  const pendingGift = selectedInbox?.giftId && !isMapRewardMessage(selectedInbox)
     ? getPendingGifts().find(g => g.id === selectedInbox.giftId)
     : null;
+
+  const selectedMapReward = useMemo(() => {
+    if (!selectedInbox || !isMapRewardMessage(selectedInbox)) return null;
+    const payload = parseMapRewardMessage(selectedInbox.body);
+    if (!payload || payload.claimed) return null;
+    return payload;
+  }, [selectedInbox]);
+
+  const handleClaimMapReward = () => {
+    if (!selectedInbox || !selectedMapReward || busy) return;
+    setBusy(true);
+    const ok = claimMapRewardInbox(selectedInbox.id);
+    if (ok) {
+      refresh();
+      const p = selectedMapReward;
+      const rewards: RewardInfo[] = [];
+      if (p.bundle.coins) rewards.push({ type: "coins", amount: p.bundle.coins, label: t("messages.mapRewardCoins", { count: p.bundle.coins }) });
+      if (p.bundle.crystals) rewards.push({ type: "gems", amount: p.bundle.crystals, label: t("messages.mapRewardCrystals", { count: p.bundle.crystals }) });
+      if (p.bundle.powerPoints) rewards.push({ type: "powerPoints", amount: p.bundle.powerPoints, label: t("messages.mapRewardPowerPoints", { count: p.bundle.powerPoints }) });
+      if (rewards.length) setRewardQueue(rewards);
+      else setMsg(t("messages.mapRewardClaimed"));
+    } else {
+      setMsg(t("messages.claimFailed"));
+    }
+    setBusy(false);
+  };
 
   return (
     <PageBg variant="news" style={{ display: "flex", flexDirection: "column", fontFamily: "var(--app-font-sans)" }}>
@@ -181,7 +226,7 @@ export default function MessagesPage({ onBack }: Props) {
         right={
           unreadInbox > 0 ? (
             <button type="button" className="ui-btn ui-btn--ghost" onClick={() => { markAllInboxRead(); refresh(); }} style={{ fontSize: 11 }}>
-              {t("messages.markAllRead")}
+              <Tr id="messages.markAllRead" />
             </button>
           ) : null
         }
@@ -194,9 +239,9 @@ export default function MessagesPage({ onBack }: Props) {
               : t("messages.tab.fromDev")}
           </TabBtn>
           <TabBtn active={tab === "sent"} onClick={() => setTab("sent")}>
-            {t("messages.tab.sent", { count: String(threads.length) })}
+            <Tr id="messages.tab.sent" params={{ count: String(threads.length) }} />
           </TabBtn>
-          <TabBtn active={tab === "compose"} onClick={() => setTab("compose")}>{t("messages.tab.compose")}</TabBtn>
+          <TabBtn active={tab === "compose"} onClick={() => setTab("compose")}><Tr id="messages.tab.compose" /></TabBtn>
         </div>
       </PageToolbar>
       <PageBody style={{ padding: "16px 20px 24px" }}>
@@ -213,8 +258,10 @@ export default function MessagesPage({ onBack }: Props) {
             inbox={inbox}
             selected={selectedInbox}
             pendingGift={pendingGift}
+            mapReward={selectedMapReward}
             onSelect={openInbox}
             onClaim={handleClaimGift}
+            onClaimMapReward={handleClaimMapReward}
             onOpenThread={(threadId) => { setSelectedThreadId(threadId); setTab("sent"); }}
             busy={busy}
           />
@@ -253,12 +300,14 @@ export default function MessagesPage({ onBack }: Props) {
   );
 }
 
-function FromDevPanel({ inbox, selected, pendingGift, onSelect, onClaim, onOpenThread, busy }: {
+function FromDevPanel({ inbox, selected, pendingGift, mapReward, onSelect, onClaim, onClaimMapReward, onOpenThread, busy }: {
   inbox: InboxMessage[];
   selected: InboxMessage | null;
   pendingGift: PendingGift | null | undefined;
+  mapReward: MapRewardInboxPayload | null;
   onSelect: (m: InboxMessage) => void;
   onClaim: () => void;
+  onClaimMapReward: () => void;
   onOpenThread: (threadId: string) => void;
   busy: boolean;
 }) {
@@ -266,8 +315,8 @@ function FromDevPanel({ inbox, selected, pendingGift, onSelect, onClaim, onOpenT
   if (!inbox.length) {
     return (
       <div className="ui-card" style={{ padding: 32, textAlign: "center", color: "rgba(255,255,255,0.5)" }}>
-        <div style={{ fontSize: 40, marginBottom: 8 }}>📭</div>
-        <div>{t("messages.empty.inbox")}</div>
+        <div style={{ fontSize: 40, marginBottom: 8 }}><EmojiIcon emoji="📭" size={24} /></div>
+        <div><Tr id="messages.empty.inbox" /></div>
       </div>
     );
   }
@@ -289,7 +338,7 @@ function FromDevPanel({ inbox, selected, pendingGift, onSelect, onClaim, onOpenT
             }}
           >
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ fontSize: 18 }}>{m.kind === "gift" ? "🎁" : m.threadId ? "💬" : "📢"}</span>
+              <span style={{ fontSize: 18 }}>{m.kind === "gift" ? (isMapRewardMessage(m) ? "🗺️" : "🎁") : m.threadId ? "💬" : "📢"}</span>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 800, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.title}</div>
                 <div style={{ fontSize: 10, color: "rgba(255,255,255,0.45)", marginTop: 2 }}>{new Date(m.sentAt).toLocaleString(localeMeta.bcp47)}</div>
@@ -305,12 +354,31 @@ function FromDevPanel({ inbox, selected, pendingGift, onSelect, onClaim, onOpenT
           <>
             <div>
               <div style={{ fontSize: 11, color: "rgba(255,255,255,0.45)", letterSpacing: 1 }}>
-                {pendingGift ? getGiftSenderTitle(pendingGift).toUpperCase() : selected.kind === "gift" ? t("common.gift") : t("messages.label.fromDev")}
+                {pendingGift ? getGiftSenderTitle(pendingGift).toUpperCase() : selected.kind === "gift" ? (isMapRewardMessage(selected) ? t("messages.mapRewardTitle") : t("common.gift")) : t("messages.label.fromDev")}
               </div>
               <h3 style={{ margin: "6px 0 0", fontSize: 18, fontWeight: 900 }}>{selected.title}</h3>
               <div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", marginTop: 4 }}>{new Date(selected.sentAt).toLocaleString(localeMeta.bcp47)}</div>
             </div>
-            {selected.body && <p style={{ margin: 0, fontSize: 14, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{selected.body}</p>}
+            {selected.body && !isMapRewardMessage(selected) && <p style={{ margin: 0, fontSize: 14, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{selected.body}</p>}
+            {mapReward && (
+              <div style={{ marginTop: 4, padding: 12, borderRadius: 12, background: "rgba(100,181,246,0.08)", border: "1px solid rgba(100,181,246,0.35)" }}>
+                <div style={{ fontWeight: 800, color: "#64B5F6", marginBottom: 8 }}><Tr id="messages.mapRewardTitle" /></div>
+                {mapReward.bundle.coins > 0 && <div style={{ fontSize: 13, marginBottom: 4 }}>• {t("messages.mapRewardCoins", { count: mapReward.bundle.coins })}</div>}
+                {mapReward.bundle.crystals > 0 && <div style={{ fontSize: 13, marginBottom: 4 }}>• {t("messages.mapRewardCrystals", { count: mapReward.bundle.crystals })}</div>}
+                {mapReward.bundle.powerPoints > 0 && <div style={{ fontSize: 13, marginBottom: 4 }}>• {t("messages.mapRewardPowerPoints", { count: mapReward.bundle.powerPoints })}</div>}
+                {mapReward.mapNames.length > 0 && (
+                  <div style={{ fontSize: 12, color: "rgba(255,255,255,0.55)", marginTop: 6 }}>
+                    {t("messages.mapRewardForMaps", { maps: mapReward.mapNames.join(", ") })}
+                  </div>
+                )}
+                <button type="button" className="ui-btn ui-btn--primary ui-btn--block" style={{ marginTop: 10 }} disabled={busy} onClick={onClaimMapReward}>
+                  {busy ? "..." : t("messages.claimMapReward")}
+                </button>
+              </div>
+            )}
+            {selected.kind === "gift" && isMapRewardMessage(selected) && !mapReward && (
+              <div style={{ fontSize: 12, color: "rgba(105,240,174,0.9)" }}><Tr id="messages.mapRewardClaimed" /></div>
+            )}
             {selected.attachment?.kind === "image" && (
               <img src={selected.attachment.url} alt="" style={{ maxWidth: "100%", borderRadius: 10, maxHeight: 200, objectFit: "contain" }} />
             )}
@@ -319,12 +387,12 @@ function FromDevPanel({ inbox, selected, pendingGift, onSelect, onClaim, onOpenT
             )}
             {selected.threadId && (
               <button type="button" className="ui-btn ui-btn--ghost ui-btn--block" onClick={() => onOpenThread(selected.threadId!)}>
-                {t("messages.openThread")}
+                <Tr id="messages.openThread" />
               </button>
             )}
             {pendingGift && (
               <div style={{ marginTop: 8, padding: 12, borderRadius: 12, background: "rgba(255,213,79,0.08)", border: "1px solid rgba(255,213,79,0.35)" }}>
-                <div style={{ fontWeight: 800, color: "#FFD54F", marginBottom: 8 }}>{t("messages.giftContents")}</div>
+                <div style={{ fontWeight: 800, color: "#FFD54F", marginBottom: 8 }}><Tr id="messages.giftContents" /></div>
                 {pendingGift.items.map((it, i) => <div key={i} style={{ fontSize: 13, marginBottom: 4 }}>• {describeGiftItem(it)}</div>)}
                 <button type="button" className="ui-btn ui-btn--primary ui-btn--block" style={{ marginTop: 10 }} disabled={busy} onClick={onClaim}>
                   {busy ? "..." : t("messages.claimGift")}
@@ -332,11 +400,11 @@ function FromDevPanel({ inbox, selected, pendingGift, onSelect, onClaim, onOpenT
               </div>
             )}
             {selected.kind === "gift" && !pendingGift && (
-              <div style={{ fontSize: 12, color: "rgba(105,240,174,0.9)" }}>{t("messages.giftAlreadyClaimed")}</div>
+              <div style={{ fontSize: 12, color: "rgba(105,240,174,0.9)" }}><Tr id="messages.giftAlreadyClaimed" /></div>
             )}
           </>
         ) : (
-          <div style={{ color: "rgba(255,255,255,0.45)", textAlign: "center", padding: 40 }}>{t("messages.selectMessage")}</div>
+          <div style={{ color: "rgba(255,255,255,0.45)", textAlign: "center", padding: 40 }}><Tr id="messages.selectMessage" /></div>
         )}
       </div>
     </div>
@@ -357,9 +425,9 @@ function SentPanel({ threads, selected, onSelect, canReply, replyText, setReplyT
   if (!threads.length) {
     return (
       <div className="ui-card" style={{ padding: 32, textAlign: "center", color: "rgba(255,255,255,0.5)" }}>
-        <div style={{ fontSize: 40, marginBottom: 8 }}>📤</div>
-        <div>{t("messages.empty.threads")}</div>
-        <div style={{ fontSize: 12, marginTop: 8 }}>{t("messages.empty.threadsHint")}</div>
+        <div style={{ fontSize: 40, marginBottom: 8 }}><EmojiIcon emoji="📤" size={24} /></div>
+        <div><Tr id="messages.empty.threads" /></div>
+        <div style={{ fontSize: 12, marginTop: 8 }}><Tr id="messages.empty.threadsHint" /></div>
       </div>
     );
   }
@@ -382,7 +450,7 @@ function SentPanel({ threads, selected, onSelect, canReply, replyText, setReplyT
                 background: selected?.id === t.id ? "rgba(33,150,243,0.12)" : undefined,
               }}
             >
-              <div style={{ fontSize: 10, fontWeight: 800, color: cat.color, marginBottom: 4 }}>{cat.icon} {cat.label}</div>
+              <div style={{ fontSize: 10, fontWeight: 800, color: cat.color, marginBottom: 4 }}><EmojiIcon emoji={cat.icon} size={18} /> {cat.label}</div>
               <div style={{ fontWeight: 800, fontSize: 13 }}>{t.subject}</div>
               <div style={{ fontSize: 10, color: "rgba(255,255,255,0.4)", marginTop: 4 }}>
                 {hasDevReply ? t("messages.hasReply") : t("messages.awaitingReply")}
@@ -408,7 +476,7 @@ function SentPanel({ threads, selected, onSelect, canReply, replyText, setReplyT
             </div>
             {canReply ? (
               <div style={{ borderTop: "1px solid rgba(255,255,255,0.1)", paddingTop: 12 }}>
-                <div style={{ fontSize: 11, color: "#90CAF9", marginBottom: 6, fontWeight: 700 }}>{t("messages.continueDialog")}</div>
+                <div style={{ fontSize: 11, color: "#90CAF9", marginBottom: 6, fontWeight: 700 }}><Tr id="messages.continueDialog" /></div>
                 <textarea
                   className="ui-input"
                   value={replyText}
@@ -423,12 +491,12 @@ function SentPanel({ threads, selected, onSelect, canReply, replyText, setReplyT
               </div>
             ) : (
               <div style={{ fontSize: 12, color: "rgba(255,255,255,0.45)", textAlign: "center" }}>
-                {t("messages.awaitDevReply")}
+                <Tr id="messages.awaitDevReply" />
               </div>
             )}
           </>
         ) : (
-          <div style={{ color: "rgba(255,255,255,0.45)", textAlign: "center", padding: 40 }}>{t("messages.selectThread")}</div>
+          <div style={{ color: "rgba(255,255,255,0.45)", textAlign: "center", padding: 40 }}><Tr id="messages.selectThread" /></div>
         )}
       </div>
     </div>
@@ -448,7 +516,7 @@ function ChatBubble({ message }: { message: ThreadMessage }) {
         <div style={{ fontSize: 10, fontWeight: 800, color: isDev ? "#90CAF9" : "#81C784", marginBottom: 4 }}>
           {isDev ? t("messages.dev") : t("messages.you")} · {new Date(message.sentAt).toLocaleString(localeMeta.bcp47)}
         </div>
-        <div style={{ fontSize: 13, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>{message.text}</div>
+        <div style={{ fontSize: 13, lineHeight: 1.45, whiteSpace: "pre-wrap" }}><TextWithEmojis text={message.text} emojiSize={24} /></div>
         {message.attachment?.kind === "image" && (
           <img src={message.attachment.url} alt="" style={{ marginTop: 8, maxHeight: 120, maxWidth: "100%", borderRadius: 8 }} />
         )}
@@ -472,10 +540,10 @@ function ComposePanel({ category, setCategory, subject, setSubject, text, setTex
   return (
     <div className="ui-card" style={{ padding: 18, maxWidth: 600 }}>
       <p style={{ margin: "0 0 14px", fontSize: 13, color: "rgba(255,255,255,0.65)", lineHeight: 1.45 }}>
-        {t("messages.compose.intro")}
+        <Tr id="messages.compose.intro" />
       </p>
 
-      <label style={{ fontSize: 11, color: "rgba(255,255,255,0.5)", display: "block", marginBottom: 8, fontWeight: 800, letterSpacing: 1 }}>{t("messages.categoryLabel")}</label>
+      <label style={{ fontSize: 11, color: "rgba(255,255,255,0.5)", display: "block", marginBottom: 8, fontWeight: 800, letterSpacing: 1 }}><Tr id="messages.categoryLabel" /></label>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 8, marginBottom: 16 }}>
         {FEEDBACK_CATEGORIES.map(c => {
           const active = category === c.id;
@@ -486,7 +554,7 @@ function ComposePanel({ category, setCategory, subject, setSubject, text, setTex
               background: active ? `${c.color}22` : "rgba(0,0,0,0.25)",
               color: active ? "#fff" : "rgba(255,255,255,0.7)",
             }}>
-              <div style={{ fontSize: 18 }}>{c.icon}</div>
+              <div style={{ fontSize: 18 }}><EmojiIcon emoji={c.icon} size={18} /></div>
               <div style={{ fontSize: 11, fontWeight: 800, marginTop: 4 }}>{c.label}</div>
             </button>
           );
@@ -504,13 +572,13 @@ function ComposePanel({ category, setCategory, subject, setSubject, text, setTex
       <textarea className="ui-input" value={text} onChange={e => setText(e.target.value.slice(0, MAX_FEEDBACK_TEXT))} placeholder={t("messages.descriptionPlaceholder")} rows={6} style={{ resize: "vertical", minHeight: 120 }} />
 
       <div style={{ marginTop: 12 }}>
-        <label style={{ fontSize: 11, color: "rgba(255,255,255,0.5)", display: "block", marginBottom: 6 }}>{t("messages.linkOptional")}</label>
+        <label style={{ fontSize: 11, color: "rgba(255,255,255,0.5)", display: "block", marginBottom: 6 }}><Tr id="messages.linkOptional" /></label>
         <input className="ui-input" value={link} onChange={e => { setLink(e.target.value); if (e.target.value) setImageData(null); }} placeholder={t("messages.linkPlaceholder")} disabled={!!imageData} />
       </div>
       <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
         <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={e => onPickImage(e.target.files?.[0] ?? null)} />
-        <button type="button" className="ui-btn ui-btn--ghost" onClick={() => fileRef.current?.click()}>{t("messages.imageBtn")}</button>
-        {imageData && <button type="button" className="ui-btn ui-btn--ghost" onClick={() => setImageData(null)}>{t("messages.removeImage")}</button>}
+        <button type="button" className="ui-btn ui-btn--ghost" onClick={() => fileRef.current?.click()}><Tr id="messages.imageBtn" /></button>
+        {imageData && <button type="button" className="ui-btn ui-btn--ghost" onClick={() => setImageData(null)}><Tr id="messages.removeImage" /></button>}
       </div>
       {imageData && <img src={imageData} alt="" style={{ marginTop: 12, maxHeight: 160, maxWidth: "100%", borderRadius: 10 }} />}
       <button type="button" className="ui-btn ui-btn--primary ui-btn--block ui-btn--lg" style={{ marginTop: 18 }} disabled={busy || !category} onClick={onSend}>

@@ -1048,6 +1048,7 @@ export function buyClashPassUltra(): { success: boolean; error?: string } {
   if (!profile) return { success: false, error: "Not logged in" };
   if (profile.clashPassUltraPaid) return { success: false, error: "Доп. дорожка уже куплена" };
   updateProfile({ clashPassUltraPaid: true });
+  void import("./cloud/profileCloud").then((m) => m.pushCurrentProfileToCloud());
   recordPurchase({
     category: "pass_ultra",
     title: "Star Pass Ultra",
@@ -1211,6 +1212,7 @@ export function buyClashPass(): { success: boolean; error?: string } {
     patch.passDailyBattlePaidLeft = PASS_DAILY_BATTLE_XP_PAID;
   }
   updateProfile(patch);
+  void import("./cloud/profileCloud").then((m) => m.pushCurrentProfileToCloud());
   recordPurchase({
     category: "pass",
     title: "Star Pass",
@@ -1429,6 +1431,9 @@ export function normalizeProfile(p: UserProfile): UserProfile {
     createdAt: p.createdAt || Date.now(),
     dailyLadderDay: p.dailyLadderDay ?? 1,
     dailyLadderLastClaim: p.dailyLadderLastClaim ?? 0,
+    dailyLadderClaimedDayKey: p.dailyLadderClaimedDayKey ?? 0,
+    cloudSyncedAt: typeof p.cloudSyncedAt === "number" ? p.cloudSyncedAt : undefined,
+    profileLocalRev: typeof p.profileLocalRev === "number" ? p.profileLocalRev : undefined,
     dailyQuests: p.dailyQuests,
     questPool: p.questPool,
     starFeatProgress: { ...(p.starFeatProgress || {}) },

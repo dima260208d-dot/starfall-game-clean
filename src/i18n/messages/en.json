@@ -1020,6 +1020,7 @@
   "friends.error.incomingPending": "They already sent you a request — accept it",
   "friends.error.requestNotFound": "Request not found",
   "friends.error.serverOffline": "Friends server unavailable",
+  "friends.error.serverWaking": "Server is waking up — wait a minute and try again",
   "friends.addById": "Add by player ID",
   "friends.addPlaceholder": "Player ID (12 characters)",
   "friends.added": "Friend added!",

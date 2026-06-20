@@ -129,6 +129,7 @@ export async function sendFriendRequestAsync(
     if (!server.ok) {
       if (server.error === "already_friends") return { success: false, error: t("friends.error.alreadyAdded") };
       if (server.error === "incoming_pending") return { success: false, error: t("friends.error.incomingPending") };
+      if (server.error === "wake_failed") return { success: false, error: t("friends.error.serverWaking") };
       return { success: false, error: t("friends.error.serverOffline") };
     }
     emitFriendsChanged();

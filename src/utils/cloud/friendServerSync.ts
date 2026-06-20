@@ -136,9 +136,17 @@ export async function sendFriendRequestToServer(toPlayerId: string): Promise<{ o
   const me = getCurrentProfile();
   if (!base || !me?.playerId) return { ok: false, error: "offline" };
 
-  await wakePartyServer(30_000);
+  const awake = await wakePartyServer(30_000);
+  if (!awake) return { ok: false, error: "wake_failed" };
   const fromId = normalizePlayerIdQuery(me.playerId);
   const toId = normalizePlayerIdQuery(toPlayerId);
+
+  const outgoing = ((me as { friendRequestsOutgoing?: Array<{ toPlayerId: string; toUsername: string; sentAt: number }> }).friendRequestsOutgoing ?? []);
+  if (!outgoing.some((r) => normalizePlayerIdQuery(r.toPlayerId) === toId)) {
+    updateProfile({
+      friendRequestsOutgoing: [...outgoing, { toPlayerId: toId, toUsername: "", sentAt: Date.now() }],
+    } as Parameters<typeof updateProfile>[0]);
+  }
 
   const result = await tryCloudTimeout(
     fetch(`${base}/api/friend-request`, {
@@ -166,6 +174,9 @@ export async function sendFriendRequestToServer(toPlayerId: string): Promise<{ o
     const err = result.error?.message ?? "";
     if (err.includes("already friends")) return { ok: false, error: "already_friends" };
     if (err.includes("incoming pending")) return { ok: false, error: "incoming_pending" };
+    if (result.error?.message?.includes("wake") || err.includes("wake_failed")) {
+      return { ok: false, error: "wake_failed" };
+    }
     return { ok: false, error: "server" };
   }
   await syncFriendsFromServer();

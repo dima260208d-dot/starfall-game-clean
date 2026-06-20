@@ -11,6 +11,7 @@ import {
   PRO_STAR_PASS_WIN_TOKENS,
   PRO_STAR_PASS_TIER_BONUS,
 } from "../utils/proStarPass";
+import { PROFILE_CLOUD_CHANGED } from "../utils/cloud/profileCloud";
 import { proStarPassFreeReward, proStarPassPaidReward } from "../utils/proStarPassRewards";
 import ChestVisual from "../components/ChestVisual";
 import { GemIcon } from "../components/GameIcons";
@@ -27,6 +28,8 @@ import PassTrackDetailsModal, {
   preloadPassDetailsChestModelsFromTracks,
 } from "../components/PassTrackDetailsModal";
 import { proStarPassTrackSummaries } from "../utils/passTrackSummary";
+import { EmojiIcon } from "../components/EmojiIcon";
+import { Tr } from "../i18n/Tr";
 
 interface Props {
   onBack: () => void;
@@ -125,8 +128,8 @@ function RewardTile({
         flexShrink: 0,
       }}
     >
-      {locked && <span style={{ position: "absolute", top: 5, left: 6, fontSize: 12, zIndex: 2 }}>🔒</span>}
-      {claimed && <span style={{ position: "absolute", top: 5, right: 6, fontSize: 12, color: "#76ff03", zIndex: 2 }}>✓</span>}
+      {locked && <span style={{ position: "absolute", top: 5, left: 6, fontSize: 12, zIndex: 2 }}><EmojiIcon emoji="🔒" size={24} /></span>}
+      {claimed && <span style={{ position: "absolute", top: 5, right: 6, fontSize: 12, color: "#76ff03", zIndex: 2 }}><EmojiIcon emoji="✓" size={20} /></span>}
       <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", width: "100%" }}>
         <RewardIcon r={reward} size={iconSize} />
       </div>
@@ -164,7 +167,7 @@ function RewardTile({
       )}
       {canClaim && (
         <span style={{ fontSize: 7, fontWeight: 900, color: "#c6ff00", letterSpacing: "0.06em", flexShrink: 0 }}>
-          {t("common.claim")}
+          <Tr id="common.claim" />
         </span>
       )}
     </button>
@@ -192,7 +195,7 @@ function LevelNode({ label, reached, claimed }: { label: string | number; reache
         boxShadow: reached ? "0 0 14px rgba(255,213,79,0.5)" : undefined,
       }}
     >
-      {reached && claimed ? "✓" : label}
+      {reached && claimed ? <EmojiIcon emoji="✓" size={24} /> : label}
     </div>
   );
 }
@@ -211,6 +214,16 @@ export default function ProStarPassPage({ onBack }: Props) {
     void preloadPassDetailsChestModelsFromTracks(passTrackDetails);
     refresh();
   }, [passTrackDetails]);
+
+  useEffect(() => {
+    const onProfile = () => refresh();
+    window.addEventListener("clash-profile-local-changed", onProfile);
+    window.addEventListener(PROFILE_CLOUD_CHANGED, onProfile);
+    return () => {
+      window.removeEventListener("clash-profile-local-changed", onProfile);
+      window.removeEventListener(PROFILE_CLOUD_CHANGED, onProfile);
+    };
+  }, []);
 
   const levels = useMemo(
     () => Array.from({ length: PRO_STAR_PASS_MAX_LEVEL }, (_, i) => i + 1),
@@ -367,7 +380,7 @@ export default function ProStarPassPage({ onBack }: Props) {
                   textShadow: "0 2px 8px rgba(0,0,0,0.9)",
                 }}
               >
-                {t("proPass.badge")}
+                <Tr id="proPass.badge" />
               </div>
               <div
                 style={{
@@ -378,7 +391,7 @@ export default function ProStarPassPage({ onBack }: Props) {
                   textShadow: "0 1px 4px rgba(0,0,0,0.85)",
                 }}
               >
-                {t("proPass.season")}
+                <Tr id="proPass.season" />
               </div>
             </div>
 
@@ -423,7 +436,7 @@ export default function ProStarPassPage({ onBack }: Props) {
                     setTimeout(() => setMsg(null), 2600);
                   }}
                 >
-                  {t("proPass.activate", { price: PRO_STAR_PASS_PRICE_RUB })}
+                  <Tr id="proPass.activate" params={{ price: PRO_STAR_PASS_PRICE_RUB }} />
                 </button>
               ) : (
                 <div
@@ -439,18 +452,18 @@ export default function ProStarPassPage({ onBack }: Props) {
                     border: "1px solid rgba(118,255,3,0.35)",
                   }}
                 >
-                  {t("proPass.active")}
+                  <Tr id="proPass.active" />
                 </div>
               )}
             </div>
           </div>
 
           <div style={{ flexShrink: 0, fontSize: 10, fontWeight: 800, color: "rgba(255,255,255,0.72)", lineHeight: 1.45 }}>
-            <div>{t("proPass.hintWin", { tokens: PRO_STAR_PASS_WIN_TOKENS })}</div>
-            <div style={{ marginTop: 4 }}>{t("proPass.hintTier", { tokens: PRO_STAR_PASS_TIER_BONUS })}</div>
+            <div><Tr id="proPass.hintWin" params={{ tokens: PRO_STAR_PASS_WIN_TOKENS }} /></div>
+            <div style={{ marginTop: 4 }}><Tr id="proPass.hintTier" params={{ tokens: PRO_STAR_PASS_TIER_BONUS }} /></div>
             {hasPaid && (
               <div style={{ marginTop: 6, color: "#c6ff00", fontWeight: 900 }}>
-                {t("proPass.doubleTokens")}
+                <Tr id="proPass.doubleTokens" />
               </div>
             )}
           </div>

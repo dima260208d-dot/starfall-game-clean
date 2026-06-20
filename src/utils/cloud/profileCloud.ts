@@ -271,6 +271,89 @@ function buildCloudPatch(cloud: Record<string, unknown>): Partial<UserProfile> {
   return patch;
 }
 
+function unionClaimedLevels(a?: number[], b?: number[]): number[] {
+  return [...new Set([...(a ?? []), ...(b ?? [])])].sort((x, y) => x - y);
+}
+
+function mergeInboxMessages(
+  local: UserProfile["inbox"],
+  cloud: UserProfile["inbox"],
+): UserProfile["inbox"] {
+  const byId = new Map<string, NonNullable<UserProfile["inbox"]>[number]>();
+  for (const m of cloud ?? []) byId.set(m.id, m);
+  for (const m of local ?? []) {
+    const hit = byId.get(m.id);
+    if (!hit) {
+      byId.set(m.id, m);
+      continue;
+    }
+    byId.set(m.id, {
+      ...hit,
+      ...m,
+      read: !!(hit.read || m.read),
+    });
+  }
+  return [...byId.values()].sort((a, b) => b.sentAt - a.sentAt);
+}
+
+function mergePendingGifts(
+  local: UserProfile["pendingGifts"],
+  cloud: UserProfile["pendingGifts"],
+): UserProfile["pendingGifts"] {
+  const byId = new Map<string, NonNullable<UserProfile["pendingGifts"]>[number]>();
+  for (const g of cloud ?? []) byId.set(g.id, g);
+  for (const g of local ?? []) byId.set(g.id, g);
+  return [...byId.values()].sort((a, b) => b.sentAt - a.sentAt);
+}
+
+/** Не даём облаку откатывать уже полученные награды, прочитанные сообщения и покупки. */
+function mergeProfileFromCloud(
+  local: UserProfile,
+  patch: Partial<UserProfile>,
+  cloudSyncedAt: number,
+): Partial<UserProfile> {
+  const localClaimsNewer = localProfileRevision(local) > cloudSyncedAt;
+
+  const merged: Partial<UserProfile> = { ...patch };
+
+  merged.dailyLadderClaimedDayKey = Math.max(
+    Number(local.dailyLadderClaimedDayKey ?? 0),
+    Number(patch.dailyLadderClaimedDayKey ?? 0),
+  );
+  merged.dailyLadderLastClaim = Math.max(
+    Number(local.dailyLadderLastClaim ?? 0),
+    Number(patch.dailyLadderLastClaim ?? 0),
+  );
+  merged.dailyLadderDay = Math.max(
+    Number(local.dailyLadderDay ?? 1),
+    Number(patch.dailyLadderDay ?? 1),
+  );
+
+  merged.clashPassPaid = !!(local.clashPassPaid || patch.clashPassPaid);
+  merged.clashPassUltraPaid = !!(local.clashPassUltraPaid || patch.clashPassUltraPaid);
+  merged.proStarPassPaid = !!(local.proStarPassPaid || patch.proStarPassPaid);
+
+  merged.clashPassClaimedFree = unionClaimedLevels(local.clashPassClaimedFree, patch.clashPassClaimedFree);
+  merged.clashPassClaimedPaid = unionClaimedLevels(local.clashPassClaimedPaid, patch.clashPassClaimedPaid);
+  merged.proStarPassClaimedFree = unionClaimedLevels(local.proStarPassClaimedFree, patch.proStarPassClaimedFree);
+  merged.proStarPassClaimedPaid = unionClaimedLevels(local.proStarPassClaimedPaid, patch.proStarPassClaimedPaid);
+  merged.trophyRoadClaimed = unionClaimedLevels(local.trophyRoadClaimed, patch.trophyRoadClaimed);
+
+  merged.inbox = mergeInboxMessages(local.inbox, patch.inbox);
+  merged.pendingGifts = mergePendingGifts(local.pendingGifts, patch.pendingGifts);
+
+  if (localClaimsNewer && local.chestInventory) {
+    merged.chestInventory = local.chestInventory;
+  } else {
+    merged.chestInventory = {
+      ...(patch.chestInventory ?? {}),
+      ...(local.chestInventory ?? {}),
+    } as UserProfile["chestInventory"];
+  }
+
+  return merged;
+}
+
 function localProfileRevision(profile: UserProfile): number {
   return profile.profileLocalRev ?? profile.createdAt ?? 0;
 }
@@ -532,7 +615,7 @@ export async function pullAndMergeProfileFromCloud(force = false): Promise<boole
   if (!local) return false;
 
   const { passwordHash, username: localUsername } = local;
-  const patch = buildCloudPatch(cloudProfile);
+  const patch = mergeProfileFromCloud(local, buildCloudPatch(cloudProfile), cloudSyncedAt);
 
   const mergedStarGuardian = mergeStarGuardianState(
     normalizeStarGuardianState(local.starGuardian),
@@ -579,9 +662,18 @@ export async function syncProfileWithCloud(): Promise<void> {
 
     const { syncCurrentAccountToCloud } = await import("./accountCloud");
 
-    // Облако богаче — подтягиваем (вход с другого устройства).
+    // Облако богаче — подтягиваем только если локально нет несохранённых изменений.
     if (row && cloudScore > localScore + 20) {
-      await pullAndMergeProfileFromCloud(true);
+      if (hasUnsyncedLocalChanges(profile)) {
+        const ok = await pushCurrentProfileToCloud();
+        if (!ok) {
+          console.warn("[profileCloud] sync failed:", getProfileCloudLastError() ?? "unknown");
+        } else {
+          console.info("[profileCloud] pushed unsynced local before cloud pull", `(score ${localScore} vs cloud ${cloudScore})`);
+        }
+      } else {
+        await pullAndMergeProfileFromCloud(true);
+      }
       await syncCurrentAccountToCloud();
       return;
     }
@@ -640,10 +732,15 @@ export async function restoreProfileFromCloudForLogin(input: {
     normalizeStarGuardianState(patch.starGuardian),
   );
 
+  const safePatch = existing
+    ? mergeProfileFromCloud(existing, patch, cloudSyncedAt)
+    : patch;
+
   let merged: UserProfile;
   if (existing && localScore > cloudScore + 10) {
     merged = normalizeProfile({
       ...existing,
+      ...safePatch,
       playerId,
       email: input.email ?? existing.email,
       passwordHash: input.passwordHash,
@@ -658,7 +755,7 @@ export async function restoreProfileFromCloudForLogin(input: {
     );
   } else {
     merged = normalizeProfile({
-      ...patch,
+      ...safePatch,
       username: input.username,
       playerId,
       email: input.email ?? undefined,
@@ -666,7 +763,7 @@ export async function restoreProfileFromCloudForLogin(input: {
       starGuardian: mergedStarGuardian,
       cloudSyncedAt: cloudSyncedAt || now,
       profileLocalRev: cloudSyncedAt || now,
-      createdAt: typeof patch.createdAt === "number" ? (patch.createdAt as number) : now,
+      createdAt: typeof safePatch.createdAt === "number" ? (safePatch.createdAt as number) : now,
     } as UserProfile);
     console.info(
       "[profileCloud] restored from cloud",

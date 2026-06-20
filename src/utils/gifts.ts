@@ -127,6 +127,10 @@ export function claimGift(giftId: string): { success: boolean; error?: string; g
   }
   // Remove the claimed gift from the queue.
   patch[GIFT_FIELD] = queue.filter(g => g.id !== giftId);
+  const inbox = (p.inbox ?? []).map((m) =>
+    m.giftId === giftId ? { ...m, read: true } : m,
+  );
+  if (inbox.length) patch.inbox = inbox;
   updateProfile(patch);
   return { success: true, gift: { ...gift } };
 }

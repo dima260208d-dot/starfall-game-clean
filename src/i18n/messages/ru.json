@@ -1020,6 +1020,7 @@
   "friends.error.incomingPending": "У вас уже есть заявка от этого игрока — примите её",
   "friends.error.requestNotFound": "Заявка не найдена",
   "friends.error.serverOffline": "Сервер друзей недоступен",
+  "friends.error.serverWaking": "Сервер просыпается — подождите минуту и попробуйте снова",
   "friends.addById": "Добавить по ID игрока",
   "friends.addPlaceholder": "ID игрока (12 символов)",
   "friends.added": "Друг добавлен!",
