@@ -7,7 +7,21 @@ import {
   writeBotLiveBattleFeed,
   type LiveBattleResultSnapshot,
 } from "../battleLiveSpectate";
-import { TEST_FRIEND_SPECS, type TestFriendSpec } from "./seedTestFriends";
+
+interface SpectateBotSpec {
+  username: string;
+  playerId: string;
+  brawlerId: string;
+  battleMode: string;
+}
+
+/** Фоновые «live»-бои для наблюдения — не отображаются в друзьях/меню «В сети». */
+const SPECTATE_BOT_SPECS: SpectateBotSpec[] = [
+  { username: "Ronin", playerId: "02RONINBLADE", brawlerId: "ronin", battleMode: "gemgrab" },
+  { username: "Goro", playerId: "05GOROCRUSHX", brawlerId: "goro", battleMode: "showdown" },
+  { username: "Kenji", playerId: "07KENJISTELX", brawlerId: "kenji", battleMode: "heist" },
+  { username: "Zafkiel", playerId: "10ZAFKIELAXX", brawlerId: "zafkiel", battleMode: "starstrike" },
+];
 
 const MAP_W = 3500;
 const MAP_H = 3500;
@@ -37,7 +51,7 @@ interface SimActor {
 }
 
 interface BotBattleSim {
-  spec: TestFriendSpec;
+  spec: SpectateBotSpec;
   sessionId: string;
   elapsed: number;
   finishedAt: number | null;
@@ -62,7 +76,7 @@ function brawlerHp(id: string): number {
   return getBrawlerById(id)?.hp ?? BRAWLERS.find(b => b.id === id)?.hp ?? 5200;
 }
 
-function createActors(spec: TestFriendSpec): SimActor[] {
+function createActors(spec: SpectateBotSpec): SimActor[] {
   const cx = MAP_W / 2;
   const cy = MAP_H / 2;
   const actors: SimActor[] = [];
@@ -72,7 +86,7 @@ function createActors(spec: TestFriendSpec): SimActor[] {
     actors.push({
       id: spec.playerId + "-b" + i,
       brawlerId: bid,
-      name: i === 0 ? spec.username.replace(/^Test_/, "") : pickBotName(),
+      name: i === 0 ? spec.username : pickBotName(),
       team: "blue",
       isPlayer: i === 0,
       maxHp: brawlerHp(bid),
@@ -105,7 +119,7 @@ function createActors(spec: TestFriendSpec): SimActor[] {
   return actors;
 }
 
-function createSim(spec: TestFriendSpec): BotBattleSim {
+function createSim(spec: SpectateBotSpec): BotBattleSim {
   const actors = createActors(spec);
   return {
     spec,
@@ -150,8 +164,8 @@ function buildParticipants(sim: BotBattleSim): GameParticipant[] {
     displayName: a.name,
     team: a.team,
     isPlayer: a.isPlayer,
-    level: Math.min(11, Math.max(1, Math.floor(sim.spec.trophies / 450) + 1)),
-    trophies: sim.spec.trophies,
+    level: 7,
+    trophies: 3000,
   }));
 }
 
@@ -255,7 +269,7 @@ function tickAll(): void {
 export function ensureBotLiveBattleSim(): () => void {
   if (started) return () => {};
   started = true;
-  sims = TEST_FRIEND_SPECS.filter(s => s.presence === "battle").map(s => createSim(s));
+  sims = SPECTATE_BOT_SPECS.map(s => createSim(s));
   tickAll();
   timer = setInterval(tickAll, TICK_MS);
   return () => {

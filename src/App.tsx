@@ -96,6 +96,7 @@ import { MenuStageShell, PlatformLayoutProvider } from "./platform";
 import { translate } from "./i18n";
 import { preloadAllModels } from "./utils/modelPreloader";
 import { preloadBattleAssets } from "./utils/battleAssetPreloader";
+import { getHeavyAssetBaseUrl } from "./lib/assetBase";
 import { BOSS_RAID_MAX_LEVEL } from "./utils/bossRaidProgress";
 import { resolvePartyBossRaidLevel } from "./utils/partyRaidLevel";
 import { resolvePartySiegeLevel } from "./utils/siegeProgress";
@@ -313,8 +314,21 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const base = (import.meta as any).env?.BASE_URL ?? "/";
-    preloadAllModels(base, (p) => setBootProgress(p)).catch(() => setBootProgress(1));
+    const base = getHeavyAssetBaseUrl();
+    const progressRef = { current: 0 };
+    let lastChange = Date.now();
+    const stallCheck = window.setInterval(() => {
+      if (progressRef.current >= 1) return;
+      if (Date.now() - lastChange > 45_000) setBootProgress(1);
+    }, 3000);
+    preloadAllModels(base, (p) => {
+      if (p !== progressRef.current) {
+        progressRef.current = p;
+        lastChange = Date.now();
+      }
+      setBootProgress(p);
+    }).catch(() => setBootProgress(1));
+    return () => window.clearInterval(stallCheck);
   }, []);
 
   useEffect(() => {
@@ -358,7 +372,7 @@ export default function App() {
     }
 
     setTransitionProgress(0);
-    const base = (import.meta as any).env?.BASE_URL ?? "/";
+    const base = getHeavyAssetBaseUrl();
     const mode = forceMode ?? selectedMode;
     preloadBattleAssets(base, (p) => setTransitionProgress(p), { mode }).catch(() => {
       setTransitionProgress(1);

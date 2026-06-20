@@ -12,8 +12,27 @@ export type RemotePresenceEntry = SocialPresence & {
 const ONLINE_MS = 5 * 60 * 1000;
 const remoteById = new Map<string, RemotePresenceEntry>();
 
-export function setRemotePresenceEntry(playerId: string, entry: RemotePresenceEntry): void {
+function presenceFingerprint(entry: RemotePresenceEntry): string {
+  return [
+    entry.screen,
+    entry.menuActivity ?? "",
+    entry.battleMode ?? "",
+    entry.partyCode ?? "",
+    entry.username ?? "",
+    entry.brawlerId ?? "",
+    entry.trophies ?? "",
+    entry.updatedAt,
+  ].join("|");
+}
+
+/** @returns true если данные реально изменились */
+export function setRemotePresenceEntry(playerId: string, entry: RemotePresenceEntry): boolean {
+  const prev = remoteById.get(playerId);
+  if (prev && presenceFingerprint(prev) === presenceFingerprint(entry)) {
+    return false;
+  }
   remoteById.set(playerId, entry);
+  return true;
 }
 
 export function getRemotePresenceEntry(playerId: string): RemotePresenceEntry | null {

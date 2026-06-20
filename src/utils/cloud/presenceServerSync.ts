@@ -119,8 +119,9 @@ export async function fetchFriendsPresenceFromServer(): Promise<boolean> {
   const players = result.value.players ?? {};
   for (const [id, pr] of Object.entries(players)) {
     const norm = normalizePlayerIdQuery(id);
-    setRemotePresenceEntry(norm, { ...pr, playerId: norm, updatedAt: pr.updatedAt ?? Date.now() });
-    changed = true;
+    if (setRemotePresenceEntry(norm, { ...pr, playerId: norm, updatedAt: pr.updatedAt ?? Date.now() })) {
+      changed = true;
+    }
   }
   if (changed) emitPresenceChanged();
   return true;
@@ -211,8 +212,11 @@ function connectPresenceFeedWs(): void {
         };
         if (msg.type === "presence:update" && msg.playerId && msg.presence) {
           const id = normalizePlayerIdQuery(msg.playerId);
-          setRemotePresenceEntry(id, { ...msg.presence, playerId: id });
-          emitPresenceChanged();
+          const me = getCurrentProfile()?.playerId;
+          if (me && id === normalizePlayerIdQuery(me)) return;
+          if (setRemotePresenceEntry(id, { ...msg.presence, playerId: id })) {
+            emitPresenceChanged();
+          }
         }
       } catch {
         /* ignore */
@@ -330,10 +334,6 @@ export function initPresenceServerSync(): void {
   pollTimer = setInterval(() => {
     void fetchFriendsPresenceFromServer();
   }, POLL_INTERVAL_MS);
-
-  window.addEventListener(PRESENCE_CHANGED_EVENT, () => {
-    void pushMyPresenceToServer();
-  });
 
   window.addEventListener("clash_party_changed", () => {
     void pushMyPresenceToServer(true);

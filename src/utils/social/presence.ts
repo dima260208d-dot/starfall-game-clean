@@ -179,17 +179,9 @@ export function touchMyPresence() {
 
 function readPresenceForPlayerId(playerId: string): SocialPresence | null {
   const idNorm = normalizePlayerIdQuery(playerId);
-  let key = findProfileStorageKeyByPlayerId(idNorm);
-  const all = getAllProfiles();
-  if (!key) {
-    for (const [uname, raw] of Object.entries(all)) {
-      if (uname.startsWith("Test_") && normalizePlayerIdQuery((raw as { playerId?: string }).playerId ?? "") === idNorm) {
-        key = uname;
-        break;
-      }
-    }
-  }
+  const key = findProfileStorageKeyByPlayerId(idNorm);
   if (!key) return null;
+  const all = getAllProfiles();
   const raw = all[key];
   if (!raw) return null;
   const prof = normalizeProfile(raw as any);

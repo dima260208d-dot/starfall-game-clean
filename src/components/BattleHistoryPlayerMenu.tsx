@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { addFriendByPlayerId } from "../utils/social/friends";
+import { sendFriendRequestAsync } from "../utils/social/friends";
 import { useI18n } from "../i18n";
+import { Tr } from "../i18n/Tr";
+import { EmojiIcon } from "./EmojiIcon";
 
 interface Props {
   x: number;
@@ -53,24 +55,25 @@ export default function BattleHistoryPlayerMenu({
             style={{ width: "100%", marginBottom: 4, fontSize: 12, justifyContent: "flex-start" }}
             onClick={() => { onViewProfile(playerId); onClose(); }}
           >
-            👤 {t("battleHistory.viewProfile")}
+            <EmojiIcon emoji="👤" size={18} /> <Tr id="battleHistory.viewProfile" />
           </button>
           <button
             type="button"
             className="ui-btn ui-btn--ghost"
             style={{ width: "100%", fontSize: 12, justifyContent: "flex-start" }}
             onClick={() => {
-              const r = addFriendByPlayerId(playerId);
-              setMsg(r.success ? t("friends.added") : (r.error ?? t("common.error")));
-              setTimeout(onClose, 1200);
+              void sendFriendRequestAsync(playerId).then((r) => {
+                setMsg(r.success ? t("friends.requestSent") : (r.error ?? t("common.error")));
+                setTimeout(onClose, 1200);
+              });
             }}
           >
-            ➕ {t("battleHistory.addFriend")}
+            <EmojiIcon emoji="➕" size={18} /> <Tr id="battleHistory.addFriend" />
           </button>
         </>
       ) : (
         <div style={{ fontSize: 11, color: "rgba(255,255,255,0.45)", padding: "4px 6px" }}>
-          {t("battleHistory.botPlayer")}
+          <Tr id="battleHistory.botPlayer" />
         </div>
       )}
       {msg && (

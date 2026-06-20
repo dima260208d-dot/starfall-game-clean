@@ -39,6 +39,7 @@ import { consumeMenuRankedCupFx, type PendingMenuRankedCupFx } from "../utils/ra
 import { consumeMenuProPassTokenFx, type PendingMenuProPassTokenFx } from "../utils/proPassTokenMenuFx";
 import { getTrophyRoadSegment } from "../utils/trophyRoadProgress";
 import { getModeInfo, type ModeInfo } from "../data/modes";
+import NotificationBadge, { cornerBadgeStyle, type NotifyCorner } from "../components/ui/NotificationBadge";
 import ModeIconImg from "../components/ModeIconImg";
 import ModeInfoModal from "../components/ModeInfoModal";
 import DailyRewardModal from "../components/DailyRewardModal";
@@ -95,21 +96,31 @@ import PartySidePanel from "../components/menu/PartySidePanel";
 import PartyChatPanel from "../components/menu/PartyChatPanel";
 import { getPartyChatUnreadCount, PARTY_CHAT_READ_EVENT } from "../utils/social/partyChat";
 import PartyInviteModal from "../components/menu/PartyInviteModal";
+import PartyJoinRequestModal from "../components/menu/PartyJoinRequestModal";
 import TeamBar from "../components/menu/TeamBar";
 import TeammateActionMenu from "../components/menu/TeammateActionMenu";
 import PartyBrawlerPickerModal from "../components/menu/PartyBrawlerPickerModal";
 import PartyBrawlerSuggestBubble from "../components/menu/PartyBrawlerSuggestBubble";
 import PartyBrawlerSuggestAcceptModal from "../components/menu/PartyBrawlerSuggestAcceptModal";
+import PartyModeSuggestBubble from "../components/menu/PartyModeSuggestBubble";
+import PartyModeSuggestAcceptModal from "../components/menu/PartyModeSuggestAcceptModal";
+import PartySpeechBubble from "../components/menu/PartySpeechBubble";
 import {
   PARTY_CHANGED_EVENT,
   PARTY_INVITE_DECLINED_EVENT,
+  PARTY_JOIN_REQUEST_EVENT,
   amPartyLeader,
   acceptPartyBrawlerSuggestion,
-  cancelOutgoingInvite,
+  acceptPartyModeSuggestion,
+  cancelOutgoingInviteForTarget,
   clearPartyBrawlerSuggestionIfRecipientChangedBrawler,
   declinePartyBrawlerSuggestion,
+  declinePartyModeSuggestion,
   getPartyBrawlerSuggestion,
-  getOutgoingInvite,
+  getPartyModeSuggestion,
+  getLatestPartySpeechForPlayer,
+  getOutgoingInviteForSide,
+  getOutgoingInvites,
   getMyPartyCode,
   getTeammatesForMenu,
   getPartyMemberCount,
@@ -125,15 +136,22 @@ import {
   tickPartyPlayReadyExpired,
   getMyPartyRoom,
   kickPartyMember,
-  maybeOfferDemoIncomingBrawlerSuggest,
+  maybeOfferTestBotModeSuggest,
   sendPartyBrawlerSuggestion,
+  hasOfflinePartyMember,
+  isPartyMemberOnline,
+  isPartyLeaderPlayerId,
+  getPendingJoinRequestForLeader,
+  checkMyPartyRankedLeague,
   type PartySlot,
 } from "../utils/social/party";
 import {
   canInviteToParty,
+  canPlayWithParty,
   memberSlotsForMaxParty,
   partyModeFromProfile,
 } from "../utils/social/partyConfig";
+import { formatRankedPartyLeagueError } from "../utils/rankedPartyLeague";
 import {
   isLeftPartySlot,
   teammatesOnLeftLine,
@@ -145,11 +163,12 @@ import {
   getMenuActivityLabelForPlayerId,
   setMyMenuActivity,
 } from "../utils/social/presence";
-import { cyclePartyTestFriendsMenuActivity } from "../utils/social/party";
-import { ensureTestFriendsSeeded, refreshTestFriendsPresence } from "../utils/social/seedTestFriends";
-import type { PartyTeammateView, OutgoingPartyInvite, PartyBrawlerSuggestion } from "../utils/social/party";
+import { purgeTestFriendsFromCurrentUser } from "../utils/social/seedTestFriends";
+import type { PartyTeammateView, OutgoingPartyInvite, PartyBrawlerSuggestion, PartyChatMessage, PartyModeSuggestion } from "../utils/social/party";
 import { canPartyObserveBattle, getPartySpectateTarget } from "../utils/social/partySpectate";
 import { normalizePlayerIdQuery } from "../utils/playerId";
+import { EmojiIcon } from "../components/EmojiIcon";
+import { Tr } from "../i18n/Tr";
 
 function menuBottomInset(compact: boolean): number {
   return compact ? 8 : 16;
@@ -187,10 +206,12 @@ interface MainMenuProps {
   onBrawlerSelect: () => void;
   onMastery: (brawlerId: string) => void;
   onComic: (brawlerId: string) => void;
+  onTrails: (brawlerId: string) => void;
   onLogout: () => void;
   onRegister?: () => void;
   onAccounts?: () => void;
   onMapEditor: () => void;
+  onPlayerMapEditor?: () => void;
   onNews: () => void;
   onMessages: () => void;
   onClubs: () => void;
@@ -206,7 +227,11 @@ interface MainMenuProps {
 function menuProfileSignature(profile: UserProfile | null): string {
   if (!profile) return "";
   try {
-    return JSON.stringify(profile);
+    const pr = profile.socialPresence;
+    const stablePresence = pr
+      ? { screen: pr.screen, menuActivity: (pr as { menuActivity?: string | null }).menuActivity ?? null }
+      : null;
+    return JSON.stringify({ ...profile, socialPresence: stablePresence });
   } catch {
     return "";
   }
@@ -216,7 +241,11 @@ function menuProfileSignature(profile: UserProfile | null): string {
 function partyMenuLayoutSignature(): string {
   const room = getMyPartyRoom();
   if (!room) return "";
-  const invite = getOutgoingInvite();
+  const invites = getOutgoingInvites();
+  const inviteSig = invites
+    .map(i => `${i.side}:${normalizePlayerIdQuery(i.targetPlayerId)}`)
+    .sort()
+    .join(",");
   const ready = getPartyPlayReadyState();
   const memberSig = [...room.members]
     .sort((a, b) => a.playerId.localeCompare(b.playerId))
@@ -226,7 +255,7 @@ function partyMenuLayoutSignature(): string {
     room.code,
     normalizePlayerIdQuery(room.leaderPlayerId),
     memberSig,
-    invite?.side ?? "",
+    inviteSig,
     ready?.deadlineAt ?? 0,
   ].join(";");
 }
@@ -268,7 +297,7 @@ export default function MainMenu(props: MainMenuProps) {
   const {
     onPlay, lobbyBossRaidBossId = null, onCollection, onShop, onCustomization, onSettings,
     onProfile, onBattleFeed, onClashPass, onTrophyRoad, onRanked, onProStarPass, onChests, onPets, onStarFeats,
-    onModeSelect, onBrawlerSelect, onMastery, onComic, onLogout, onRegister, onAccounts, onMapEditor, onNews,
+    onModeSelect, onBrawlerSelect, onMastery, onComic, onTrails, onLogout, onRegister, onAccounts, onMapEditor, onPlayerMapEditor, onNews,
     onMessages: openMessages, onClubs, onFriends, onViewPlayerProfile, onAdmin,
     onStarGuardianRewards, onBattleHistory, onRecords, onSpectate,
   } = props;
@@ -384,6 +413,7 @@ export default function MainMenu(props: MainMenuProps) {
   const [vh, setVh] = useState<number>(typeof window !== "undefined" ? window.innerHeight : 720);
   // Legacy compact layout: narrow/short windows only — same as before mobile engine.
   const compact = vw < 900 || vh < 500;
+  const resourcePillHudStyle: CSSProperties = { fontSize: compact ? 11 : 14, minHeight: compact ? 28 : 32 };
   const artBase = (import.meta as any).env?.BASE_URL ?? "/";
   const [partyPanel, setPartyPanel] = useState<PartySlot | null>(null);
   const [showPartyChat, setShowPartyChat] = useState(false);
@@ -401,6 +431,7 @@ export default function MainMenu(props: MainMenuProps) {
   } | null>(null);
   const [brawlerPickTarget, setBrawlerPickTarget] = useState<PartyTeammateView | null>(null);
   const [showSuggestAccept, setShowSuggestAccept] = useState(false);
+  const [showModeSuggestLeader, setShowModeSuggestLeader] = useState(false);
   const prevSelectedBrawlerRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -563,9 +594,9 @@ export default function MainMenu(props: MainMenuProps) {
 
   useEffect(() => {
     setMyPresence("menu");
-    ensureTestFriendsSeeded();
+    purgeTestFriendsFromCurrentUser();
     partyLayoutSigRef.current = partyMenuLayoutSignature();
-    const onSocial = () => {
+    const onPartySocial = () => {
       const layoutSig = partyMenuLayoutSignature();
       if (layoutSig !== partyLayoutSigRef.current) {
         partyLayoutSigRef.current = layoutSig;
@@ -580,7 +611,12 @@ export default function MainMenu(props: MainMenuProps) {
         setProfile(nextProfile);
       }
       if (getMyPartyCode()) {
-        window.setTimeout(() => maybeOfferDemoIncomingBrawlerSuggest(), 600);
+        window.setTimeout(() => maybeOfferTestBotModeSuggest(), 1400);
+      }
+    };
+    const onRemotePresence = () => {
+      if (getPartyMemberCount() >= 2) {
+        setPartyActivityTick(t => t + 1);
       }
     };
     const onDeclined = (e: Event) => {
@@ -589,29 +625,17 @@ export default function MainMenu(props: MainMenuProps) {
       setTimeout(() => setNotif(null), 2800);
       partyRefresh();
     };
-    window.addEventListener(PARTY_CHANGED_EVENT, onSocial);
-    window.addEventListener(PRESENCE_CHANGED_EVENT, onSocial);
+    window.addEventListener(PARTY_CHANGED_EVENT, onPartySocial);
+    window.addEventListener(PRESENCE_CHANGED_EVENT, onRemotePresence);
+    window.addEventListener(PARTY_JOIN_REQUEST_EVENT, onPartySocial);
     window.addEventListener(PARTY_INVITE_DECLINED_EVENT, onDeclined);
-    const iv = setInterval(() => {
-      refreshTestFriendsPresence();
-      onSocial();
-    }, 6000);
-    const demoSuggestTimer = window.setTimeout(() => {
-      maybeOfferDemoIncomingBrawlerSuggest();
-      const layoutSig = partyMenuLayoutSignature();
-      if (layoutSig !== partyLayoutSigRef.current) {
-        partyLayoutSigRef.current = layoutSig;
-        partyRefresh();
-      } else if (getPartyMemberCount() >= 2) {
-        setPartyActivityTick(t => t + 1);
-      }
-    }, 4500);
+    const iv = setInterval(onPartySocial, 6000);
     return () => {
-      window.removeEventListener(PARTY_CHANGED_EVENT, onSocial);
-      window.removeEventListener(PRESENCE_CHANGED_EVENT, onSocial);
+      window.removeEventListener(PARTY_CHANGED_EVENT, onPartySocial);
+      window.removeEventListener(PRESENCE_CHANGED_EVENT, onRemotePresence);
+      window.removeEventListener(PARTY_JOIN_REQUEST_EVENT, onPartySocial);
       window.removeEventListener(PARTY_INVITE_DECLINED_EVENT, onDeclined);
       clearInterval(iv);
-      window.clearTimeout(demoSuggestTimer);
     };
   }, []);
 
@@ -629,20 +653,6 @@ export default function MainMenu(props: MainMenuProps) {
     if (getPartyMemberCount() <= 1) return;
     setMyMenuActivity(showQuests ? "quests" : null);
   }, [showQuests, partyTick]);
-
-  useEffect(() => {
-    if (getPartyMemberCount() < 2) return;
-    let round = 0;
-    const tickDemo = () => {
-      if (getPartyMemberCount() < 2) return;
-      if (cyclePartyTestFriendsMenuActivity(round)) {
-        round += 1;
-        setPartyActivityTick(t => t + 1);
-      }
-    };
-    const demoIv = window.setInterval(tickDemo, 5000);
-    return () => window.clearInterval(demoIv);
-  }, []);
 
   useEffect(() => {
     if (getPartyMemberCount() <= 1 || !amIPartyPlayReady()) return;
@@ -679,9 +689,16 @@ export default function MainMenu(props: MainMenuProps) {
       showTechBreakBlockNotice();
       return false;
     }
+    if (profile?.selectedMode === "ranked" && getPartyMemberCount() > 1) {
+      const leagueCheck = checkMyPartyRankedLeague();
+      if (!leagueCheck.ok) {
+        handleSoonNotice(formatRankedPartyLeagueError(leagueCheck, t));
+        return false;
+      }
+    }
     onPlay();
     return true;
-  }, [onPlay, showTechBreakBlockNotice]);
+  }, [onPlay, showTechBreakBlockNotice, profile?.selectedMode, t]);
 
   useEffect(() => {
     if (!profile || getPartyMemberCount() <= 1) {
@@ -717,8 +734,9 @@ export default function MainMenu(props: MainMenuProps) {
   void partyChatBadgeTick;
   void partyActivityTick;
   void partyReadyTick;
-  const outgoingInvite = getOutgoingInvite();
+  const outgoingInviteForSlot = (slot: PartySlot) => getOutgoingInviteForSide(slot);
   const partyBrawlerSuggest = getPartyBrawlerSuggestion();
+  const partyModeSuggest = getPartyModeSuggestion();
   const teammates = getTeammatesForMenu();
   const maxParty = getMaxPartySizeForMenu();
   const partyCount = getPartyMemberCount();
@@ -728,6 +746,10 @@ export default function MainMenu(props: MainMenuProps) {
   const partyReadyActive = inParty && partyPlayReady !== null;
   const iAmPartyReady = amIPartyPlayReady();
   const partyMenuLocked = inParty && iAmPartyReady;
+  const partyMenuLockedFilter: React.CSSProperties = partyMenuLocked
+    ? { filter: "grayscale(1) saturate(0.2) brightness(0.88)", transition: "filter 0.22s ease" }
+    : {};
+  const partyHasOffline = inParty && hasOfflinePartyMember();
   const partyReadySecondsLeft = partyPlayReady
     ? Math.max(0, Math.ceil((partyPlayReady.deadlineAt - Date.now()) / 1000))
     : 0;
@@ -742,6 +764,18 @@ export default function MainMenu(props: MainMenuProps) {
       tryStartBattle();
       return;
     }
+    if (partyHasOffline && !iAmPartyReady) {
+      handleSoonNotice(t("party.offlineBlocksStart"));
+      return;
+    }
+    if (rankedPartyBlocked) {
+      handleSoonNotice(rankedPartyBlockMsg);
+      return;
+    }
+    if (rankedPartySizeBlocked) {
+      handleSoonNotice(t("ranked.party.tooManyPlayers"));
+      return;
+    }
     if (iAmPartyReady) {
       cancelMyPartyPlayReady();
       partyRefresh();
@@ -751,11 +785,35 @@ export default function MainMenu(props: MainMenuProps) {
     pressPartyPlayReady();
     partyRefresh();
   };
+  const guardPartyMenuAction = (action: () => void) => {
+    if (partyMenuLocked) {
+      handleSoonNotice(t("party.menuLockedWhileReady"));
+      return;
+    }
+    action();
+  };
+  const handleModeSelectClick = () => {
+    if (partyMenuLocked) {
+      handleSoonNotice(t("party.menuLockedWhileReady"));
+      return;
+    }
+    onModeSelect();
+  };
   const handleObserveClick = () => {
     if (partyObserveTarget) onSpectate(partyObserveTarget);
   };
   const modeSel = partyModeFromProfile(profile);
   const canInvite = canInviteToParty(partyCount, modeSel);
+  const rankedPartyLeagueCheck = profile.selectedMode === "ranked" && inParty
+    ? checkMyPartyRankedLeague()
+    : { ok: true as const };
+  const rankedPartyBlocked = !rankedPartyLeagueCheck.ok;
+  const rankedPartyBlockMsg = rankedPartyBlocked
+    ? formatRankedPartyLeagueError(rankedPartyLeagueCheck, t)
+    : "";
+  const rankedPartySizeBlocked = inParty
+    && profile.selectedMode === "ranked"
+    && !canPlayWithParty(partyCount, modeSel);
   const allowedSlots = memberSlotsForMaxParty(maxParty);
   const mateBySlot = new Map(teammates.map(t => [t.slot, t]));
   const emptyInviteSlots = canInvite
@@ -777,6 +835,11 @@ export default function MainMenu(props: MainMenuProps) {
   };
   const canAnswerPartySuggest = !!partyBrawlerSuggest
     && normalizePlayerIdQuery(partyBrawlerSuggest.toPlayerId) === myPlayerId;
+  const mySpeech = inParty ? getLatestPartySpeechForPlayer(myPlayerId) : null;
+  const myModeSuggest = partyModeSuggest
+    && normalizePlayerIdQuery(partyModeSuggest.fromPlayerId) === myPlayerId
+    ? partyModeSuggest
+    : null;
 
   const dailyWins = profile.dailyWins!;
 
@@ -936,11 +999,7 @@ export default function MainMenu(props: MainMenuProps) {
           position: "absolute",
           inset: 0,
           zIndex: 4,
-          pointerEvents: partyMenuLocked ? "none" : undefined,
-          ...(partyMenuLocked ? {
-            filter: "grayscale(1) saturate(0.2) brightness(0.88)",
-            transition: "filter 0.22s ease",
-          } : {}),
+          pointerEvents: undefined,
         }}
       >
       {/* TOP BAR: слева профиль/подписка — по центру команда — справа ресурсы */}
@@ -954,10 +1013,11 @@ export default function MainMenu(props: MainMenuProps) {
         alignItems: "center",
         gap: compact ? 4 : 8,
         pointerEvents: "none",
+        ...partyMenuLockedFilter,
       }}>
       <div style={{ display: "flex", gap: compact ? 6 : 10, alignItems: "center", flexShrink: 0, pointerEvents: "auto" }}>
         <button
-          onClick={onProfile}
+          onClick={() => guardPartyMenuAction(onProfile)}
           style={{
             display: "flex", alignItems: "center", gap: 10,
             padding: "6px 14px 6px 6px",
@@ -1014,7 +1074,7 @@ export default function MainMenu(props: MainMenuProps) {
           icon="📺"
           imgSrc="ui/nav-feed.png"
           label={t("nav.feed")}
-          onClick={onBattleFeed}
+          onClick={() => guardPartyMenuAction(onBattleFeed)}
           color="#FF7043"
           compact={compact}
           menuBar
@@ -1022,7 +1082,7 @@ export default function MainMenu(props: MainMenuProps) {
         <TrophyRoadMenuButton
           trophies={profile.trophies}
           badgeCount={trophyRoadBadge}
-          onClick={onTrophyRoad}
+          onClick={() => guardPartyMenuAction(onTrophyRoad)}
           displayTrophies={roadDisplayTrophies ?? undefined}
           barFillOverride={roadBarFill}
           barTargetRef={trophyRoadBarRef}
@@ -1031,7 +1091,7 @@ export default function MainMenu(props: MainMenuProps) {
           icon="🏅"
           imgSrc="images/ranked-menu-btn.png"
           label={t("ranked.menuShort")}
-          onClick={onRanked}
+          onClick={() => guardPartyMenuAction(onRanked)}
           color="#CE93D8"
           compact={compact}
           menuBar
@@ -1045,7 +1105,7 @@ export default function MainMenu(props: MainMenuProps) {
           innerRef={rankedBtnRef}
           badge={proPassBadge > 0 ? proPassBadge : undefined}
         />
-        <StarGuardianBadge onClick={onStarGuardianRewards} compact={compact} />
+        <StarGuardianBadge onClick={() => guardPartyMenuAction(onStarGuardianRewards)} compact={compact} />
       </div>
 
       <div style={{
@@ -1072,25 +1132,24 @@ export default function MainMenu(props: MainMenuProps) {
         pointerEvents: "auto",
       }}>
         <div className="ui-resource-bar" style={{ gap: compact ? 4 : 6 }}>
-          <span className="ui-resource-pill ui-resource-pill--gold" style={{ fontSize: compact ? 11 : 14, minHeight: compact ? 28 : 32 }}>
+          <span className="ui-resource-pill ui-resource-pill--gold" style={resourcePillHudStyle}>
             <CoinIcon size={compact ? 22 : 26} /> {profile.coins.toLocaleString("ru-RU")}
           </span>
-          <span className="ui-resource-pill ui-resource-pill--cyan" style={{ fontSize: compact ? 11 : 14, minHeight: compact ? 28 : 32 }}>
+          <span className="ui-resource-pill ui-resource-pill--cyan" style={resourcePillHudStyle}>
             <GemIcon size={compact ? 22 : 26} /> {profile.gems.toLocaleString("ru-RU")}
           </span>
-          <span className="ui-resource-pill ui-resource-pill--violet" style={{ fontSize: compact ? 11 : 14, minHeight: compact ? 28 : 32 }}>
+          <span className="ui-resource-pill ui-resource-pill--violet" style={resourcePillHudStyle}>
             <PowerIcon size={compact ? 22 : 26} /> {profile.powerPoints.toLocaleString("ru-RU")}
           </span>
           <div style={{ position: "relative", display: "inline-flex", flexShrink: 0 }}>
             <button
               type="button"
-              className="ui-resource-pill"
-              onClick={() => setShowHamburger(true)}
+              className="ui-resource-pill ui-hamburger-btn"
+              onClick={() => guardPartyMenuAction(() => setShowHamburger(true))}
               title={t("nav.menu")}
               style={{
-                minHeight: compact ? 28 : 32,
-                minWidth: compact ? 44 : 58,
-                padding: compact ? "4px 12px" : "6px 18px",
+                ...resourcePillHudStyle,
+                minWidth: compact ? 44 : 52,
                 color: "var(--t-1)",
                 fontWeight: 900,
                 cursor: "pointer",
@@ -1098,17 +1157,38 @@ export default function MainMenu(props: MainMenuProps) {
                 display: "inline-flex",
                 alignItems: "center",
                 justifyContent: "center",
-                overflow: "visible",
                 border: "none",
                 fontFamily: "inherit",
-                fontSize: compact ? 20 : 24,
-                letterSpacing: compact ? 1 : 2,
                 ["--ui-shear-fill" as string]: "linear-gradient(160deg, rgba(15,8,42,0.78), rgba(8,4,24,0.92))",
                 ["--ui-shear-border" as string]: "var(--bd-2)",
                 ["--ui-shear-shadow" as string]: "var(--sh-md), inset 0 1px 0 rgba(255,255,255,0.1)",
                 ["--ui-shear-blur" as string]: "blur(12px) saturate(1.2)",
               }}
-            >☰</button>
+            >
+              <span
+                aria-hidden
+                style={{
+                  display: "inline-flex",
+                  flexDirection: "column",
+                  justifyContent: "center",
+                  gap: compact ? 3 : 4,
+                  width: compact ? 16 : 18,
+                  height: compact ? 16 : 18,
+                }}
+              >
+                {[0, 1, 2].map(i => (
+                  <span
+                    key={i}
+                    style={{
+                      display: "block",
+                      height: compact ? 2 : 2.5,
+                      borderRadius: 2,
+                      background: "currentColor",
+                    }}
+                  />
+                ))}
+              </span>
+            </button>
             <NotificationBadge count={unreadMessages + unreadNews} notifyCorner="top-right" />
           </div>
         </div>
@@ -1116,7 +1196,7 @@ export default function MainMenu(props: MainMenuProps) {
       </div>
 
 
-      {/* CENTER: лидер + до 2 напарников с каждой стороны */}
+      {/* CENTER: лидер + до 2 напарников с каждой стороны — без ч/б фильтра */}
       <div style={{
         position: "absolute",
         inset: 0,
@@ -1127,6 +1207,7 @@ export default function MainMenu(props: MainMenuProps) {
         pointerEvents: "none",
         paddingTop: 40,
         overflow: "visible",
+        zIndex: 5,
       }}>
         <div style={{
           display: "flex",
@@ -1163,13 +1244,24 @@ export default function MainMenu(props: MainMenuProps) {
                 overlapMargin={i > 0 ? (compact ? -98 : -112) : 0}
                 statsStagger={stagger}
                 showReadyBadge={isPartyMemberPlayReady(mate.playerId)}
+                showLeaderCrown={isPartyLeaderPlayerId(mate.playerId)}
+                showOfflineOverlay={!isPartyMemberOnline(mate.playerId)}
                 activityLabel={
                   partyCount >= 2 && !isPartyMemberPlayReady(mate.playerId)
                     ? getMenuActivityLabelForPlayerId(mate.playerId)
                     : null
                 }
                 senderSuggest={suggestForPlayer(mate.playerId)}
-                canAnswerSuggest={canAnswerPartySuggest}
+                canAnswerSuggest={canAnswerPartySuggest && normalizePlayerIdQuery(partyBrawlerSuggest?.toPlayerId ?? "") === normalizePlayerIdQuery(mate.playerId)}
+                speechMessage={getLatestPartySpeechForPlayer(mate.playerId)}
+                modeSuggest={
+                  partyModeSuggest
+                  && normalizePlayerIdQuery(partyModeSuggest.fromPlayerId) === normalizePlayerIdQuery(mate.playerId)
+                    ? partyModeSuggest
+                    : null
+                }
+                onModeSuggestClick={amPartyLeader() ? () => setShowModeSuggestLeader(true) : undefined}
+                onSpeechClick={() => guardPartyMenuAction(() => setShowPartyChat(true))}
                 onTeammateClick={(rect) => setTeammateMenu({ mate, anchor: rect, side: "left" })}
                 onSuggestBubbleClick={() => setShowSuggestAccept(true)}
                 showRankedBars={showRankedBars}
@@ -1204,9 +1296,13 @@ export default function MainMenu(props: MainMenuProps) {
                     slot={slot}
                     compact={compact}
                     embedded
-                    outgoingInvite={outgoingInvite?.side === slot ? outgoingInvite : null}
-                    onOpenPanel={() => setPartyPanel(slot)}
-                    onCancelInvite={() => { cancelOutgoingInvite(); partyRefresh(); }}
+                    outgoingInvite={outgoingInviteForSlot(slot)}
+                    onOpenPanel={() => guardPartyMenuAction(() => setPartyPanel(slot))}
+                    onCancelInvite={() => {
+                      const inv = outgoingInviteForSlot(slot);
+                      if (inv) cancelOutgoingInviteForTarget(inv.targetPlayerId);
+                      partyRefresh();
+                    }}
                   />
                 ))}
               </div>
@@ -1234,6 +1330,46 @@ export default function MainMenu(props: MainMenuProps) {
               />
             </div>
           )}
+          {(myModeSuggest || mySpeech) && (
+            <>
+              {myModeSuggest && (
+                <div
+                  style={{
+                    position: "absolute",
+                    left: "100%",
+                    top: "14%",
+                    marginLeft: compact ? 2 : 6,
+                    transform: "translateY(-50%)",
+                    zIndex: 8,
+                    pointerEvents: "auto",
+                  }}
+                  onClick={e => e.stopPropagation()}
+                >
+                  <PartyModeSuggestBubble suggestion={myModeSuggest} compact={compact} />
+                </div>
+              )}
+              {mySpeech && (
+                <div
+                  style={{
+                    position: "absolute",
+                    left: "100%",
+                    top: "10%",
+                    marginLeft: compact ? 2 : 6,
+                    transform: "translateY(-50%)",
+                    zIndex: 8,
+                    pointerEvents: "auto",
+                  }}
+                  onClick={e => e.stopPropagation()}
+                >
+                  <PartySpeechBubble
+                    message={mySpeech}
+                    compact={compact}
+                    onClick={() => guardPartyMenuAction(() => setShowPartyChat(true))}
+                  />
+                </div>
+              )}
+            </>
+          )}
           <div
             onClick={(e) => e.stopPropagation()}
             style={{
@@ -1242,14 +1378,29 @@ export default function MainMenu(props: MainMenuProps) {
               left: "50%",
               transform: "translateX(-50%)",
               marginBottom: 10 + leaderStagger,
-              display: "inline-flex",
+              display: "flex",
+              flexDirection: "column",
               alignItems: "center",
-              gap: 8,
+              gap: compact ? 3 : 4,
               pointerEvents: "auto",
               whiteSpace: "nowrap",
               zIndex: 6,
             }}
           >
+            {amPartyLeader() && inParty && (
+              <div style={{
+                fontSize: compact ? 14 : 18,
+                lineHeight: 1,
+                filter: "drop-shadow(0 2px 6px rgba(0,0,0,0.75))",
+              }}>
+                👑
+              </div>
+            )}
+            <div style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+            }}>
             {showRankedBars ? (
               <RankedLeagueBar
                 totalCups={rankedCups}
@@ -1258,7 +1409,7 @@ export default function MainMenu(props: MainMenuProps) {
                 badgeScale={MENU_RANK_BADGE_SCALE}
                 powerLevel={brawlerLevel}
                 barRef={rankedBarRef}
-                onClick={onProStarPass}
+                onClick={() => guardPartyMenuAction(onProStarPass)}
                 unclaimedCount={proPassBadge}
               />
             ) : (
@@ -1268,7 +1419,7 @@ export default function MainMenu(props: MainMenuProps) {
                 layout="compact"
                 badgeScale={MENU_RANK_BADGE_SCALE}
                 powerLevel={brawlerLevel}
-                onClick={() => setRankModalBrawlerId(brawler.id)}
+                onClick={() => guardPartyMenuAction(() => setRankModalBrawlerId(brawler.id))}
               />
             )}
             <span style={{
@@ -1278,14 +1429,15 @@ export default function MainMenu(props: MainMenuProps) {
               borderRadius: 8, padding: "4px 8px",
               color: "#FFE082", fontSize: 12, fontWeight: 800,
             }}>
-              ★ {brawlerStarCount}/6
+              <EmojiIcon emoji="★" size={18} /> {brawlerStarCount}/6
             </span>
+            </div>
           </div>
               </>
             );
           })()}
         <div
-          onClick={onBrawlerSelect}
+          onClick={() => guardPartyMenuAction(onBrawlerSelect)}
           style={{
             pointerEvents: "auto", cursor: "pointer",
             position: "relative",
@@ -1297,7 +1449,7 @@ export default function MainMenu(props: MainMenuProps) {
             ref={masteryBtnRef}
             type="button"
             title={t("nav.mastery")}
-            onClick={(e) => { e.stopPropagation(); onMastery(brawler.id); }}
+            onClick={(e) => { e.stopPropagation(); guardPartyMenuAction(() => onMastery(brawler.id)); }}
             style={{
               position: "absolute",
               left: compact ? -2 : 0,
@@ -1359,32 +1511,14 @@ export default function MainMenu(props: MainMenuProps) {
               textShadow: "0 1px 2px rgba(0,0,0,0.85)",
               WebkitFontSmoothing: "antialiased",
             }}>
-              {t("nav.mastery")}
+              <Tr id="nav.mastery" />
             </span>
-            {masteryBadge > 0 && (
-              <span style={{
-                position: "absolute",
-                top: 4,
-                right: 4,
-                minWidth: 16,
-                height: 16,
-                padding: "0 4px",
-                borderRadius: 8,
-                background: "#FF1744",
-                color: "#fff",
-                fontSize: 9,
-                fontWeight: 900,
-                lineHeight: "16px",
-                textAlign: "center",
-              }}>
-                {masteryBadge > 99 ? "99+" : masteryBadge}
-              </span>
-            )}
+            <NotificationBadge count={masteryBadge} notifyCorner="top-right" />
           </button>
           <button
             type="button"
             title={t("nav.comic")}
-            onClick={(e) => { e.stopPropagation(); onComic(brawler.id); }}
+            onClick={(e) => { e.stopPropagation(); guardPartyMenuAction(() => onComic(brawler.id)); }}
             style={{
               position: "absolute",
               left: compact ? 58 : 68,
@@ -1446,57 +1580,107 @@ export default function MainMenu(props: MainMenuProps) {
               textShadow: "0 1px 2px rgba(0,0,0,0.85)",
               WebkitFontSmoothing: "antialiased",
             }}>
-              {t("nav.comic")}
+              <Tr id="nav.comic" />
+            </span>
+          </button>
+          <button
+            type="button"
+            title={t("nav.trails")}
+            onClick={(e) => { e.stopPropagation(); guardPartyMenuAction(() => onTrails(brawler.id)); }}
+            style={{
+              position: "absolute",
+              left: compact ? 28 : 34,
+              bottom: compact ? -59 : -57,
+              zIndex: 10,
+              width: compact ? 54 : 60,
+              minWidth: compact ? 54 : 60,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "flex-end",
+              gap: 0,
+              padding: compact ? "0 2px 3px" : "0 2px 3px",
+              background: "linear-gradient(160deg, rgba(15,8,42,0.72), rgba(8,4,24,0.86))",
+              border: "1px solid rgba(186,104,255,0.45)",
+              borderRadius: 12,
+              cursor: "pointer",
+              boxShadow: "var(--sh-sm), inset 0 1px 0 rgba(255,255,255,0.06)",
+              pointerEvents: "auto",
+              overflow: "visible",
+            }}
+          >
+            <div style={{
+              width: compact ? 54 : 60,
+              height: compact ? 48 : 52,
+              position: "relative",
+              flexShrink: 0,
+              overflow: "visible",
+            }}>
+              <img
+                src={`${artBase}ui/nav-trails.png`}
+                alt=""
+                className="ui-game-icon"
+                style={{
+                  position: "absolute",
+                  left: "50%",
+                  bottom: compact ? -4 : -5,
+                  width: compact ? 58 : 64,
+                  height: compact ? 58 : 64,
+                  maxWidth: "none",
+                  transform: `translateX(-50%) scale(${compact ? 1.16 : 1.2})`,
+                  transformOrigin: "50% 100%",
+                  pointerEvents: "none",
+                  zIndex: 2,
+                  filter: "drop-shadow(0 4px 12px rgba(79,195,247,0.75))",
+                }}
+              />
+            </div>
+            <span style={{
+              fontSize: compact ? 7 : 8,
+              fontWeight: 900,
+              letterSpacing: 0.15,
+              color: "#fff",
+              whiteSpace: "nowrap",
+              lineHeight: 1.1,
+              textAlign: "center",
+              position: "relative",
+              zIndex: 1,
+              textShadow: "0 1px 2px rgba(0,0,0,0.85)",
+              WebkitFontSmoothing: "antialiased",
+            }}>
+              <Tr id="nav.trails" />
             </span>
           </button>
           {inParty && (
-            <button
-              type="button"
-              className="no-ui-shear"
-              title={t("party.chatOpen")}
-              onClick={(e) => { e.stopPropagation(); setShowPartyChat(true); }}
+            <div
+              onClick={(e) => e.stopPropagation()}
               style={{
                 position: "absolute",
-                right: compact ? 6 : 10,
+                right: compact ? 4 : 8,
                 top: "46%",
                 transform: "translate(100%, -50%)",
                 zIndex: 9,
-                width: compact ? 48 : 52,
-                height: compact ? 48 : 52,
-                borderRadius: 14,
-                background: "linear-gradient(180deg, #fff 0%, #e8e8e8 100%)",
-                border: "3px solid #1a1a1a",
-                color: "#1a1a1a",
-                fontSize: compact ? 21 : 23,
-                cursor: "pointer",
-                boxShadow: `0 3px 0 #1a1a1a, 0 0 18px ${brawler.color}88`,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                padding: 0,
+                pointerEvents: "auto",
               }}
             >
-              💬
-              {partyChatUnread > 0 && (
-                <span className="no-ui-shear" style={{
-                  position: "absolute",
-                  top: -6,
-                  right: -6,
-                  minWidth: 18,
-                  height: 18,
-                  padding: "0 5px",
-                  borderRadius: 9,
-                  background: "linear-gradient(135deg, #FF1744, #D50000)",
-                  border: "2px solid #160048",
-                  color: "#fff",
-                  fontSize: 10,
-                  fontWeight: 900,
-                  lineHeight: "14px",
-                }}>
-                  {partyChatUnread > 99 ? "99+" : partyChatUnread}
-                </span>
-              )}
-            </button>
+              <SideButton
+                icon="💬"
+                imgSrc="ui/drawer-messages.png"
+                label={t("party.chatOpen")}
+                onClick={() => guardPartyMenuAction(() => setShowPartyChat(true))}
+                color="#CE93D8"
+                compact={compact}
+                badge={partyChatUnread > 0 ? partyChatUnread : undefined}
+                notifyCorner="top-right"
+                menuBar
+                hideLabel
+                menuBarIconCenter
+                menuBarWidth={compact ? 50 : 56}
+                menuBarHeight={compact ? 50 : 56}
+                menuBarIconSize={compact ? 46 : 52}
+                menuBarIconScale={compact ? 1.12 : 1.16}
+              />
+            </div>
           )}
           <div
             style={{
@@ -1587,13 +1771,24 @@ export default function MainMenu(props: MainMenuProps) {
                 overlapMargin={i > 0 ? (compact ? -98 : -112) : 0}
                 statsStagger={stagger}
                 showReadyBadge={isPartyMemberPlayReady(mate.playerId)}
+                showLeaderCrown={isPartyLeaderPlayerId(mate.playerId)}
+                showOfflineOverlay={!isPartyMemberOnline(mate.playerId)}
                 activityLabel={
                   partyCount >= 2 && !isPartyMemberPlayReady(mate.playerId)
                     ? getMenuActivityLabelForPlayerId(mate.playerId)
                     : null
                 }
                 senderSuggest={suggestForPlayer(mate.playerId)}
-                canAnswerSuggest={canAnswerPartySuggest}
+                canAnswerSuggest={canAnswerPartySuggest && normalizePlayerIdQuery(partyBrawlerSuggest?.toPlayerId ?? "") === normalizePlayerIdQuery(mate.playerId)}
+                speechMessage={getLatestPartySpeechForPlayer(mate.playerId)}
+                modeSuggest={
+                  partyModeSuggest
+                  && normalizePlayerIdQuery(partyModeSuggest.fromPlayerId) === normalizePlayerIdQuery(mate.playerId)
+                    ? partyModeSuggest
+                    : null
+                }
+                onModeSuggestClick={amPartyLeader() ? () => setShowModeSuggestLeader(true) : undefined}
+                onSpeechClick={() => guardPartyMenuAction(() => setShowPartyChat(true))}
                 onTeammateClick={(rect) => setTeammateMenu({ mate, anchor: rect, side: "right" })}
                 onSuggestBubbleClick={() => setShowSuggestAccept(true)}
                 showRankedBars={showRankedBars}
@@ -1623,9 +1818,13 @@ export default function MainMenu(props: MainMenuProps) {
                     slot={slot}
                     compact={compact}
                     embedded
-                    outgoingInvite={outgoingInvite?.side === slot ? outgoingInvite : null}
-                    onOpenPanel={() => setPartyPanel(slot)}
-                    onCancelInvite={() => { cancelOutgoingInvite(); partyRefresh(); }}
+                    outgoingInvite={outgoingInviteForSlot(slot)}
+                    onOpenPanel={() => guardPartyMenuAction(() => setPartyPanel(slot))}
+                    onCancelInvite={() => {
+                      const inv = outgoingInviteForSlot(slot);
+                      if (inv) cancelOutgoingInviteForTarget(inv.targetPlayerId);
+                      partyRefresh();
+                    }}
                   />
                 ))}
               </div>
@@ -1647,6 +1846,30 @@ export default function MainMenu(props: MainMenuProps) {
         <PartyChatPanel
           brawlerId={brawler.id}
           onClose={() => setShowPartyChat(false)}
+          onSuggestModeChange={() => {
+            setShowPartyChat(false);
+            onModeSelect();
+          }}
+        />
+      )}
+
+      {showModeSuggestLeader && partyModeSuggest && amPartyLeader() && (
+        <PartyModeSuggestAcceptModal
+          suggestion={partyModeSuggest}
+          onAccept={() => {
+            const r = acceptPartyModeSuggestion();
+            if (!r.success) {
+              handleSoonNotice(r.error ?? t("common.error"));
+              return;
+            }
+            setShowModeSuggestLeader(false);
+            partyRefresh();
+          }}
+          onDecline={() => {
+            declinePartyModeSuggestion();
+            setShowModeSuggestLeader(false);
+            partyRefresh();
+          }}
         />
       )}
 
@@ -1654,6 +1877,8 @@ export default function MainMenu(props: MainMenuProps) {
         onAccepted={partyRefresh}
         onDeclined={partyRefresh}
       />
+
+      <PartyJoinRequestModal onHandled={partyRefresh} />
 
       {teammateMenu && (
         <TeammateActionMenu
@@ -1718,27 +1943,29 @@ export default function MainMenu(props: MainMenuProps) {
         top: compact ? "40%" : "44%",
         transform: "translateY(-50%)",
         display: "flex", flexDirection: "column", gap: compact ? 6 : 12, zIndex: 6,
+        ...partyMenuLockedFilter,
       }}>
-        <SideButton icon="🎒" imgSrc="ui/nav-collection.png" label={t("nav.collection")} onClick={onCollection} color="#40C4FF" compact={compact} badge={collectionBadge || undefined} notifyCorner="top-left" />
-        <SideButton icon="🐾" imgSrc="ui/nav-pets.png" label={t("nav.pets")} onClick={onPets} color="#76FF03" compact={compact} badge={newPetBadge} notifyCorner="top-left" />
-        <SideButton icon="⭐" imgSrc="ui/nav-feats.png" label={t("nav.feats")} onClick={onStarFeats} color="#FFD54F" compact={compact} badge={starFeatBadge} notifyCorner="top-left" />
-        <SideButton icon="🏛️" imgSrc="ui/nav-clubs.png" label={t("nav.clubs")} onClick={onClubs} color="#FF8A65" compact={compact} badge={unreadClub || undefined} notifyCorner="top-left" />
-        <SideButton icon="👥" imgSrc="ui/nav-friends.png" label={t("nav.friends")} onClick={onFriends} color="#CE93D8" compact={compact} notifyCorner="top-left" />
+        <SideButton icon="🎒" imgSrc="ui/nav-collection.png" label={t("nav.collection")} onClick={() => guardPartyMenuAction(onCollection)} color="#40C4FF" compact={compact} badge={collectionBadge || undefined} notifyCorner="top-left" />
+        <SideButton icon="🐾" imgSrc="ui/nav-pets.png" label={t("nav.pets")} onClick={() => guardPartyMenuAction(onPets)} color="#76FF03" compact={compact} badge={newPetBadge} notifyCorner="top-left" />
+        <SideButton icon="⭐" imgSrc="ui/nav-feats.png" label={t("nav.feats")} onClick={() => guardPartyMenuAction(onStarFeats)} color="#FFD54F" compact={compact} badge={starFeatBadge} notifyCorner="top-left" />
+        <SideButton icon="🏛️" imgSrc="ui/nav-clubs.png" label={t("nav.clubs")} onClick={() => guardPartyMenuAction(onClubs)} color="#FF8A65" compact={compact} badge={unreadClub || undefined} notifyCorner="top-left" />
+        <SideButton icon="👥" imgSrc="ui/nav-friends.png" label={t("nav.friends")} onClick={() => guardPartyMenuAction(onFriends)} color="#CE93D8" compact={compact} notifyCorner="top-left" />
       </div>
 
       {/* LEFT SIDE — магазин, персонаж, бонус дня, сундуки */}
       <div style={{
         position: "absolute", left: compact ? 8 : 18, top: "50%", transform: "translateY(-50%)",
         display: "flex", flexDirection: "column", gap: compact ? 6 : 12, zIndex: 4,
+        ...partyMenuLockedFilter,
       }}>
         <div style={{ display: "flex", flexDirection: "row", gap: compact ? 6 : 12 }}>
-          <SideButton icon="🛒" imgSrc="ui/nav-shop.png" label={t("nav.shop")} onClick={onShop} color="#FFD700" compact={compact} giftTag={shopGiftBadge} dealsNewTag={shopDealsNewTag} notifyCorner="top-right" />
+          <SideButton icon="🛒" imgSrc="ui/nav-shop.png" label={t("nav.shop")} onClick={() => guardPartyMenuAction(onShop)} color="#FFD700" compact={compact} giftTag={shopGiftBadge} dealsNewTag={shopDealsNewTag} notifyCorner="top-right" />
           {newcomerGiftsVisible && (
             <SideButton
               icon="🎁"
               imgSrc="ui/nav-gifts.png"
               label={t("nav.gifts")}
-              onClick={() => setShowNewcomerGifts(true)}
+              onClick={() => guardPartyMenuAction(() => setShowNewcomerGifts(true))}
               color="#E040FB"
               compact={compact}
               badge={newcomerGiftsReady ? 1 : undefined}
@@ -1747,26 +1974,26 @@ export default function MainMenu(props: MainMenuProps) {
             />
           )}
         </div>
-        <SideButton icon="🦸" imgSrc="ui/nav-character.png" label={t("nav.character")} onClick={onBrawlerSelect} color="#CE93D8" compact={compact} badge={newBrawlerBadge} notifyCorner="top-right" />
+        <SideButton icon="🦸" imgSrc="ui/nav-character.png" label={t("nav.character")} onClick={() => guardPartyMenuAction(onBrawlerSelect)} color="#CE93D8" compact={compact} badge={newBrawlerBadge} notifyCorner="top-right" />
         <SideButton
           icon="🎁"
           imgSrc="ui/nav-bonus.png"
           label={t("nav.dailyBonus")}
-          onClick={() => setShowDaily(true)}
+          onClick={() => guardPartyMenuAction(() => setShowDaily(true))}
           color={canClaimDaily ? "#FFD700" : "#888"}
           pulse={canClaimDaily}
           badge={canClaimDaily ? 1 : undefined}
           compact={compact}
           notifyCorner="top-right"
         />
-        <SideButton icon="🗝️" imgSrc="ui/nav-chests.png" label={t("nav.chests")} onClick={onChests} color="#FF7043" badge={chestsBadge} compact={compact} notifyCorner="top-right" />
-        <SideButton icon="🎨" imgSrc="ui/nav-customization.png" label={t("nav.customization")} onClick={onCustomization} color="#BA68C8" compact={compact} notifyCorner="top-right" />
+        <SideButton icon="🗝️" imgSrc="ui/nav-chests.png" label={t("nav.chests")} onClick={() => guardPartyMenuAction(onChests)} color="#FF7043" badge={chestsBadge} compact={compact} notifyCorner="top-right" />
+        <SideButton icon="🎨" imgSrc="ui/nav-customization.png" label={t("nav.customization")} onClick={() => guardPartyMenuAction(onCustomization)} color="#BA68C8" compact={compact} notifyCorner="top-right" />
       </div>
 
       {/* BOTTOM-LEFT: Quests button + Clash Pass card */}
       {compact ? (
         <button
-          onClick={() => setShowQuests(true)}
+          onClick={() => guardPartyMenuAction(() => setShowQuests(true))}
           title={t("nav.questsDaily")}
           style={{
             position: "absolute", bottom: menuBottomInset(compact), left: compact ? 128 : 196, zIndex: 5,
@@ -1785,6 +2012,7 @@ export default function MainMenu(props: MainMenuProps) {
             padding: "2px 4px 3px",
             animation: hasUnclaimedQuest ? "pulse 1.6s ease-in-out infinite" : undefined,
             boxShadow: hasUnclaimedQuest ? "0 0 14px rgba(255,215,0,0.55)" : undefined,
+            ...partyMenuLockedFilter,
           }}
         >
           <NotificationBadge count={questsBadge} />
@@ -1799,12 +2027,12 @@ export default function MainMenu(props: MainMenuProps) {
             }}
           />
           <span style={{ fontSize: 7, fontWeight: 800, letterSpacing: 0.4, marginTop: 0, position: "relative", zIndex: 1, color: "#fff" }}>
-            {t("nav.quests")} {activeQuestCount > 0 ? activeQuestCount : ""}
+            <Tr id="nav.quests" /> {activeQuestCount > 0 ? activeQuestCount : ""}
           </span>
         </button>
       ) : (
         <button
-          onClick={() => setShowQuests(true)}
+          onClick={() => guardPartyMenuAction(() => setShowQuests(true))}
           style={{
             position: "absolute", bottom: menuBottomInset(compact), left: 196, zIndex: 5,
             overflow: "visible",
@@ -1824,6 +2052,7 @@ export default function MainMenu(props: MainMenuProps) {
             boxShadow: hasUnclaimedQuest
               ? "var(--sh-glow-gold), var(--sh-md)"
               : "var(--sh-md)",
+            ...partyMenuLockedFilter,
           }}
           title={t("nav.questsDaily")}
         >
@@ -1839,7 +2068,7 @@ export default function MainMenu(props: MainMenuProps) {
             }}
           />
           <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: 0.6, lineHeight: 1.1, position: "relative", zIndex: 1, color: "#fff" }}>
-            {t("nav.quests")} {activeQuestCount > 0 ? activeQuestCount : ""}
+            <Tr id="nav.quests" /> {activeQuestCount > 0 ? activeQuestCount : ""}
           </span>
         </button>
       )}
@@ -1847,7 +2076,7 @@ export default function MainMenu(props: MainMenuProps) {
       <StarPassMenuButton
         ref={starPassBtnRef}
         compact={compact}
-        onClick={onClashPass}
+        onClick={() => guardPartyMenuAction(onClashPass)}
         artBase={artBase}
         passLevel={passLevel}
         passPct={passPct}
@@ -1855,6 +2084,7 @@ export default function MainMenu(props: MainMenuProps) {
         passNeed={passNeed}
         badge={clashPassBadge}
         atMax={passLevel >= MAX_CLASHPASS_LEVEL}
+        menuLockedFilter={partyMenuLockedFilter}
       />
 
       {/* BOTTOM-CENTER: mode selector pinned to the bottom edge */}
@@ -1868,10 +2098,11 @@ export default function MainMenu(props: MainMenuProps) {
           height: menuBottomBtnH(compact),
           display: "flex",
           alignItems: "flex-end",
+          ...partyMenuLockedFilter,
         }}
       >
         <button
-          onClick={onModeSelect}
+          onClick={handleModeSelectClick}
           style={{
             position: "relative",
             overflow: "visible",
@@ -1916,7 +2147,7 @@ export default function MainMenu(props: MainMenuProps) {
           </div>
           <span style={{ flex: 1, textAlign: "left" }}>
             {!compact && (
-              <span style={{ display: "block", color: "rgba(255,255,255,0.55)", fontSize: 10, letterSpacing: 1 }}>{t("common.mode")}</span>
+              <span style={{ display: "block", color: "rgba(255,255,255,0.55)", fontSize: 10, letterSpacing: 1 }}><Tr id="common.mode" /></span>
             )}
             <span style={{ display: "block", fontSize: compact ? 11 : 16, fontWeight: 800, color: "#fff", whiteSpace: "nowrap" }}>{mode.name}</span>
             {!compact && (
@@ -1948,15 +2179,42 @@ export default function MainMenu(props: MainMenuProps) {
                 zIndex: 1,
               }}
             >
-              {t("common.new")}
+              <Tr id="common.new" />
+            </span>
+          ) : inParty && !amPartyLeader() && !hasModeMapNews ? (
+            <span
+              className="no-ui-shear"
+              style={{
+                position: "absolute",
+                top: 0,
+                right: 0,
+                bottom: 0,
+                width: compact ? 52 : 80,
+                minWidth: compact ? 52 : 80,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                background: "linear-gradient(180deg, rgba(120,120,130,0.55), rgba(70,70,80,0.65))",
+                borderLeft: "2px solid rgba(255,255,255,0.25)",
+                fontSize: compact ? 8 : 10,
+                fontWeight: 800,
+                letterSpacing: 0.3,
+                color: "rgba(255,255,255,0.85)",
+                textAlign: "center",
+                lineHeight: 1.15,
+                padding: "0 4px",
+                zIndex: 1,
+              }}
+            >
+              <Tr id="party.suggestModeBadge" />
             </span>
           ) : !compact ? (
-            <span style={{ color: "rgba(255,255,255,0.45)", fontSize: 12 }}>{t("nav.changeMode")}</span>
+            <span style={{ color: "rgba(255,255,255,0.45)", fontSize: 12 }}><Tr id="nav.changeMode" /></span>
           ) : null}
           <span
             role="button"
             title={t("nav.aboutMode")}
-            onClick={(e) => { e.stopPropagation(); setShowModeInfo(true); }}
+            onClick={(e) => { e.stopPropagation(); guardPartyMenuAction(() => setShowModeInfo(true)); }}
             style={{
               position: "absolute",
               top: compact ? -6 : -8,
@@ -2005,14 +2263,15 @@ export default function MainMenu(props: MainMenuProps) {
               lineHeight: 1.25,
               color: "#ffe082",
               animation: "bossRaidLinePulse 2.2s ease-in-out infinite",
+              ...partyMenuLockedFilter,
             }}
           >
             {brawlerName(raidBrawler.id, raidBrawler.name)}
             <span style={{ color: "rgba(255,255,255,0.82)", fontWeight: 800 }}> · </span>
-            {t("nav.raidLevel", { level: raidBossLevel })}
+            <Tr id="nav.raidLevel" params={{ level: raidBossLevel }} />
           </div>
         )}
-        <div style={{ position: "relative", width: "100%" }}>
+        <div style={{ position: "relative", width: "100%", ...partyMenuLockedFilter }}>
           <DailyWinsStrip
             dayType={dailyWins.dayType}
             slots={dailyWins.slots}
@@ -2058,8 +2317,22 @@ export default function MainMenu(props: MainMenuProps) {
             fontWeight: 800,
             color: "rgba(255,255,255,0.72)",
             letterSpacing: "0.06em",
+            ...partyMenuLockedFilter,
           }}>
-            {t("nav.partyWaiting", { seconds: partyReadySecondsLeft })}
+            <Tr id="nav.partyWaiting" params={{ seconds: partyReadySecondsLeft }} />
+          </div>
+        )}
+        {(rankedPartyBlocked || rankedPartySizeBlocked) && inParty && profile.selectedMode === "ranked" && (
+          <div style={{
+            textAlign: "right",
+            fontSize: compact ? 10 : 12,
+            fontWeight: 800,
+            color: "#FF8A80",
+            lineHeight: 1.35,
+            letterSpacing: "0.02em",
+            ...partyMenuLockedFilter,
+          }}>
+            {rankedPartyBlocked ? rankedPartyBlockMsg : t("ranked.party.tooManyPlayers")}
           </div>
         )}
         <button
@@ -2067,6 +2340,8 @@ export default function MainMenu(props: MainMenuProps) {
           onClick={showPartyObserve ? handleObserveClick : handleMenuPlayClick}
           style={{
             position: "relative",
+            zIndex: partyMenuLocked ? 20 : undefined,
+            filter: "none",
             overflow: showRankedLobbyLine && !partyReadyActive && !showPartyObserve ? "hidden" : "visible",
             alignSelf: "center",
             height: menuBottomBtnH(compact),
@@ -2178,7 +2453,8 @@ export default function MainMenu(props: MainMenuProps) {
           <WinStreakFlame streak={brawlerWinStreak} size={compact ? 38 : 46} />
         </div>
       )}
-      <AstralMenuPopup
+      <div style={partyMenuLockedFilter}>
+        <AstralMenuPopup
         onCta={(target) => {
           if (partyMenuLocked) return;
           if (target === "shop") onShop();
@@ -2189,14 +2465,17 @@ export default function MainMenu(props: MainMenuProps) {
         }}
       />
       </div>
+      </div>
 
       {partyMenuLocked && (
         <div
           aria-hidden
+          onClick={() => handleSoonNotice(t("party.menuLockedWhileReady"))}
           style={{
             position: "absolute",
             inset: 0,
-            zIndex: 15,
+            bottom: menuBottomInset(compact) + menuBottomBtnH(compact) + 48,
+            zIndex: 14,
             pointerEvents: "auto",
             cursor: "default",
           }}
@@ -2333,6 +2612,7 @@ export default function MainMenu(props: MainMenuProps) {
           onBattleHistory={onBattleHistory ? () => { setShowHamburger(false); onBattleHistory(); } : undefined}
           onRecords={onRecords ? () => { setShowHamburger(false); onRecords(); } : undefined}
           onMapEditor={isAdminUnlocked() ? () => { setShowHamburger(false); onMapEditor(); } : undefined}
+          onPlayerMapEditor={onPlayerMapEditor ? () => { setShowHamburger(false); onPlayerMapEditor(); } : undefined}
           onAdmin={() => { setShowHamburger(false); onAdmin(); }}
           isFullscreen={isFullscreen || pseudoFullscreen}
           onToggleFullscreen={() => { toggleFullscreen(); }}
@@ -2403,14 +2683,6 @@ export default function MainMenu(props: MainMenuProps) {
   );
 }
 
-type NotifyCorner = "top-left" | "top-right";
-
-function cornerBadgeStyle(corner: NotifyCorner): CSSProperties {
-  return corner === "top-right"
-    ? { top: -10, right: -12, left: "auto", bottom: "auto" }
-    : { top: -10, left: -12, right: "auto", bottom: "auto" };
-}
-
 const StarPassMenuButton = forwardRef<HTMLButtonElement, {
   compact?: boolean;
   onClick: () => void;
@@ -2421,6 +2693,7 @@ const StarPassMenuButton = forwardRef<HTMLButtonElement, {
   passNeed: number;
   badge: number;
   atMax: boolean;
+  menuLockedFilter?: React.CSSProperties;
 }>(function StarPassMenuButton({
   compact,
   onClick,
@@ -2431,6 +2704,7 @@ const StarPassMenuButton = forwardRef<HTMLButtonElement, {
   passNeed,
   badge,
   atMax,
+  menuLockedFilter,
 }, ref) {
   const { t } = useI18n();
   const passW = compact ? 112 : 172;
@@ -2476,6 +2750,7 @@ const StarPassMenuButton = forwardRef<HTMLButtonElement, {
         ["--ui-shear-shadow" as string]: compact ? undefined : "var(--sh-md), var(--sh-glow-violet)",
         ["--ui-shear-blur" as string]: compact ? "blur(10px)" : "blur(14px) saturate(1.2)",
         ["--ui-shear-outline" as string]: "rgba(206,147,216,0.35)",
+        ...menuLockedFilter,
       }}
     >
       <NotificationBadge count={badge} notifyCorner="top-right" />
@@ -2647,7 +2922,7 @@ function PartyPlusButton({
           padding: "4px 6px 4px 8px",
           zIndex: 8,
         }}>
-          <span>{t("nav.inviting", { username: outgoingInvite.targetUsername })}</span>
+          <span><Tr id="nav.inviting" params={{ username: outgoingInvite.targetUsername }} /></span>
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onCancelInvite(); }}
@@ -2712,6 +2987,17 @@ function PartyReadyBadge({ compact }: { compact?: boolean }) {
   );
 }
 
+function PartyOfflineBadge({ compact }: { compact?: boolean }) {
+  const { t } = useI18n();
+  return (
+    <PartyMemberStatusBadge
+      compact={compact}
+      label={t("presence.screen.offline")}
+      variant="offline"
+    />
+  );
+}
+
 function PartyActivityBadge({ compact, label }: { compact?: boolean; label: string }) {
   return (
     <PartyMemberStatusBadge
@@ -2729,9 +3015,10 @@ function PartyMemberStatusBadge({
 }: {
   compact?: boolean;
   label: string;
-  variant: "ready" | "activity";
+  variant: "ready" | "activity" | "offline";
 }) {
   const ready = variant === "ready";
+  const offline = variant === "offline";
   const long = label.length > 14;
   return (
     <div
@@ -2748,13 +3035,19 @@ function PartyMemberStatusBadge({
         background: "rgba(0, 0, 0, 0.42)",
         border: ready
           ? "1.5px solid rgba(129, 199, 132, 0.7)"
-          : "1.5px solid rgba(100, 181, 246, 0.75)",
+          : offline
+            ? "1.5px solid rgba(189, 189, 189, 0.65)"
+            : "1.5px solid rgba(100, 181, 246, 0.75)",
         borderRadius: 8,
-        color: ready ? "rgba(220, 255, 225, 0.95)" : "rgba(210, 235, 255, 0.96)",
+        color: ready
+          ? "rgba(220, 255, 225, 0.95)"
+          : offline
+            ? "rgba(235, 235, 235, 0.92)"
+            : "rgba(210, 235, 255, 0.96)",
         fontSize: compact ? (long ? 8 : 10) : (long ? 10 : 12),
         fontWeight: 900,
-        letterSpacing: ready ? "0.14em" : "0.04em",
-        textTransform: ready ? "uppercase" : "none",
+        letterSpacing: ready ? "0.14em" : offline ? "0.08em" : "0.04em",
+        textTransform: ready || offline ? "uppercase" : "none",
         textAlign: "center",
         lineHeight: 1.15,
         boxShadow: "0 4px 18px rgba(0,0,0,0.4)",
@@ -2773,9 +3066,15 @@ function PartySlotArea({
   overlapMargin = 0,
   statsStagger = 0,
   showReadyBadge = false,
+  showLeaderCrown = false,
+  showOfflineOverlay = false,
   activityLabel = null,
   senderSuggest,
   canAnswerSuggest,
+  speechMessage,
+  modeSuggest,
+  onModeSuggestClick,
+  onSpeechClick,
   onTeammateClick,
   onSuggestBubbleClick,
   showRankedBars = false,
@@ -2788,15 +3087,22 @@ function PartySlotArea({
   overlapMargin?: number;
   statsStagger?: number;
   showReadyBadge?: boolean;
+  showLeaderCrown?: boolean;
+  showOfflineOverlay?: boolean;
   activityLabel?: string | null;
   senderSuggest?: PartyBrawlerSuggestion | null;
   canAnswerSuggest?: boolean;
+  speechMessage?: PartyChatMessage | null;
+  modeSuggest?: PartyModeSuggestion | null;
+  onModeSuggestClick?: () => void;
+  onSpeechClick?: () => void;
   onTeammateClick: (anchor: DOMRect) => void;
   onSuggestBubbleClick: () => void;
   showRankedBars?: boolean;
   rankedCups?: number;
   rankedPeakCups?: number;
 }) {
+  const { t } = useI18n();
   const brawlerW = compact ? 243 : 270;
   const brawlerH = compact ? 259 : 288;
   const b = getBrawlerById(mate.brawlerId);
@@ -2851,6 +3157,46 @@ function PartySlotArea({
             />
           </div>
         )}
+        {modeSuggest && (
+          <div
+            style={{
+              position: "absolute",
+              left: "100%",
+              top: "14%",
+              marginLeft: compact ? 2 : 6,
+              transform: "translateY(-50%)",
+              zIndex: 9,
+              pointerEvents: "auto",
+            }}
+            onClick={e => e.stopPropagation()}
+          >
+            <PartyModeSuggestBubble
+              suggestion={modeSuggest}
+              compact={compact}
+              onClick={onModeSuggestClick}
+            />
+          </div>
+        )}
+        {speechMessage && (
+          <div
+            style={{
+              position: "absolute",
+              left: "100%",
+              top: "10%",
+              marginLeft: compact ? 2 : 6,
+              transform: "translateY(-50%)",
+              zIndex: 9,
+              pointerEvents: "auto",
+            }}
+            onClick={e => e.stopPropagation()}
+          >
+            <PartySpeechBubble
+              message={speechMessage}
+              compact={compact}
+              onClick={onSpeechClick}
+            />
+          </div>
+        )}
         <div
           onClick={(e) => e.stopPropagation()}
           style={{
@@ -2880,6 +3226,15 @@ function PartySlotArea({
           }}>
             {mate.username}
           </div>
+          {showLeaderCrown && (
+            <div style={{
+              fontSize: compact ? 13 : 16,
+              lineHeight: 1,
+              filter: "drop-shadow(0 2px 6px rgba(0,0,0,0.75))",
+            }}>
+              👑
+            </div>
+          )}
           <div style={{
             display: "inline-flex",
             alignItems: "center",
@@ -2916,7 +3271,7 @@ function PartySlotArea({
               fontSize: compact ? 11 : 12,
               fontWeight: 800,
             }}>
-              ★ {mateStars}/6
+              <EmojiIcon emoji="★" size={18} /> {mateStars}/6
             </span>
           </div>
         </div>
@@ -2934,7 +3289,8 @@ function PartySlotArea({
           size={brawlerW}
         />
         {showReadyBadge && <PartyReadyBadge compact={compact} />}
-        {!showReadyBadge && activityLabel && (
+        {!showReadyBadge && showOfflineOverlay && <PartyOfflineBadge compact={compact} />}
+        {!showReadyBadge && !showOfflineOverlay && activityLabel && (
           <PartyActivityBadge compact={compact} label={activityLabel} />
         )}
       </div>
@@ -3060,7 +3416,7 @@ function SideButton({
             fontSize: iconPx * 0.55,
             lineHeight: 1,
             zIndex: 2,
-          }}>{icon}</span>
+          }}><EmojiIcon emoji={icon} size={Math.round(iconPx * 0.55)} /></span>
         )}
       </div>
       {!hideLabel && (
@@ -3091,7 +3447,7 @@ function SideButton({
           padding: compact ? "1px 5px" : "2px 7px",
           letterSpacing: 0.4,
           boxShadow: "0 0 14px rgba(105,240,174,0.95), 0 0 24px rgba(105,240,174,0.45)",
-        }}>{t("common.gift")}</span>
+        }}><Tr id="common.gift" /></span>
       )}
       {dealsNewTag && (
         <span className="no-ui-shear" style={{
@@ -3108,44 +3464,9 @@ function SideButton({
           padding: compact ? "1px 5px" : "2px 7px",
           letterSpacing: 0.4,
           boxShadow: "0 0 14px rgba(255,23,68,0.95), 0 0 24px rgba(255,23,68,0.45)",
-        }}>{t("common.new")}</span>
+        }}><Tr id="common.new" /></span>
       )}
       <NotificationBadge count={badge ?? 0} notifyCorner={notifyCorner} />
     </button>
-  );
-}
-
-// Small red circular indicator showing the number of unclaimed/unread items.
-// Positioned in the top-right corner of any `position: relative` container.
-// Renders nothing when count is 0 so it disappears once everything is claimed.
-function NotificationBadge({
-  count, style, notifyCorner = "top-right",
-}: { count: number; style?: CSSProperties; notifyCorner?: NotifyCorner }) {
-  if (!count || count <= 0) return null;
-  const display = count > 99 ? "99+" : String(count);
-  return (
-    <span
-      className="no-ui-shear"
-      style={{
-        position: "absolute",
-        ...cornerBadgeStyle(notifyCorner),
-        minWidth: 20, height: 20,
-        padding: "0 6px",
-        borderRadius: 10,
-        background: "linear-gradient(135deg, #FF1744, #D50000)",
-        border: "2px solid #160048",
-        color: "white",
-        fontSize: 11, fontWeight: 900, letterSpacing: 0,
-        display: "inline-flex", alignItems: "center", justifyContent: "center",
-        boxShadow: "0 0 12px rgba(255,23,68,0.85), 0 0 22px rgba(255,23,68,0.35)",
-        animation: "pulse 1.4s ease-in-out infinite",
-        pointerEvents: "none",
-        zIndex: 12,
-        lineHeight: 1,
-        ...style,
-      }}
-    >
-      {display}
-    </span>
   );
 }

@@ -23,6 +23,7 @@ import {
   getPartyCount,
   memberSlotsForMaxParty,
   partyModeFromProfile,
+  type PartyModeSelection,
   type PartySlotId,
 } from "./partyConfig";
 import { playAgainOnResultExit } from "./battleTeamPlayAgain";
@@ -121,6 +122,8 @@ export interface PartyRoom {
   chat?: PartyChatMessage[];
   /** Ожидающие заявки на вступление (лидер решает). */
   joinRequests?: PartyJoinRequest[];
+  /** Режим лидера — для проверки вместимости у игроков без локального профиля лидера. */
+  leaderModeSelection?: PartyModeSelection;
 }
 
 export type PartyMatchmakingStatus = "searching" | "complete" | "cancelled";
@@ -187,10 +190,20 @@ function readParties(): Record<string, PartyRoom> {
 }
 
 function writeParties(all: Record<string, PartyRoom>) {
-  localStorage.setItem(PARTIES_KEY, JSON.stringify(all));
+  const me = getCurrentProfile();
+  const myId = me?.playerId ? normalizePlayerIdQuery(me.playerId) : "";
+  const stamped: Record<string, PartyRoom> = {};
+  for (const [code, room] of Object.entries(all)) {
+    let r = room;
+    if (myId && normalizePlayerIdQuery(r.leaderPlayerId) === myId && me) {
+      r = { ...r, leaderModeSelection: partyModeFromProfile(me) };
+    }
+    stamped[code] = r;
+  }
+  localStorage.setItem(PARTIES_KEY, JSON.stringify(stamped));
   emitPartyChanged();
   if (typeof window !== "undefined") {
-    void import("../cloud/partyServerBootstrap").then(({ onPartiesWritten }) => onPartiesWritten(all));
+    void import("../cloud/partyServerBootstrap").then(({ onPartiesWritten }) => onPartiesWritten(stamped));
   }
 }
 
@@ -337,6 +350,7 @@ function ensureMyParty(): PartyRoom {
     leaderPlayerId: myId,
     members: [],
     createdAt: Date.now(),
+    leaderModeSelection: partyModeFromProfile(me),
   };
   all[code] = room;
   writeParties(all);
@@ -353,12 +367,16 @@ function normalizePartySlot(slot: string | undefined): PartySlot {
 }
 
 function maxMembersForRoom(room: PartyRoom): number {
+  if (room.leaderModeSelection) {
+    return getMaxPartySize(room.leaderModeSelection);
+  }
   const leader = getProfileByPlayerId(room.leaderPlayerId);
-  return getMaxPartySize(partyModeFromProfile(leader));
+  if (leader) return getMaxPartySize(partyModeFromProfile(leader));
+  return 3;
 }
 
 function roomIsFull(room: PartyRoom): boolean {
-  return room.members.length >= Math.max(0, maxMembersForRoom(room) - 1);
+  return getPartyCount(room.members.length) >= maxMembersForRoom(room);
 }
 
 /** Команда заполнена по лимиту выбранного режима лидера. */
@@ -1981,12 +1999,6 @@ export function isPartyMemberOnline(playerId: string): boolean {
     return true;
   }
 
-  const room = getMyPartyRoom();
-  const inMyParty = !!room?.members.some(m => normalizePlayerIdQuery(m.playerId) === id);
-  if (inMyParty && isTestFriendPlayerId(id)) {
-    return true;
-  }
-
   const pr = getPresenceForPlayerId(id);
   return pr.online && pr.screen !== "offline";
 }
@@ -2029,7 +2041,7 @@ export async function requestJoinParty(codeInput: string): Promise<{ success: bo
   }
 
   const { isOnlinePartySyncEnabled, hydratePartyFromServer, wakePartyServer } = await import("../cloud/partyServerSync");
-  if (isOnlinePartySyncEnabled() && !getPartyRoom(code)) {
+  if (isOnlinePartySyncEnabled()) {
     const awake = await wakePartyServer(45_000);
     if (!awake) {
       return { success: false, error: "Сервер команд не отвечает. Подождите минуту и попробуйте снова." };
@@ -2042,7 +2054,7 @@ export async function requestJoinParty(codeInput: string): Promise<{ success: bo
       }
       if (i < 2) await new Promise((r) => setTimeout(r, 1200));
     }
-    if (!hydrated) {
+    if (!hydrated && !getPartyRoom(code)) {
       return { success: false, error: "Команда не найдена на сервере" };
     }
   }
@@ -2099,8 +2111,7 @@ function acceptJoinRequestInRoom(code: string, fromPlayerId: string): { success:
   if (!req) return { success: false, error: "Заявка не найдена" };
 
   const prof = getProfileByPlayerId(fid);
-  if (!prof) return { success: false, error: "Игрок не найден" };
-  if ((prof as { partyCode?: string | null }).partyCode) {
+  if (prof && (prof as { partyCode?: string | null }).partyCode) {
     patchPartyRoom(room.code, r => ({
       ...r,
       joinRequests: (r.joinRequests ?? []).filter(x => normalizePlayerIdQuery(x.playerId) !== fid),
@@ -2110,8 +2121,8 @@ function acceptJoinRequestInRoom(code: string, fromPlayerId: string): { success:
 
   const member: PartyMember = {
     playerId: fid,
-    username: prof.username,
-    brawlerId: prof.selectedBrawlerId || req.brawlerId || "hana",
+    username: prof?.username ?? req.username,
+    brawlerId: prof?.selectedBrawlerId || req.brawlerId || "hana",
     slot: "left",
     joinedAt: Date.now(),
   };

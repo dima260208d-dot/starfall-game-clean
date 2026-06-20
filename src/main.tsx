@@ -22,10 +22,14 @@ async function boot() {
   const { initAccountCloudListeners } = await import("./utils/cloud/accountCloud");
   const { initPartyServerBootstrap } = await import("./utils/cloud/partyServerBootstrap");
   const { initPresenceServerBootstrap } = await import("./utils/cloud/presenceServerBootstrap");
+  const { initFriendServerBootstrap } = await import("./utils/cloud/friendServerBootstrap");
+  const { purgeTestFriendsFromCurrentUser } = await import("./utils/social/seedTestFriends");
   initProfileCloudListeners();
   initAccountCloudListeners();
   initPartyServerBootstrap();
   initPresenceServerBootstrap();
+  initFriendServerBootstrap();
+  purgeTestFriendsFromCurrentUser();
 
   createRoot(document.getElementById("root")!).render(
     <I18nProvider>

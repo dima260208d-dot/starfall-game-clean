@@ -21,7 +21,16 @@ export type PreloadProgressCallback = (ratio: number) => void;
 
 type WeightedTask = { weight: number; run: () => Promise<unknown> };
 
+const PRELOAD_TASK_TIMEOUT_MS = 90_000;
+
 let battleAssetsReady = false;
+
+function withPreloadTimeout<T>(promise: Promise<T>, ms = PRELOAD_TASK_TIMEOUT_MS): Promise<T | void> {
+  return Promise.race([
+    promise,
+    new Promise<void>((resolve) => setTimeout(resolve, ms)),
+  ]);
+}
 
 export function isBattleAssetsReady(): boolean {
   return battleAssetsReady;
@@ -53,7 +62,7 @@ async function runWeightedPreload(
   await Promise.all(
     tasks.map(async (task) => {
       try {
-        await task.run();
+        await withPreloadTimeout(task.run());
       } catch {
         /* отдельный ассет не должен ронять весь бой */
       }
@@ -67,7 +76,13 @@ async function runWeightedPreload(
 
 function loadGlbQuiet(url: string): Promise<void> {
   return new Promise((resolve) => {
-    new GLTFLoader().load(url, () => resolve(), undefined, () => resolve());
+    const timer = window.setTimeout(() => resolve(), 30_000);
+    new GLTFLoader().load(
+      url,
+      () => { window.clearTimeout(timer); resolve(); },
+      undefined,
+      () => { window.clearTimeout(timer); resolve(); },
+    );
   });
 }
 

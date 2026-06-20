@@ -9,8 +9,6 @@ import {
   getMyPartyCode,
   cancelMyPartyJoinRequest,
   cancelOutgoingInviteForTarget,
-  getDemoOnlinePartyGroup,
-  getDemoOnlinePartyGroupFull,
   getMyPartyRoom,
   getOnlinePartyGroupsForPanel,
   getOutgoingInviteTo,
@@ -70,14 +68,7 @@ export default function PartySidePanel({ inviteSlot, onClose, onViewProfile, onS
   const [actionPlayer, setActionPlayer] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
   const { groups, soloFriends } = useMemo(() => getOnlinePartyGroupsForPanel(), [tick]);
-  const displayGroups = useMemo(
-    () => [
-      getDemoOnlinePartyGroup(),
-      getDemoOnlinePartyGroupFull(),
-      ...groups.filter(g => !g.isDemo),
-    ],
-    [groups],
-  );
+  const displayGroups = groups;
   const myPartyCode = getMyPartyCode()?.toUpperCase() ?? null;
   const myRoom = getMyPartyRoom();
   const teamFull = myRoom ? isPartyRoomAtCapacity(myRoom) : false;
@@ -104,10 +95,10 @@ export default function PartySidePanel({ inviteSlot, onClose, onViewProfile, onS
   };
 
   const handleJoinCode = () => {
-    void joinPartyByCode(codeInput).then((r) => {
-      setMsg(r.success ? t("party.joinedTeam") : (r.error ?? t("common.error")));
-      if (r.success) onClose();
-      setTimeout(() => setMsg(""), 2200);
+    void requestJoinParty(codeInput).then((r) => {
+      setMsg(r.success ? t("party.joinRequestSent") : (r.error ?? t("common.error")));
+      setTick(t => t + 1);
+      setTimeout(() => setMsg(""), 2400);
     });
   };
 

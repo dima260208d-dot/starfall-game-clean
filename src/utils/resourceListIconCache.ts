@@ -8,6 +8,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { fixCharacterSkinnedMeshes } from "./gltfSkinnedMeshFix";
 import { applyCanvasBitmapDrawPolicy, applyGLTFTexturePolicy } from "./texturePolicy";
 import { registerWebGLCleanup } from "./devWebGLRecovery";
+import { getHeavyAssetBaseUrl } from "../lib/assetBase";
 
 export type ResourceListIconKind = "coins" | "gems" | "powerPoints";
 
@@ -61,9 +62,8 @@ export function subscribeResourceListIcons(listener: () => void): () => void {
 
 let bakerRenderer: THREE.WebGLRenderer | null = null;
 
-function getBaseUrl(): string {
-  const base: string = ((import.meta as any).env?.BASE_URL ?? "/");
-  return base.endsWith("/") ? base : `${base}/`;
+function getModelBaseUrl(): string {
+  return getHeavyAssetBaseUrl();
 }
 
 function getRenderer(): THREE.WebGLRenderer | null {
@@ -111,12 +111,14 @@ function bakeKind(
   kind: ResourceListIconKind,
 ): Promise<HTMLCanvasElement> {
   const cfg = CFG[kind];
-  const url = `${getBaseUrl()}${cfg.model.replace(/^\//, "")}`;
+  const url = `${getModelBaseUrl()}${cfg.model.replace(/^\//, "")}`;
 
   return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error(`resource icon timeout: ${url}`)), 30_000);
     new GLTFLoader().load(
       url,
       (gltf) => {
+        window.clearTimeout(timer);
         try {
           const group = normalizeModel(gltf.scene.clone(true), renderer);
           group.rotation.y = cfg.rotY;
@@ -156,7 +158,10 @@ function bakeKind(
         }
       },
       undefined,
-      reject,
+      (err) => {
+        window.clearTimeout(timer);
+        reject(err);
+      },
     );
   });
 }
@@ -198,7 +203,7 @@ export function loadResourceListIcons(): Promise<void> {
 
 /** Static PNG paths (optional baked assets in public/). */
 export function resourceListIconAssetPath(kind: ResourceListIconKind): string {
-  const base = getBaseUrl();
+  const base = ((import.meta as any).env?.BASE_URL ?? "/").replace(/\/?$/, "/");
   const file = kind === "coins" ? "resource-coins.png"
     : kind === "gems" ? "resource-gems.png"
       : "resource-power.png";
